@@ -31,11 +31,11 @@ type GangPolicy struct {
 	// ```yaml
 	// gangPolicy:
 	//   minRoleReplicas:
-	//     Prefill: 1
-	//     Decode: 1
+	//     prefill: 1
+	//     decode: 1
 	// ```
 	// It will result in the following behavior:
-	// At least one prefill and one decode must be scheduled before any of the pods in the serving group can run.\
+	// At least one prefill and one decode must be scheduled before any of the pods in the serving group can run.
 	// And pods within a role must be scheduled together.
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf", message="minRoleReplicas is immutable"
