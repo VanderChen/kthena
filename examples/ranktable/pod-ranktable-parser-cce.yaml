@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ascend-pod-ranktable-parser-cce
+  namespace: kthena-system
+  labels:
+    app.kubernetes.io/component: pod-ranktable-parser
+    modelserving.volcano.sh/group-name: modelserving-controller
+    parser-type: cce
+data:
+  # Annotation name for CCE Ascend 1980 configuration
+  annotation-name: "cce.kubectl.kubernetes.io/ascend-1980-configuration"
+  
+  # Pod Ranktable Parser Template (Go Template)
+  # Input: Pod annotation string (JSON format)
+  # Output: YAML format PodRanktableData
+  parser-template: |
+    {{- $data := . | fromJson -}}
+    podName: {{ $data.pod_name | quote }}
+    serverId: {{ $data.server_id | quote }}
+    devices:
+    {{- range $data.devices }}
+      - deviceId: {{ .device_id | quote }}
+        deviceIp: {{ .device_ip | quote }}
+    {{- end }}

@@ -17,13 +17,20 @@ limitations under the License.
 package webhook
 
 import (
+	"context"
+	"encoding/json"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins/ranktable"
+	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestValidPodNameLength(t *testing.T) {
@@ -913,4 +920,171 @@ func int32Ptr(i int32) *int32 {
 
 func int32PtrNil() *int32 {
 	return nil
+}
+
+func TestValidateRanktablePlugin(t *testing.T) {
+	// Setup fake client
+	kubeClient := fake.NewSimpleClientset()
+	v := NewModelServingValidator(kubeClient)
+
+	// Create a valid template ConfigMap in default namespace
+	templateName := "valid-template"
+	_, err := kubeClient.CoreV1().ConfigMaps("default").Create(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: v1.ObjectMeta{
+			Name:      templateName,
+			Namespace: "default",
+		},
+	}, v1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Helper to create JSON config
+	createConfig := func(template string) *apiextensionsv1.JSON {
+		cfg := ranktable.RanktableConfig{
+			Template: template,
+		}
+		bytes, _ := json.Marshal(cfg)
+		return &apiextensionsv1.JSON{Raw: bytes}
+	}
+
+	tests := []struct {
+		name          string
+		ms            *workloadv1alpha1.ModelServing
+		setupEnv      func()
+		teardownEnv   func()
+		expectedError bool
+		errorMsg      string
+	}{
+		{
+			name: "valid ranktable plugin config",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{
+						{
+							Name:   ranktable.PluginName,
+							Config: createConfig(templateName),
+						},
+					},
+				},
+			},
+			expectedError: false,
+		},
+		{
+			name: "missing template config",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{
+						{
+							Name:   ranktable.PluginName,
+							Config: createConfig(""),
+						},
+					},
+				},
+			},
+			expectedError: true,
+			errorMsg:      "ranktable template is required",
+		},
+		{
+			name: "non-existent template configmap",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{
+						{
+							Name:   ranktable.PluginName,
+							Config: createConfig("non-existent-template"),
+						},
+					},
+				},
+			},
+			expectedError: true,
+			errorMsg:      "ranktable template ConfigMap 'non-existent-template' not found",
+		},
+		{
+			name: "valid template in custom namespace",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{
+						{
+							Name:   ranktable.PluginName,
+							Config: createConfig("custom-template"),
+						},
+					},
+				},
+			},
+			setupEnv: func() {
+				os.Setenv("POD_NAMESPACE", "custom-ns")
+				_, _ = kubeClient.CoreV1().ConfigMaps("custom-ns").Create(context.Background(), &corev1.ConfigMap{
+					ObjectMeta: v1.ObjectMeta{
+						Name:      "custom-template",
+						Namespace: "custom-ns",
+					},
+				}, v1.CreateOptions{})
+			},
+			teardownEnv: func() {
+				os.Unsetenv("POD_NAMESPACE")
+				_ = kubeClient.CoreV1().ConfigMaps("custom-ns").Delete(context.Background(), "custom-template", v1.DeleteOptions{})
+			},
+			expectedError: false,
+		},
+		{
+			name: "missing template in custom namespace",
+			ms: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Plugins: []workloadv1alpha1.PluginSpec{
+						{
+							Name:   ranktable.PluginName,
+							Config: createConfig("missing-custom-template"),
+						},
+					},
+				},
+			},
+			setupEnv: func() {
+				os.Setenv("POD_NAMESPACE", "custom-ns")
+			},
+			teardownEnv: func() {
+				os.Unsetenv("POD_NAMESPACE")
+			},
+			expectedError: true,
+			errorMsg:      "ranktable template ConfigMap 'missing-custom-template' not found in namespace 'custom-ns'",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setupEnv != nil {
+				tt.setupEnv()
+			}
+			if tt.teardownEnv != nil {
+				defer tt.teardownEnv()
+			}
+
+			errs := v.validateRanktablePlugin(context.Background(), tt.ms)
+			if tt.expectedError {
+				assert.NotEmpty(t, errs)
+				found := false
+				for _, err := range errs {
+					if err.Detail != "" && contains(err.Detail, tt.errorMsg) {
+						found = true
+						break
+					}
+				}
+				// If detail check failed, check string representation or fallback
+				if !found {
+					// re-check roughly
+					for _, err := range errs {
+						if contains(err.Error(), tt.errorMsg) {
+							found = true
+							break
+						}
+					}
+				}
+				assert.True(t, found, "Expected error message '%s' not found in %v", tt.errorMsg, errs)
+			} else {
+				assert.Empty(t, errs)
+			}
+		})
+	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) >= len(substr) && s[0:len(substr)] == substr || (len(s) > len(substr) && contains(s[1:], substr))
 }

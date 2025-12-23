@@ -50,6 +50,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	_ "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins/ranktable"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
@@ -72,6 +73,8 @@ type ModelServingController struct {
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
 	servicesInformer      cache.SharedIndexInformer
+	configMapsLister      listerv1.ConfigMapLister
+	configMapsInformer    cache.SharedIndexInformer
 	modelServingLister    listerv1alpha1.ModelServingLister
 	modelServingsInformer cache.SharedIndexInformer
 
@@ -98,6 +101,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	)
 	podsInformer := kubeInformerFactory.Core().V1().Pods()
 	servicesInformer := kubeInformerFactory.Core().V1().Services()
+	configMapsInformer := kubeInformerFactory.Core().V1().ConfigMaps()
 	modelServingInformerFactory := informersv1alpha1.NewSharedInformerFactory(modelServingClient, 0)
 	modelServingInformer := modelServingInformerFactory.Workload().V1alpha1().ModelServings()
 
@@ -126,6 +130,8 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
 		servicesInformer:      servicesInformer.Informer(),
+		configMapsLister:      configMapsInformer.Lister(),
+		configMapsInformer:    configMapsInformer.Informer(),
 		modelServingLister:    modelServingInformer.Lister(),
 		modelServingsInformer: modelServingInformer.Informer(),
 		// nolint
@@ -536,6 +542,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	// start informers
 	go c.podsInformer.RunWithContext(ctx)
 	go c.servicesInformer.RunWithContext(ctx)
+	go c.configMapsInformer.RunWithContext(ctx)
 	go c.modelServingsInformer.RunWithContext(ctx)
 
 	if err := c.podGroupManager.Run(ctx); err != nil {
@@ -545,6 +552,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
+		c.configMapsInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
 	)
 
@@ -971,6 +979,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	if c.isRoleDeleted(ms, groupName, roleName, roleID) {
 		// role has been deleted, so the storage needs to be updated and need to reconcile.
 		klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, groupName)
+
 		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
 		c.enqueueModelServing(ms)
 	}
@@ -1054,12 +1063,15 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	}
 	if chain != nil {
 		if err := chain.OnPodReady(context.Background(), &plugins.HookRequest{
-			ModelServing: ms,
-			ServingGroup: servingGroupName,
-			RoleName:     utils.GetRoleName(newPod),
-			RoleID:       utils.GetRoleID(newPod),
-			IsEntry:      newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
-			Pod:          newPod,
+			ModelServing:    ms,
+			ServingGroup:    servingGroupName,
+			RoleName:        utils.GetRoleName(newPod),
+			RoleID:          utils.GetRoleID(newPod),
+			IsEntry:         newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
+			Pod:             newPod,
+			PodLister:       c.podsLister,
+			ConfigMapLister: c.configMapsLister,
+			KubeClient:      c.kubeClientSet,
 		}); err != nil {
 			return err
 		}
@@ -1350,6 +1362,21 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 		if c.isServingGroupDeleted(ms, servingGroupName) {
 			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
 			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
+
+			chain, err := c.buildPluginChain(ms)
+			if err != nil {
+				klog.Errorf("failed to build plugin chain: %v", err)
+			} else if chain != nil {
+				if err := chain.OnServingGroupDelete(context.TODO(), &plugins.HookRequest{
+					ModelServing:    ms,
+					ServingGroup:    servingGroupName,
+					KubeClient:      c.kubeClientSet,
+					ConfigMapLister: c.configMapsLister,
+				}); err != nil {
+					klog.Errorf("failed to execute OnServingGroupDelete hook: %v", err)
+				}
+			}
+
 			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 			c.enqueueModelServing(ms)
 		}
@@ -1363,6 +1390,23 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 			if c.isRoleDeleted(ms, servingGroupName, roleName, roleID) {
 				// role has been deleted, so the storage needs to be updated and need to reconcile.
 				klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
+
+				chain, err := c.buildPluginChain(ms)
+				if err != nil {
+					klog.Errorf("failed to build plugin chain: %v", err)
+				} else if chain != nil {
+					if err := chain.OnRoleDelete(context.TODO(), &plugins.HookRequest{
+						ModelServing:    ms,
+						ServingGroup:    servingGroupName,
+						RoleName:        roleName,
+						RoleID:          roleID,
+						KubeClient:      c.kubeClientSet,
+						ConfigMapLister: c.configMapsLister,
+					}); err != nil {
+						klog.Errorf("failed to execute OnRoleDelete hook: %v", err)
+					}
+				}
+
 				c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
 				c.enqueueModelServing(ms)
 			}
@@ -1878,12 +1922,15 @@ func (c *ModelServingController) createPod(
 ) error {
 	if chain != nil {
 		req := &plugins.HookRequest{
-			ModelServing: ms,
-			ServingGroup: servingGroupName,
-			RoleName:     roleName,
-			RoleID:       roleID,
-			IsEntry:      isEntry,
-			Pod:          pod,
+			ModelServing:    ms,
+			ServingGroup:    servingGroupName,
+			RoleName:        roleName,
+			RoleID:          roleID,
+			IsEntry:         isEntry,
+			Pod:             pod,
+			PodLister:       c.podsLister,
+			ConfigMapLister: c.configMapsLister,
+			KubeClient:      c.kubeClientSet,
 		}
 		if err := chain.OnPodCreate(ctx, req); err != nil {
 			return fmt.Errorf("execute OnPodCreate failed for %s pod %s: %v", roleKind, pod.Name, err)

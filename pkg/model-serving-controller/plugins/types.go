@@ -20,18 +20,23 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
+	listerv1 "k8s.io/client-go/listers/core/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
 // HookRequest carries the context for plugin hook invocations.
 type HookRequest struct {
-	ModelServing *workloadv1alpha1.ModelServing
-	ServingGroup string
-	RoleName     string
-	RoleID       string
-	IsEntry      bool
-	Pod          *corev1.Pod
+	ModelServing    *workloadv1alpha1.ModelServing
+	ServingGroup    string
+	RoleName        string
+	RoleID          string
+	IsEntry         bool
+	Pod             *corev1.Pod
+	PodLister       listerv1.PodLister
+	ConfigMapLister listerv1.ConfigMapLister
+	KubeClient      kubernetes.Interface
 }
 
 // Plugin defines the lifecycle hooks a plugin may implement.
@@ -41,4 +46,8 @@ type Plugin interface {
 	OnPodCreate(ctx context.Context, req *HookRequest) error
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
 	OnPodReady(ctx context.Context, req *HookRequest) error
+	// OnRoleDelete is invoked when all pods in a role are deleted.
+	OnRoleDelete(ctx context.Context, req *HookRequest) error
+	// OnServingGroupDelete is invoked when a serving group is deleted.
+	OnServingGroupDelete(ctx context.Context, req *HookRequest) error
 }
