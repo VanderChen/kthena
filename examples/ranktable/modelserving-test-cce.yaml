@@ -1,0 +1,40 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: test-ranktable-cce
+  namespace: default
+  annotations:
+    # Specify the CCE ranktable template to use
+    kthena.io/ranktable-template: "ascend-ranktable-template-mindie-role-cce"
+spec:
+  replicas: 1  # 1 serving group
+  template:
+    gangPolicy:
+      minRoleReplicas:
+        inference: 1
+    roles:
+      - name: inference
+        replicas: 1  # 1 role replica
+        entryTemplate:  # 1 entry pod
+          spec:
+            containers:
+              - name: entry
+                image: alpine:latest
+                command: ["sleep", "infinity"]
+                resources:
+                  limits:
+                    huawei.com/ascend-1980: "8"
+                  requests:
+                    huawei.com/ascend-1980: "8"
+        workerReplicas: 1  # 1 worker pod
+        workerTemplate:
+          spec:
+            containers:
+              - name: worker
+                image: alpine:latest
+                command: ["sleep", "infinity"]
+                resources:
+                  limits:
+                    huawei.com/ascend-1980: "8"
+                  requests:
+                    huawei.com/ascend-1980: "8"

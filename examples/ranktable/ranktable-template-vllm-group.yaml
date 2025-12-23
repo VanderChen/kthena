@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ascend-ranktable-template-vllm-group
+  namespace: kthena-system
+  labels:
+    app.kubernetes.io/component: ranktable-template
+    inference-engine: vllm-ascend
+    ranktable-level: group
+data:
+  # Inference engine type: mindie or vllm-ascend
+  inference-engine: "vllm-ascend"
+  
+  # Ranktable generation level: role or group
+  ranktable-level: "group"
+  
+  # Reference to Pod Ranktable Parser Template
+  pod-parser-template: "ascend-pod-ranktable-parser-standard"
+  
+  # Role/Group Ranktable Generation Template (Go Template)
+  # Input: RanktableTemplateData structure
+  # Output: Final ranktable JSON
+  ranktable-template: |
+    {
+      "version": "1.0",
+      "server_count": "{{ .ServerCount }}",
+      "server_list": [
+        {{- range $serverIdx, $server := .Servers }}
+        {{- if $serverIdx }},{{ end }}
+        {
+          "server_id": {{ $server.ServerId | quote }},
+          "device": [
+            {{- range $devIdx, $device := $server.Devices }}
+            {{- if $devIdx }},{{ end }}
+            {
+              "device_id": {{ $device.DeviceId | quote }},
+              "device_ip": {{ $device.DeviceIp | quote }},
+              "rank_id": {{ $device.RankId | quote }}
+            }
+            {{- end }}
+          ]
+        }
+        {{- end }}
+      ],
+      "status": "completed"
+    }
+  
+  # ConfigMap mount path
+  mount-path: "/etc/ascend/ranktable"
+  
+  # Ranktable filename
+  filename: "ranktable.json"
+  
+  # Init container configuration (optional, defaults shown)
+  init-container-image: "busybox:latest"
+  init-container-name: "wait-ranktable"

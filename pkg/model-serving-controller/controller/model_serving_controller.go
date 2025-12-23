@@ -49,6 +49,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/ranktable"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -63,6 +64,7 @@ type ModelServingController struct {
 
 	syncHandler           func(ctx context.Context, msKey string) error
 	podGroupManager       *podgroupmanager.Manager
+	ranktableController   *ranktable.RanktableController
 	podsLister            listerv1.PodLister
 	podsInformer          cache.SharedIndexInformer
 	servicesLister        listerv1.ServiceLister
@@ -117,6 +119,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		kubeClientSet:         kubeClientSet,
 		modelServingClient:    modelServingClient,
 		podGroupManager:       podgroupmanager.NewManager(kubeClientSet, volcanoClient, apiextClient, store),
+		ranktableController:   ranktable.NewrRanktableController(kubeClientSet),
 		podsLister:            podsInformer.Lister(),
 		podsInformer:          podsInformer.Informer(),
 		servicesLister:        servicesInformer.Lister(),
@@ -423,6 +426,19 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
 	revision := utils.Revision(copy.Spec.Template.Roles)
+
+	// Ranktable Manager - ensure ranktable ConfigMaps are created
+	if c.ranktableController.NeedsRanktable(ms) {
+		template, err := c.ranktableController.GetRanktableTemplate(ctx, ms)
+		if err != nil {
+			klog.Errorf("Failed to get ranktable template for ModelServing %s/%s: %v", ms.Namespace, mi.Name, err)
+		} else {
+			if err := c.ranktableController.EnsureRanktableConfigMaps(ctx, ms, template); err != nil {
+				klog.Errorf("Failed to ensure ranktable ConfigMaps for ModelServing %s/%s: %v", mi.Namespace, mi.Name, err)
+			}
+		}
+	}
+
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
 	}
@@ -437,6 +453,22 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 
 	if err := c.manageHeadlessService(ctx, ms); err != nil {
 		return fmt.Errorf("cannot manage ModelServing: %v", err)
+	}
+
+	// Ranktable Manager - generate ranktables if pods are ready
+	if c.ranktableController.NeedsRanktable(ms) {
+		template, err := c.ranktableController.GetRanktableTemplate(ctx, ms)
+		if err == nil {
+			// Get all pods for this ModelServing
+			pods, err := c.podsLister.Pods(ms.Namespace).List(labels.SelectorFromSet(map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+			}))
+			if err == nil && len(pods) > 0 {
+				if err := c.ranktableController.GenerateAndUpdateRanktables(ctx, ms, template, pods); err != nil {
+					klog.Errorf("Failed to generate ranktables for ModelServing %s/%s: %v", ms.Namespace, mi.Name, err)
+				}
+			}
+		}
 	}
 
 	if err := c.UpdateModelServingStatus(ms, revision); err != nil {
@@ -627,6 +659,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		// Create ControllerRevision when scaling up with a new revision
 		// This is done once before the loop since newRevision and templateData are the same for all new groups
 		templateData := ms.Spec.Template.Roles
+
 		_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, newRevision, templateData)
 		if err != nil {
 			klog.Warningf("Failed to create ControllerRevision for new revision %s: %v", newRevision, err)
@@ -1646,6 +1679,19 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
 		}
 	}
+
+	// Inject ranktable init container and volume if needed
+	if c.ranktableController.NeedsRanktable(ms) {
+		template, err := c.ranktableController.GetRanktableTemplate(ctx, ms)
+		if err == nil {
+			cmName := c.ranktableController.GetRanktableConfigMapName(ms, entryPod, template.Level)
+			c.ranktableController.InjectRanktableMount(entryPod, template, cmName)
+		} else {
+			klog.Errorf("Failed to get ranktable template when creating worker pod: %v", err)
+		}
+	}
+
+
 	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return fmt.Errorf("failed to create entry pod %s: %v", entryPod.Name, err)
@@ -1667,6 +1713,18 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 				return fmt.Errorf("execute OnPodCreate failed for worker pod %s: %v", workerPod.Name, err)
 			}
 		}
+
+		// Inject ranktable init container and volume if needed
+		if c.ranktableController.NeedsRanktable(ms) {
+			template, err := c.ranktableController.GetRanktableTemplate(ctx, ms)
+			if err == nil {
+				cmName := c.ranktableController.GetRanktableConfigMapName(ms, workerPod, template.Level)
+				c.ranktableController.InjectRanktableMount(workerPod, template, cmName)
+			} else {
+				klog.Errorf("Failed to get ranktable template when creating worker pod: %v", err)
+			}
+		}
+
 		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("failed to create worker pod %s: %v", workerPod.Name, err)
