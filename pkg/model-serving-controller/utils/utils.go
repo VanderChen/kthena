@@ -497,6 +497,44 @@ func ParseModelServingFromRequest(r *http.Request) (*admissionv1.AdmissionReview
 	return &admissionReview, &ms, nil
 }
 
+// ParseConfigMapFromRequest parses the HTTP request and extracts the AdmissionReview and ConfigMap.
+func ParseConfigMapFromRequest(r *http.Request) (*admissionv1.AdmissionReview, *corev1.ConfigMap, error) {
+	// Verify the content type is accurate
+	contentType := r.Header.Get("Content-Type")
+	if contentType != "application/json" {
+		return nil, nil, fmt.Errorf("invalid Content-Type, expected application/json, got %s", contentType)
+	}
+
+	var body []byte
+	if r.Body != nil {
+		defer r.Body.Close()
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to read request body: %v", err)
+		}
+		body = data
+	}
+
+	// Parse the AdmissionReview request
+	var admissionReview admissionv1.AdmissionReview
+	if err := json.Unmarshal(body, &admissionReview); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode body: %v", err)
+	}
+
+	var cm corev1.ConfigMap
+	// For DELETE operations, the Object might be empty, so we look at OldObject
+	rawObj := admissionReview.Request.Object.Raw
+	if len(rawObj) == 0 {
+		rawObj = admissionReview.Request.OldObject.Raw
+	}
+
+	if err := json.Unmarshal(rawObj, &cm); err != nil {
+		return nil, nil, fmt.Errorf("failed to decode ConfigMap: %v", err)
+	}
+
+	return &admissionReview, &cm, nil
+}
+
 // SendAdmissionResponse sends the AdmissionReview response back to the client
 func SendAdmissionResponse(w http.ResponseWriter, admissionReview *admissionv1.AdmissionReview) error {
 	// Send the response

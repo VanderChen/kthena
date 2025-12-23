@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ascend-ranktable-template-mindie-role-cce
+  namespace: kthena-system
+  labels:
+    app.kubernetes.io/component: ranktable-template
+    modelserving.volcano.sh/group-name: modelserving-controller
+    inference-engine: mindie
+    ranktable-level: role
+data:
+  # Inference engine type: mindie or vllm-ascend
+  inference-engine: "mindie"
+  
+  # Ranktable generation level: role or group
+  ranktable-level: "role"
+  
+  # Reference to Pod Ranktable Parser Template (CCE version)
+  pod-parser-template: "ascend-pod-ranktable-parser-cce"
+  
+  # Role/Group Ranktable Generation Template (Go Template)
+  # Input: RanktableTemplateData structure
+  # Output: Final ranktable JSON
+  ranktable-template: |
+    {
+      "version": "1.0",
+      "server_count": "{{ .ServerCount }}",
+      "server_list": [
+        {{- range $serverIdx, $server := .Servers }}
+        {{- if $serverIdx }},{{ end }}
+        {
+          "server_id": {{ $server.ServerId | quote }},
+          "device": [
+            {{- range $devIdx, $device := $server.Devices }}
+            {{- if $devIdx }},{{ end }}
+            {
+              "device_id": {{ $device.DeviceId | quote }},
+              "device_ip": {{ $device.DeviceIp | quote }},
+              "rank_id": {{ $device.RankId | quote }}
+            }
+            {{- end }}
+          ]
+        }
+        {{- end }}
+      ],
+      "status": "{{ .Status }}"
+    }
+  
+  # ConfigMap mount path
+  mount-path: "/etc/ascend/ranktable"
+  
+  # Ranktable filename
+  filename: "ranktable.json"

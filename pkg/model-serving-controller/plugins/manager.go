@@ -111,6 +111,38 @@ func (c *Chain) OnPodReady(ctx context.Context, req *HookRequest) error {
 	return nil
 }
 
+// OnRoleDelete executes plugins' role delete hooks in order.
+func (c *Chain) OnRoleDelete(ctx context.Context, req *HookRequest) error {
+	if c == nil {
+		return nil
+	}
+	for _, entry := range c.entries {
+		if !shouldRun(entry.spec, req) {
+			continue
+		}
+		if err := entry.plugin.OnRoleDelete(ctx, req); err != nil {
+			return fmt.Errorf("plugin %s OnRoleDelete: %w", entry.plugin.Name(), err)
+		}
+	}
+	return nil
+}
+
+// OnServingGroupDelete executes plugins' group delete hooks in order.
+func (c *Chain) OnServingGroupDelete(ctx context.Context, req *HookRequest) error {
+	if c == nil {
+		return nil
+	}
+	for _, entry := range c.entries {
+		if !shouldRun(entry.spec, req) {
+			continue
+		}
+		if err := entry.plugin.OnServingGroupDelete(ctx, req); err != nil {
+			return fmt.Errorf("plugin %s OnServingGroupDelete: %w", entry.plugin.Name(), err)
+		}
+	}
+	return nil
+}
+
 func matchesTarget(target workloadv1alpha1.PluginTarget, needle workloadv1alpha1.PluginTarget) bool {
 	return target == needle || target == workloadv1alpha1.PluginTargetAll
 }

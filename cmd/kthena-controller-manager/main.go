@@ -178,7 +178,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 	mux := http.NewServeMux()
 
-	modelServingValidator := modelservingwebhook.NewModelServingValidator()
+	modelServingValidator := modelservingwebhook.NewModelServingValidator(kubeClient)
 	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
@@ -186,6 +186,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	autoscalingPolicyValidator := modelboosterwebhook.NewAutoscalingPolicyValidator()
 	autoscalingPolicyMutator := modelboosterwebhook.NewAutoscalingPolicyMutator()
 	autoscalingBindingValidator := modelboosterwebhook.NewAutoscalingBindingValidator(kthenaClient)
+
 	mux.HandleFunc("/validate/modelbooster", modelValidator.Handle)
 	mux.HandleFunc("/mutate/modelbooster", modelMutator.Handle)
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)
