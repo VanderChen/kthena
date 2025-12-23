@@ -1,0 +1,27 @@
+apiVersion: workload.kthena.io/v1alpha1
+kind: ModelServing
+metadata:
+  name: qwen-inference
+  namespace: default
+  annotations:
+    # Specify the ranktable template to use
+    # The pod parser template will be automatically referenced from the ranktable template
+    kthena.io/ranktable-template: "ascend-ranktable-template-mindie-role"
+    # Optional: Override the ranktable level (role or group)
+    # kthena.io/ranktable-level: "role"
+spec:
+  replicas: 2
+  template:
+    roles:
+      - name: worker
+        replicas: 2
+        template:
+          spec:
+            containers:
+              - name: inference
+                image: ascend-inference:latest
+                resources:
+                  limits:
+                    ascend.com/npu: "8"
+                # Ranktable ConfigMap will be automatically mounted to /etc/ascend/ranktable
+                # The init container will wait for ranktable.json to be ready

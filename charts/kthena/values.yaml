@@ -3,8 +3,8 @@ workload:
   enabled: true
   controllerManager:
     image:
-      repository: ghcr.io/volcano-sh/kthena-controller-manager
-      tag: latest
+      repository: kthena-controller-manager
+      tag: "20260107"
       pullPolicy: IfNotPresent
     downloaderImage:
       repository: ghcr.io/volcano-sh/downloader
@@ -20,7 +20,7 @@ workload:
 
 networking:
   # enabled is a flag to enable or disable the networking subchart. Default is true.
-  enabled: true
+  enabled: false
   kthenaRouter:
     enabled: true
     port: 8080
