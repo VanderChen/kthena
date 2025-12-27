@@ -8,6 +8,8 @@ spec:
   selector:
     matchLabels:
       app: deepseek-r1-1-5b
+  # Kthena Router natively supports Gateway Inference Extension and does not require the Endpoint Picker Extension.
+  # It's just a placeholder for API validation.
   endpointPickerRef:
     name: deepseek-r1-1-5b
     port:
