@@ -21,36 +21,12 @@ type Registry struct {
 
 var DefaultRegistry = NewRegistry()
 
-func init() {
-	DefaultRegistry = NewRegistry()
-}
-
 func NewRegistry() *Registry {
 	return &Registry{factories: map[string]Factory{}}
 }
 
 func (r *Registry) Register(name string, factory Factory) {
 	r.factories[name] = factory
-}
-
-// Build constructs plugins from specs using the registered factories.
-func (r *Registry) Build(specs []workloadv1alpha1.PluginSpec) ([]Plugin, error) {
-	var plugins []Plugin
-	for _, spec := range specs {
-		if spec.Type != workloadv1alpha1.PluginTypeBuiltIn {
-			return nil, fmt.Errorf("plugin %s has unsupported type %s", spec.Name, spec.Type)
-		}
-		factory, ok := r.factories[spec.Name]
-		if !ok {
-			return nil, fmt.Errorf("plugin %s not registered", spec.Name)
-		}
-		p, err := factory(spec)
-		if err != nil {
-			return nil, fmt.Errorf("build plugin %s: %w", spec.Name, err)
-		}
-		plugins = append(plugins, p)
-	}
-	return plugins, nil
 }
 
 // entry couples the instantiated plugin with its spec for scope evaluation.
