@@ -48,7 +48,7 @@ func TestIsServingGroupOutdated(t *testing.T) {
 	ns := "test-ns"
 	groupName := "test-group"
 	group := datastore.ServingGroup{Name: groupName}
-	mi := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: ns}}
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: ns}}
 	newHash := "hash123"
 
 	kubeClient := kubefake.NewSimpleClientset()
@@ -121,7 +121,7 @@ func TestIsServingGroupOutdated(t *testing.T) {
 				err := indexer.Add(pod)
 				assert.NoError(t, err)
 			}
-			got := c.isServingGroupOutdated(group, mi.Namespace, newHash)
+			got := c.isServingGroupOutdated(group, ms.Namespace, newHash)
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -156,10 +156,10 @@ func TestCheckServingGroupReady(t *testing.T) {
 
 	// build ModelServing
 	var expectedPodNum int32 = 2
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: ns,
-			Name:      "test-mi",
+			Name:      "test-ms",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Template: workloadv1alpha1.ServingGroup{
@@ -186,7 +186,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 		}
 		err := indexer.Add(pod)
 		assert.NoError(t, err)
-		store.AddRunningPodToServingGroup(utils.GetNamespaceName(mi), groupName, pod.Name, newHash, roleLabel, roleName)
+		store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), groupName, pod.Name, newHash, roleLabel, roleName)
 	}
 
 	// Waiting for pod cache to sync
@@ -198,7 +198,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 	})
 	assert.True(t, sync, "Pods should be found in cache")
 
-	ok, err := controller.checkServingGroupReady(mi, groupName)
+	ok, err := controller.checkServingGroupReady(ms, groupName)
 	assert.NoError(t, err)
 	assert.True(t, ok)
 
@@ -221,16 +221,16 @@ func TestCheckServingGroupReady(t *testing.T) {
 		return len(pods) == int(expectedPodNum)-1
 	})
 	assert.True(t, sync, "Pods should be found in cache after deletion")
-	store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(mi), groupName, "pod-1")
+	store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), groupName, "pod-1")
 
-	ok, err = controller.checkServingGroupReady(mi, groupName)
+	ok, err = controller.checkServingGroupReady(ms, groupName)
 	assert.NoError(t, err)
 	assert.False(t, ok)
 }
 
 func TestIsServingGroupDeleted(t *testing.T) {
 	ns := "default"
-	groupName := "test-mi-0"
+	groupName := "test-ms-0"
 	otherGroupName := "other-group"
 
 	kubeClient := kubefake.NewSimpleClientset()
@@ -264,10 +264,10 @@ func TestIsServingGroupDeleted(t *testing.T) {
 	kubeInformerFactory.Start(stop)
 	kubeInformerFactory.WaitForCacheSync(stop)
 
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: ns,
-			Name:      "test-mi",
+			Name:      "test-ms",
 		},
 	}
 
@@ -374,8 +374,8 @@ func TestIsServingGroupDeleted(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
-			err := store.UpdateServingGroupStatus(utils.GetNamespaceName(mi), groupName, tc.servingGroupStatus)
+			store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
+			err := store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, tc.servingGroupStatus)
 			assert.NoError(t, err)
 
 			// Add test pods
@@ -413,17 +413,17 @@ func TestIsServingGroupDeleted(t *testing.T) {
 			assert.True(t, sync, "Resources should be synced in cache")
 
 			// Test the function
-			got := controller.isServingGroupDeleted(mi, groupName)
+			got := controller.isServingGroupDeleted(ms, groupName)
 			assert.Equal(t, tc.want, got, "isServingGroupDeleted result should match expected")
 
-			store.DeleteServingGroup(utils.GetNamespaceName(mi), groupName)
+			store.DeleteServingGroup(utils.GetNamespaceName(ms), groupName)
 		})
 	}
 }
 
 func TestIsRoleDeleted(t *testing.T) {
 	ns := "default"
-	groupName := "test-mi-0"
+	groupName := "test-ms-0"
 	roleName := "prefill"
 	roleID := "prefill-0"
 
@@ -462,10 +462,10 @@ func TestIsRoleDeleted(t *testing.T) {
 	kubeInformerFactory.Start(stop)
 	kubeInformerFactory.WaitForCacheSync(stop)
 
-	mi := &workloadv1alpha1.ModelServing{
+	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: ns,
-			Name:      "test-mi",
+			Name:      "test-ms",
 		},
 	}
 
@@ -682,8 +682,8 @@ func TestIsRoleDeleted(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
-			store.AddRole(utils.GetNamespaceName(mi), groupName, roleName, roleID, "test-revision")
-			err := store.UpdateRoleStatus(utils.GetNamespaceName(mi), groupName, roleName, roleID, tc.roleStatus)
+			store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, "test-revision")
+			err := store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, tc.roleStatus)
 			assert.NoError(t, err)
 
 			// Add test pods
@@ -721,10 +721,10 @@ func TestIsRoleDeleted(t *testing.T) {
 			assert.True(t, sync, "Resources should be synced in cache")
 
 			// Test the function
-			got := controller.isRoleDeleted(mi, groupName, roleName, roleID)
+			got := controller.isRoleDeleted(ms, groupName, roleName, roleID)
 			assert.Equal(t, tc.want, got, "isRoleDeleted result should match expected")
 
-			store.DeleteServingGroup(utils.GetNamespaceName(mi), groupName)
+			store.DeleteServingGroup(utils.GetNamespaceName(ms), groupName)
 		})
 	}
 }
@@ -762,28 +762,28 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// Test Case 1: ModelServing Creation
 	t.Run("ModelServingCreate", func(t *testing.T) {
-		mi := createStandardModelServing("test-mi", 2, 3)
+		ms := createStandardModelServing("test-ms", 2, 3)
 		// Add ModelServing to fake client
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
 		found := waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServingLister.ModelServings("default").Get("test-mi")
+			_, err := controller.modelServingLister.ModelServings("default").Get("test-ms")
 			return err == nil
 		})
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Simulate controller processing the creation
-		err = controller.syncModelServing(context.Background(), "default/test-mi")
+		err = controller.syncModelServing(context.Background(), "default/test-ms")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
-		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		expectedPodCount := utils.ExpectedPodNum(ms) * int(*ms.Spec.Replicas)
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
 			selector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 			})
 			pods, _ := controller.podsLister.Pods("default").List(selector)
 			return len(pods) == expectedPodCount
@@ -791,37 +791,37 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Pods should be created and synced to cache")
 
 		// Verify ServingGroups were created in store
-		verifyServingGroups(t, controller, mi, 2)
+		verifyServingGroups(t, controller, ms, 2)
 		// Verify each ServingGroup has correct roles
-		verifyRoles(t, controller, mi, 2)
+		verifyRoles(t, controller, ms, 2)
 		// Verify each ServingGroup has correct pods
-		verifyPodCount(t, controller, mi, 2)
+		verifyPodCount(t, controller, ms, 2)
 	})
 
 	// Test Case 2: ModelServing Scale Up
 	t.Run("ModelServingScaleUp", func(t *testing.T) {
-		mi := createStandardModelServing("test-mi-scale-up", 1, 2)
+		ms := createStandardModelServing("test-ms-scale-up", 1, 2)
 		// Create initial ModelServing
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
 		found := waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServingLister.ModelServings("default").Get("test-mi-scale-up")
+			_, err := controller.modelServingLister.ModelServings("default").Get("test-ms-scale-up")
 			return err == nil
 		})
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-mi-scale-up")
+		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-up")
 		assert.NoError(t, err)
 
 		// Verify ServingGroups initial state
-		verifyServingGroups(t, controller, mi, 1)
+		verifyServingGroups(t, controller, ms, 1)
 
 		// Update ModelServing to scale up
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Replicas = ptr.To[int32](3) // Scale up to 3 ServingGroups
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -830,13 +830,13 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-mi-scale-up")
-			return err == nil && *mi.Spec.Replicas == 3
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-ms-scale-up")
+			return err == nil && *ms.Spec.Replicas == 3
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update
-		err = controller.syncModelServing(context.Background(), "default/test-mi-scale-up")
+		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-up")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
@@ -860,28 +860,28 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// Test Case 3: ModelServing Update - Scale Down Replicas
 	t.Run("ModelServingUpdateScaleDown", func(t *testing.T) {
-		mi := createStandardModelServing("test-mi-scale-down", 3, 2)
+		ms := createStandardModelServing("test-ms-scale-down", 3, 2)
 		// Create initial ModelServing
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
 		found := waitForObjectInCache(t, 2*time.Second, func() bool {
-			_, err := controller.modelServingLister.ModelServings("default").Get("test-mi-scale-down")
+			_, err := controller.modelServingLister.ModelServings("default").Get("test-ms-scale-down")
 			return err == nil
 		})
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Process initial creation
-		err = controller.syncModelServing(context.Background(), "default/test-mi-scale-down")
+		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-down")
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
-		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		expectedPodCount := utils.ExpectedPodNum(ms) * int(*ms.Spec.Replicas)
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
 			selector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 			})
 			pods, _ := controller.podsLister.Pods("default").List(selector)
 			return len(pods) == expectedPodCount
@@ -889,12 +889,12 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Pods should be created and synced to cache")
 
 		// Initial status check
-		verifyServingGroups(t, controller, mi, 3)
-		verifyPodCount(t, controller, mi, 3)
-		verifyRoles(t, controller, mi, 3)
+		verifyServingGroups(t, controller, ms, 3)
+		verifyPodCount(t, controller, ms, 3)
+		verifyRoles(t, controller, ms, 3)
 
 		// Update ModelServing to scale down
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Replicas = ptr.To[int32](1) // Scale up to 1 ServingGroups
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -903,19 +903,19 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-mi-scale-down")
-			return err == nil && *mi.Spec.Replicas == 1
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-ms-scale-down")
+			return err == nil && *ms.Spec.Replicas == 1
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
 		// Process the update
-		err = controller.syncModelServing(context.Background(), "default/test-mi-scale-down")
+		err = controller.syncModelServing(context.Background(), "default/test-ms-scale-down")
 		assert.NoError(t, err)
 
 		requirement, err := labels.NewRequirement(
 			workloadv1alpha1.GroupNameLabelKey,
 			selection.In,
-			[]string{"test-mi-scale-down-1", "test-mi-scale-down-2"},
+			[]string{"test-ms-scale-down-1", "test-ms-scale-down-2"},
 		)
 		assert.NoError(t, err)
 
@@ -967,10 +967,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// Test Case 4: ModelServing Update - Role Replicas Scale Up
 	t.Run("ModelServingRoleReplicasScaleUp", func(t *testing.T) {
-		mi := createStandardModelServing("test-role-scale-up", 2, 1)
+		ms := createStandardModelServing("test-role-scale-up", 2, 1)
 		// Create initial ModelServing
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
@@ -985,10 +985,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify ServingGroups initial state
-		verifyServingGroups(t, controller, mi, 2)
+		verifyServingGroups(t, controller, ms, 2)
 
 		// Update ModelServing to role scale down
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Template.Roles[0].Replicas = ptr.To[int32](3) // Scale up to 3 roles
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -997,8 +997,8 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-role-scale-up")
-			return err == nil && *mi.Spec.Template.Roles[0].Replicas == 3
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-role-scale-up")
+			return err == nil && *ms.Spec.Template.Roles[0].Replicas == 3
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
@@ -1039,11 +1039,11 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// Test Case 5: ModelServing Update - Role Replicas Scale Down
 	t.Run("ModelServingRoleReplicasScaleDown", func(t *testing.T) {
-		mi := createStandardModelServing("test-role-scale-down", 2, 3)
+		ms := createStandardModelServing("test-role-scale-down", 2, 3)
 
 		// Create initial ModelServing
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
@@ -1058,10 +1058,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
-		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		expectedPodCount := utils.ExpectedPodNum(ms) * int(*ms.Spec.Replicas)
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
 			selector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 			})
 			pods, _ := controller.podsLister.Pods("default").List(selector)
 			return len(pods) == expectedPodCount
@@ -1069,12 +1069,12 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Pods should be created and synced to cache")
 
 		// Initial status check
-		verifyServingGroups(t, controller, mi, 2)
-		verifyPodCount(t, controller, mi, 2)
-		verifyRoles(t, controller, mi, 2)
+		verifyServingGroups(t, controller, ms, 2)
+		verifyPodCount(t, controller, ms, 2)
+		verifyRoles(t, controller, ms, 2)
 
 		// Update ModelServing to role scale down
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Template.Roles[0].Replicas = ptr.To[int32](1) // Scale down to 1 role
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -1083,8 +1083,8 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-role-scale-down")
-			return err == nil && *mi.Spec.Template.Roles[0].Replicas == 1
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-role-scale-down")
+			return err == nil && *ms.Spec.Template.Roles[0].Replicas == 1
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
@@ -1164,11 +1164,11 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	// Test Case 6: ModelServing Scale Down with BinPack Strategy
 	t.Run("ModelServingBinPackScaleDown", func(t *testing.T) {
 		// ModelServing with PodDeletionCost annotation - BinPack Scale
-		mi := createStandardModelServing("test-binpack-scale", 4, 1)
+		ms := createStandardModelServing("test-binpack-scale", 4, 1)
 
 		// Create initial ModelServing
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{})
+			context.Background(), ms, metav1.CreateOptions{})
 		assert.NoError(t, err)
 
 		// Wait for object to be available in cache
@@ -1183,10 +1183,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Wait for pods to be created and synced to cache
-		expectedPodCount := utils.ExpectedPodNum(mi) * int(*mi.Spec.Replicas)
+		expectedPodCount := utils.ExpectedPodNum(ms) * int(*ms.Spec.Replicas)
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
 			selector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 			})
 			pods, _ := controller.podsLister.Pods("default").List(selector)
 			return len(pods) == expectedPodCount
@@ -1194,14 +1194,14 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "Pods should be created and synced to cache")
 
 		// Initial status check
-		verifyServingGroups(t, controller, mi, 4)
-		verifyPodCount(t, controller, mi, 4)
-		verifyRoles(t, controller, mi, 4)
+		verifyServingGroups(t, controller, ms, 4)
+		verifyPodCount(t, controller, ms, 4)
+		verifyRoles(t, controller, ms, 4)
 
 		// Add PodDelectionCost annotations to pods
 		// Get all pods and add different deletion costs
 		pods, err := controller.podsLister.Pods("default").List(labels.SelectorFromSet(map[string]string{
-			workloadv1alpha1.ModelServingNameLabelKey: mi.Name,
+			workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 		}))
 		assert.NoError(t, err)
 
@@ -1240,7 +1240,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		}
 
 		// Update ModelServing to scale down from 4 to 1 ServingGroup
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Replicas = ptr.To[int32](1) // Scale down to 1 ServingGroup
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -1249,8 +1249,8 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-binpack-scale")
-			return err == nil && *mi.Spec.Replicas == 1
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-binpack-scale")
+			return err == nil && *ms.Spec.Replicas == 1
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
@@ -1315,11 +1315,11 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	// appropriately during the ModelServing lifecycle.
 	t.Run("ModelServingGangPolicyPodGroups", func(t *testing.T) {
 		// Create a ModelServing with gang policy enabled
-		mi := createGangModelServing("test-gang-ms", 2, 2)
+		ms := createGangModelServing("test-gang-ms", 2, 2)
 
 		// Add ModelServing to fake client
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{},
+			context.Background(), ms, metav1.CreateOptions{},
 		)
 		assert.NoError(t, err)
 
@@ -1331,7 +1331,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		assert.True(t, found, "ModelServing should be found in cache after creation")
 
 		// Verify ServingGroups were created in store
-		verifyServingGroups(t, controller, mi, 2)
+		verifyServingGroups(t, controller, ms, 2)
 
 		// Wait until both PodGroups for this MI are created
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
@@ -1343,7 +1343,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			}
 			pgForMI := 0
 			for _, pg := range pgList.Items {
-				if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] == mi.Name {
+				if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name {
 					pgForMI++
 				}
 			}
@@ -1356,17 +1356,17 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 		)
 		assert.NoError(t, err)
 		for _, pg := range pgList.Items {
-			if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] != mi.Name {
+			if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] != ms.Name {
 				continue
 			}
 			// Check MinMember equals per-group pod count for this MI
-			expectedMinMember := int32(utils.ExpectedPodNum(mi))
+			expectedMinMember := int32(utils.ExpectedPodNum(ms))
 			assert.Equal(t, expectedMinMember, pg.Spec.MinMember, "PodGroup MinMember should match expected per-servinggroup pod count")
 		}
 
 		t.Logf("Scaling up ModelServing replicas to trigger PodGroup updates")
 		// Scale up ModelServing replicas to trigger PodGroup updates
-		updatedMI := mi.DeepCopy()
+		updatedMI := ms.DeepCopy()
 		updatedMI.Spec.Replicas = ptr.To[int32](3)
 
 		_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Update(
@@ -1376,8 +1376,8 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 		// Wait for update to be available in cache
 		found = waitForObjectInCache(t, 2*time.Second, func() bool {
-			mi, err := controller.modelServingLister.ModelServings("default").Get("test-gang-ms")
-			return err == nil && *mi.Spec.Replicas == 3
+			ms, err := controller.modelServingLister.ModelServings("default").Get("test-gang-ms")
+			return err == nil && *ms.Spec.Replicas == 3
 		})
 		assert.True(t, found, "Updated ModelServing should be found in cache")
 
@@ -1420,10 +1420,10 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 
 	// case 8: ModelServing gang policy disabled should cleanup PodGroups
 	t.Run("ModelServingGangPolicyCleanupPodGroups", func(t *testing.T) {
-		mi := createGangModelServing("test-gang-cleanup", 2, 1)
+		ms := createGangModelServing("test-gang-cleanup", 2, 1)
 
 		_, err := kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(
-			context.Background(), mi, metav1.CreateOptions{},
+			context.Background(), ms, metav1.CreateOptions{},
 		)
 		assert.NoError(t, err)
 
@@ -1443,7 +1443,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			}
 			count := 0
 			for _, pg := range pgList.Items {
-				if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] == mi.Name {
+				if pg.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name {
 					count++
 				}
 			}
@@ -1509,25 +1509,25 @@ func createStandardModelServing(name string, replicas int32, roleReplicas int32)
 
 // createGangModelServing creates a ModelServing with gang policy
 func createGangModelServing(name string, replicas int32, roleReplicas int32) *workloadv1alpha1.ModelServing {
-	mi := createStandardModelServing(name, replicas, roleReplicas)
-	mi.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{
+	ms := createStandardModelServing(name, replicas, roleReplicas)
+	ms.Spec.Template.GangPolicy = &workloadv1alpha1.GangPolicy{
 		MinRoleReplicas: map[string]int32{
 			"prefill": roleReplicas,
 		},
 	}
-	return mi
+	return ms
 }
 
 // verifyServingGroups Verify the number and name of ServingGroup
-func verifyServingGroups(t *testing.T, controller *ModelServingController, mi *workloadv1alpha1.ModelServing, expectedCount int) {
-	groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+func verifyServingGroups(t *testing.T, controller *ModelServingController, ms *workloadv1alpha1.ModelServing, expectedCount int) {
+	groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	assert.NoError(t, err)
 	assert.Equal(t, expectedCount, len(groups), fmt.Sprintf("Should have %d ServingGroups", expectedCount))
 
 	// Verify that the ServingGroup name follows the expected pattern
 	expectedGroupNames := make([]string, expectedCount)
 	for i := 0; i < expectedCount; i++ {
-		expectedGroupNames[i] = fmt.Sprintf("%s-%d", mi.Name, i)
+		expectedGroupNames[i] = fmt.Sprintf("%s-%d", ms.Name, i)
 	}
 
 	actualGroupNames := make([]string, len(groups))
@@ -1538,35 +1538,35 @@ func verifyServingGroups(t *testing.T, controller *ModelServingController, mi *w
 }
 
 // verifyPodCount Verify the number of Pods in each ServingGroup
-func verifyPodCount(t *testing.T, controller *ModelServingController, mi *workloadv1alpha1.ModelServing, expectedGroups int) {
-	expectPodNum := utils.ExpectedPodNum(mi)
+func verifyPodCount(t *testing.T, controller *ModelServingController, ms *workloadv1alpha1.ModelServing, expectedGroups int) {
+	expectPodNum := utils.ExpectedPodNum(ms)
 	for i := 0; i < expectedGroups; i++ {
-		groupName := fmt.Sprintf("%s-%d", mi.Name, i)
+		groupName := fmt.Sprintf("%s-%d", ms.Name, i)
 		groupSelector := labels.SelectorFromSet(map[string]string{
 			workloadv1alpha1.GroupNameLabelKey: groupName,
 		})
 
-		groupPods, err := controller.podsLister.Pods(mi.Namespace).List(groupSelector)
+		groupPods, err := controller.podsLister.Pods(ms.Namespace).List(groupSelector)
 		assert.NoError(t, err)
 		assert.Equal(t, expectPodNum, len(groupPods), fmt.Sprintf("ServingGroup %s should have %d pods", groupName, expectPodNum))
 	}
 }
 
 // verifyRoles Verify the number and name of Role
-func verifyRoles(t *testing.T, controller *ModelServingController, mi *workloadv1alpha1.ModelServing, expectedGroups int) {
+func verifyRoles(t *testing.T, controller *ModelServingController, ms *workloadv1alpha1.ModelServing, expectedGroups int) {
 	// Traverse each ServingGroup
-	servingGroups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+	servingGroups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	assert.NoError(t, err)
 	for _, group := range servingGroups {
 		groupName := group.Name
 
 		// Traverse each role defined in the ModelServing spec
-		for _, specRole := range mi.Spec.Template.Roles {
+		for _, specRole := range ms.Spec.Template.Roles {
 			roleName := specRole.Name
 			expectedRoleReplicas := int(*specRole.Replicas)
 
 			// Get all instances of the role from the store
-			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), groupName, roleName)
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err, fmt.Sprintf("Should be able to get role list for %s in group %s", roleName, groupName))
 
 			// Verify the number of roles
@@ -1664,7 +1664,7 @@ func TestScaleUpServingGroups(t *testing.T) {
 
 			// Create a unique ModelServing for this test
 			miName := fmt.Sprintf("test-scaleup-%d", idx)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -1696,7 +1696,7 @@ func TestScaleUpServingGroups(t *testing.T) {
 
 			// Pre-populate the store with existing ServingGroups
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, "test-revision")
+				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, "test-revision")
 			}
 
 			// Build the servingGroupList to pass to scaleUpServingGroups
@@ -1708,11 +1708,11 @@ func TestScaleUpServingGroups(t *testing.T) {
 			}
 
 			// Call scaleUpServingGroups directly (not through syncModelServing)
-			err = controller.scaleUpServingGroups(context.Background(), mi, existingGroups, tt.expectedCount, "new-revision")
+			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroups, tt.expectedCount, "new-revision")
 			assert.NoError(t, err)
 
 			// Verify the results
-			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 			assert.NoError(t, err)
 
 			if tt.expectNoCreation {
@@ -1818,7 +1818,7 @@ func TestScaleUpRoles(t *testing.T) {
 			miName := fmt.Sprintf("test-scaleup-roles-%d", idx)
 			roleName := "prefill"
 			groupName := utils.GenerateServingGroupName(miName, 0)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -1849,9 +1849,9 @@ func TestScaleUpRoles(t *testing.T) {
 			}
 
 			// Pre-populate the store with ServingGroup and Roles
-			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddRole(utils.GetNamespaceName(mi), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision")
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision")
 			}
 
 			// Build the roleList to pass to scaleUpRoles
@@ -1862,13 +1862,13 @@ func TestScaleUpRoles(t *testing.T) {
 				}
 			}
 
-			targetRole := mi.Spec.Template.Roles[0]
+			targetRole := ms.Spec.Template.Roles[0]
 
 			// Call scaleUpRoles directly
-			controller.scaleUpRoles(context.Background(), mi, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
+			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
 
 			// Verify the results
-			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), groupName, "prefill")
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
 			assert.NoError(t, err)
 
 			if tt.expectNoCreation {
@@ -1947,7 +1947,7 @@ func TestScaleDownServingGroups(t *testing.T) {
 			assert.NoError(t, err)
 
 			miName := fmt.Sprintf("test-scaledown-%d", idx)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -1979,7 +1979,7 @@ func TestScaleDownServingGroups(t *testing.T) {
 
 			// Pre-populate the store with existing ServingGroups
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddServingGroup(utils.GetNamespaceName(mi), ordinal, "test-revision")
+				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, "test-revision")
 			}
 
 			// Build the servingGroupList to pass to scaleDownServingGroups
@@ -1991,11 +1991,11 @@ func TestScaleDownServingGroups(t *testing.T) {
 			}
 
 			// Call scaleDownServingGroups directly (no binpack - all scores are 0)
-			err = controller.scaleDownServingGroups(context.Background(), mi, existingGroups, tt.expectedCount)
+			err = controller.scaleDownServingGroups(context.Background(), ms, existingGroups, tt.expectedCount)
 			assert.NoError(t, err)
 
 			// Verify the results
-			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(mi))
+			groups, err := controller.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 			assert.NoError(t, err)
 
 			// Verify remaining group count
@@ -2334,7 +2334,7 @@ func TestScaleDownRoles(t *testing.T) {
 
 			miName := fmt.Sprintf("test-role-scaledown-%d", idx)
 			groupName := utils.GenerateServingGroupName(miName, 0)
-			mi := &workloadv1alpha1.ModelServing{
+			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      miName,
@@ -2364,12 +2364,12 @@ func TestScaleDownRoles(t *testing.T) {
 				},
 			}
 
-			targetRole := mi.Spec.Template.Roles[0]
+			targetRole := ms.Spec.Template.Roles[0]
 
 			// Pre-populate the store with ServingGroup and Roles
-			controller.store.AddServingGroup(utils.GetNamespaceName(mi), 0, "test-revision")
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "test-revision")
 			for _, ordinal := range tt.existingIndices {
-				controller.store.AddRole(utils.GetNamespaceName(mi), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision")
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", utils.GenerateRoleID("prefill", ordinal), "test-revision")
 			}
 
 			// Build the roleList to pass to scaleDownRoles
@@ -2381,10 +2381,10 @@ func TestScaleDownRoles(t *testing.T) {
 			}
 
 			// Call scaleDownRoles directly (no binpack - all scores are 0)
-			controller.scaleDownRoles(context.Background(), mi, groupName, targetRole, existingRoles, tt.expectedCount)
+			controller.scaleDownRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount)
 
 			// Verify the results
-			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(mi), groupName, "prefill")
+			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, "prefill")
 			assert.NoError(t, err)
 
 			// Verify remaining role count

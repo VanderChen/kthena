@@ -335,11 +335,6 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedName, servingGroupName, runningPodName, revision, roleName, roleID string) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
-	role := &Role{
-		Name:     roleID,
-		Status:   RoleCreating,
-		Revision: revision,
-	}
 	if _, ok := s.servingGroup[modelServingName]; !ok {
 		// If modelServingName not exist, create a new one
 		s.servingGroup[modelServingName] = make(map[string]*ServingGroup)
@@ -350,16 +345,13 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 		// If ServingGroupName not exist, create a new one
 		group = &ServingGroup{
 			Name:        servingGroupName,
-			runningPods: map[string]struct{}{runningPodName: {}},
+			runningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
 			roles:       make(map[string]map[string]*Role),
 		}
-		group.roles[roleName] = make(map[string]*Role)
-		group.roles[roleName][roleID] = role
 
 		s.servingGroup[modelServingName][servingGroupName] = group
-		return
 	}
 
 	group.runningPods[runningPodName] = struct{}{} // runningPods map has been initialized during AddServingGroup.
@@ -370,6 +362,11 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 	}
 
 	if _, ok = group.roles[roleName][roleID]; !ok {
+		role := &Role{
+			Name:     roleID,
+			Status:   RoleCreating,
+			Revision: revision,
+		}
 		group.roles[roleName][roleID] = role
 	}
 }
