@@ -17,20 +17,13 @@ limitations under the License.
 package utils
 
 import (
-	"bytes"
 	"context"
-	"fmt"
-	"io"
-
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/remotecommand"
 )
 
 // GetRouterPod is a helper function to get the router pod
@@ -55,36 +48,4 @@ func GetRouterPod(t *testing.T, kubeClient kubernetes.Interface, kthenaNamespace
 	require.NotEmpty(t, pods.Items, "No router pods found")
 
 	return &pods.Items[0]
-}
-
-// ExecInPod executes a command in a pod and returns the output
-func ExecInPod(t *testing.T, config *rest.Config, pod *corev1.Pod, container string, command []string) (string, string, error) {
-	req := kubernetes.NewForConfigOrDie(config).CoreV1().RESTClient().Post().
-		Resource("pods").
-		Name(pod.Name).
-		Namespace(pod.Namespace).
-		SubResource("exec")
-
-	req.VersionedParams(&corev1.PodExecOptions{
-		Container: container,
-		Command:   command,
-		Stdout:    true,
-		Stderr:    true,
-	}, scheme.ParameterCodec)
-
-	exec, err := remotecommand.NewSPDYExecutor(config, "POST", req.URL())
-	if err != nil {
-		return "", "", fmt.Errorf("failed to create executor: %w", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
-	})
-	if err != nil && err != io.EOF {
-		return stdout.String(), stderr.String(), fmt.Errorf("failed to execute command: %w", err)
-	}
-
-	return stdout.String(), stderr.String(), nil
 }
