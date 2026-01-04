@@ -169,7 +169,7 @@ spec:
           trust-remote-code: ""
           enforce-eager: ""
           kv-transfer-config: |
-            {"kv_connector": "MooncakeConnectorV1",
+            {"kv_connector": "MooncakeConnector",
               "kv_buffer_device": "npu",
               "kv_role": "kv_producer",
               "kv_parallel_size": 1,
@@ -210,7 +210,7 @@ spec:
           trust-remote-code: ""
           enforce-eager: ""
           kv-transfer-config: |
-            {"kv_connector": "MooncakeConnectorV1",
+            {"kv_connector": "MooncakeConnector",
               "kv_buffer_device": "npu",
               "kv_role": "kv_consumer",
               "kv_parallel_size": 1,
