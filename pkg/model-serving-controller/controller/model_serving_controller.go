@@ -808,16 +808,19 @@ func (c *ModelServingController) handleReadyPod(mi *workloadv1alpha1.ModelServin
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
 	}
-	if err := chain.OnPodReady(context.TODO(), &plugins.HookRequest{
-		ModelServing: mi,
-		ServingGroup: servingGroupName,
-		RoleName:     utils.PodRoleName(newPod),
-		RoleID:       utils.PodRoleID(newPod),
-		IsEntry:      newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
-		Pod:          newPod,
-	}); err != nil {
-		return err
+	if chain != nil {
+		if err := chain.OnPodReady(context.TODO(), &plugins.HookRequest{
+			ModelServing: mi,
+			ServingGroup: servingGroupName,
+			RoleName:     utils.PodRoleName(newPod),
+			RoleID:       utils.PodRoleID(newPod),
+			IsEntry:      newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
+			Pod:          newPod,
+		}); err != nil {
+			return err
+		}
 	}
+
 	// Add the running pod to the global storage and try to update the ServingGroup status
 	c.store.AddRunningPodToServingGroup(types.NamespacedName{
 		Namespace: mi.Namespace,
@@ -1267,6 +1270,7 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 
 func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string) error {
 	servingGroupName := utils.GenerateServingGroupName(mi.Name, servingGroupOrdinal)
+	// TODO: build the plugin chain only once for the ModelServing
 	chain, err := c.buildPluginChain(mi)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
@@ -1285,7 +1289,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 		Pod:          entryPod,
 	}
 	if err := chain.OnPodCreate(ctx, entryReq); err != nil {
-		return err
+		return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
 	}
 	_, err = c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -1304,7 +1308,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			Pod:          workerPod,
 		}
 		if err := chain.OnPodCreate(ctx, workerReq); err != nil {
-			return err
+			return fmt.Errorf("execute OnPodCreate failed for worker pod %s: %v", workerPod.Name, err)
 		}
 		_, err := c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {

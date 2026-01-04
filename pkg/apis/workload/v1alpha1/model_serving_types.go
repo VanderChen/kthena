@@ -107,7 +107,7 @@ type PluginSpec struct {
 	// +optional
 	Config *apiextensionsv1.JSON `json:"config,omitempty"`
 	// Scope optionally narrows where this plugin runs.
-	// Bye default, it runs on all pods.
+	// By default, it runs on all pods.
 	// +optional
 	Scope *PluginScope `json:"scope,omitempty"`
 }
