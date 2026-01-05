@@ -109,6 +109,13 @@ func GenerateEntryPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServ
 func GenerateWorkerPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, entryPod *corev1.Pod, groupName string, roleIndex, podIndex int, revision string) *corev1.Pod {
 	workerPodName := generateWorkerPodName(groupName, GenerateRoleID(role.Name, roleIndex), podIndex)
 	workerPod := createBasePod(role, mi, workerPodName, groupName, revision, roleIndex)
+
+	// Add entry pod name annotation to worker pods for LWS compatibility
+	if workerPod.Annotations == nil {
+		workerPod.Annotations = make(map[string]string)
+	}
+	workerPod.Annotations[workloadv1alpha1.EntryPodNameAnnotationKey] = entryPod.Name
+
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = mi.Spec.SchedulerName
@@ -119,6 +126,19 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelSer
 }
 
 func createBasePod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, name, groupName, revision string, roleIndex int) *corev1.Pod {
+	// Extract group index from group name (e.g., "vllm-sample-0" -> 0)
+	_, groupIndex := GetParentNameAndOrdinal(groupName)
+	groupIndexStr := strconv.Itoa(groupIndex)
+
+	// Generate group hash for unique identification of all pods in the same group
+	groupHash := fmt.Sprintf("%s-%s", mi.Name, groupIndexStr)
+
+	// Calculate total group size (sum of all pods in all roles)
+	groupSize := 0
+	for _, r := range mi.Spec.Template.Roles {
+		groupSize += (1 + int(r.WorkerReplicas)) * int(*r.Replicas)
+	}
+
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",
@@ -133,6 +153,12 @@ func createBasePod(role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing
 				workloadv1alpha1.RoleLabelKey:             role.Name,
 				workloadv1alpha1.RoleIDKey:                GenerateRoleID(role.Name, roleIndex),
 				workloadv1alpha1.RevisionLabelKey:         revision,
+				workloadv1alpha1.GroupIndexLabelKey:       groupIndexStr,
+				workloadv1alpha1.GroupHashLabelKey:        groupHash,
+			},
+			Annotations: map[string]string{
+				workloadv1alpha1.GroupSizeAnnotationKey: strconv.Itoa(groupSize),
+				workloadv1alpha1.ReplicasAnnotationKey:  strconv.Itoa(int(*mi.Spec.Replicas)),
 			},
 			OwnerReferences: []metav1.OwnerReference{
 				newModelServingOwnerRef(mi),
