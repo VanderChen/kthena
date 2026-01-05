@@ -204,22 +204,17 @@ func TestAutoscalingPolicyMutation(t *testing.T) {
 func TestAutoscalingPolicyBindingValidation(t *testing.T) {
 	ctx, kthenaClient := setupControllerManagerE2ETest(t)
 
-	// First create a valid AutoscalingPolicy to reference (with DryRun)
-	policy := createValidAutoscalingPolicy()
-	createdPolicy, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicies(testNamespace).Create(ctx, policy, metav1.CreateOptions{
+	// Create a binding referencing a non-existent policy (with DryRun)
+	binding := createValidAutoscalingPolicyBinding("non-existent-policy")
+	_, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Create(ctx, binding, metav1.CreateOptions{
 		DryRun: []string{"All"},
 	})
-	require.NoError(t, err, "Failed to create AutoscalingPolicy")
-	t.Logf("Created AutoscalingPolicy (DryRun): %s/%s", createdPolicy.Namespace, createdPolicy.Name)
-
-	// Create a valid binding referencing the policy (with DryRun)
-	binding := createValidAutoscalingPolicyBinding(createdPolicy.Name)
-	createdBinding, err := kthenaClient.WorkloadV1alpha1().AutoscalingPolicyBindings(testNamespace).Create(ctx, binding, metav1.CreateOptions{
-		DryRun: []string{"All"},
-	})
-	require.NoError(t, err, "Failed to create AutoscalingPolicyBinding")
-	assert.NotNil(t, createdBinding)
-	t.Logf("Created AutoscalingPolicyBinding (DryRun): %s/%s", createdBinding.Namespace, createdBinding.Name)
+	require.Error(t, err, "Expected validation error for binding with non-existent policy reference")
+	// Check that the error is a validation error (admission webhook rejection)
+	errorMsg := err.Error()
+	assert.True(t, strings.Contains(errorMsg, "autoscaling policy resource") && strings.Contains(errorMsg, "does not exist"),
+		"Error should contain policy existence validation message, got: %v", errorMsg)
+	t.Logf("Validation error (expected): %v", err)
 }
 
 // TestModelServingValidation tests that the webhook rejects invalid ModelServing specs.
