@@ -87,7 +87,6 @@ spec:
         gpuCount: 1
     - name: huawei-ascend-defaults
       type: BuiltIn
-      disabled: true
       config:
         npuResourceName: huawei.com/Ascend910
         npuCount: 1
@@ -103,7 +102,7 @@ Notes:
 
 Initial hook points:
 
-- `OnPodCreate(ctx, req) -> (podMutations, error)`
+- `OnPodCreate(ctx, req) -> error`
   - Called after the controller generates the base Pod object (currently via `utils.GenerateEntryPod` / `utils.GenerateWorkerPod`) and after core controller annotations are applied (e.g., gang scheduling annotations), but before the Pod is created.
   - Allows mutation of:
     - `ObjectMeta.Labels/Annotations`
