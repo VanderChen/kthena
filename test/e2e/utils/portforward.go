@@ -187,6 +187,42 @@ func SetupPortForward(namespace, service, localPort, remotePort string) (PortFor
 	return f, nil
 }
 
+// SetupPortForwardToPod sets up a port-forward directly to a pod and waits for it to be ready.
+// It returns a PortForwarder interface that can be used to manage the port-forward.
+// If SetupPortForwardToPod fails, the test should stop immediately as the error indicates
+// a critical infrastructure issue that prevents the test from continuing.
+func SetupPortForwardToPod(namespace, podName, localPort, podPort string) (PortForwarder, error) {
+	// Parse local port
+	localPortInt, err := strconv.Atoi(localPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid local port %q: %v", localPort, err)
+	}
+
+	// Parse pod port
+	podPortInt, err := strconv.Atoi(podPort)
+	if err != nil {
+		return nil, fmt.Errorf("invalid pod port %q: %v", podPort, err)
+	}
+
+	// Create forwarder
+	f := &forwarder{
+		stopCh:       make(chan struct{}),
+		podName:      podName,
+		namespace:    namespace,
+		localAddress: "127.0.0.1",
+		localPort:    localPortInt,
+		podPort:      podPortInt,
+	}
+
+	// Start the forwarder - this is a critical step, failure here means the test cannot proceed
+	if err := f.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start port-forward %s:%d -> %s/%s:%d: %v",
+			f.localAddress, localPortInt, namespace, podName, podPortInt, err)
+	}
+
+	return f, nil
+}
+
 // findPodForService finds a running pod for the given service and gets the targetPort
 // from the service's port configuration. Returns pod name and the targetPort number.
 func findPodForService(clientset *kubernetes.Clientset, namespace, serviceName string, servicePort intstr.IntOrString) (string, int, error) {

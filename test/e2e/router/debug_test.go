@@ -27,8 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/volcano-sh/kthena/test/e2e/framework"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
-	"k8s.io/client-go/tools/portforward"
-	"k8s.io/client-go/transport/spdy"
 )
 
 // TestDebugServer tests that debug server is bound to localhost only and all debug endpoints work correctly
@@ -62,56 +60,16 @@ func TestDebugServer(t *testing.T) {
 		t.Errorf("Debug server should not be accessible via pod IP %s, but connection succeeded with status %d", routerPod.Status.PodIP, resp.StatusCode)
 	})
 
-	// Then, test all debug endpoints via port-forward ,use port-forward to access localhost:15000
-	config, err := utils.GetKubeConfig()
-	require.NoError(t, err, "Failed to get kubeconfig")
+	// Then, test all debug endpoints via port-forward, use port-forward to access localhost:15000
+	localPort := "15001" // Use a different local port to avoid conflicts
+	podPort := "15000"   // Debug server port in the pod
 
 	// Set up port-forward to access debug port
-	stopChan := make(chan struct{}, 1)
-	readyChan := make(chan struct{}, 1)
-	localPort := "15001" // Use a different local port to avoid conflicts
+	pf, err := utils.SetupPortForwardToPod(routerPod.Namespace, routerPod.Name, localPort, podPort)
+	require.NoError(t, err, "Failed to setup port-forward")
+	defer pf.Close()
 
-	req := testCtx.KubeClient.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Namespace(routerPod.Namespace).
-		Name(routerPod.Name).
-		SubResource("portforward")
-
-	transport, upgrader, err := spdy.RoundTripperFor(config)
-	require.NoError(t, err, "Failed to create round tripper")
-
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
-	pf, err := portforward.New(dialer, []string{localPort + ":15000"}, stopChan, readyChan, nil, nil)
-	require.NoError(t, err, "Failed to create port forwarder")
-
-	go func() {
-		if err := pf.ForwardPorts(); err != nil {
-			t.Logf("Port forward error: %v", err)
-		}
-	}()
-
-	// Wait for port-forward to be ready
-	select {
-	case <-readyChan:
-		t.Logf("Port-forward to %s:15000 is ready", routerPod.Name)
-	case <-time.After(10 * time.Second):
-		t.Fatal("Port-forward timeout")
-	}
-
-	// Verify port-forward is actually working by attempting a connection
-	require.Eventually(t, func() bool {
-		client := &http.Client{
-			Timeout: 2 * time.Second,
-		}
-		resp, err := client.Get("http://localhost:" + localPort + "/debug/config_dump/modelroutes")
-		if err != nil {
-			return false
-		}
-		resp.Body.Close()
-		return resp.StatusCode == http.StatusOK
-	}, 5*time.Second, 500*time.Millisecond, "Port-forward should be accessible")
-
-	defer close(stopChan)
+	t.Logf("Port-forward to %s:%s is ready", routerPod.Name, podPort)
 
 	// List endpoints to test
 	listEndpoints := []string{
