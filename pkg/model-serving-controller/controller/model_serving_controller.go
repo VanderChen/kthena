@@ -47,12 +47,8 @@ import (
 	listerv1alpha1 "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
-<<<<<<< HEAD
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
-=======
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/gangscheduling"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
->>>>>>> 6f07111 (Cleanup webhook)
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -1270,7 +1266,8 @@ func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, 
 
 func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role workloadv1alpha1.Role, mi *workloadv1alpha1.ModelServing, roleIndex int, servingGroupOrdinal int, revision string) error {
 	servingGroupName := utils.GenerateServingGroupName(mi.Name, servingGroupOrdinal)
-	// TODO: build the plugin chain only once for the ModelServing
+	// TODO(hzxuzhonghu): build the plugin chain only once per ModelServing
+	// This is not critical now, so we leave it for future optimization.
 	chain, err := c.buildPluginChain(mi)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
@@ -1280,16 +1277,18 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	entryPod := utils.GenerateEntryPod(role, mi, servingGroupName, roleIndex, revision)
 	taskName := c.podGroupManager.GenerateTaskName(role.Name, roleIndex)
 	c.podGroupManager.AnnotatePodWithPodGroup(entryPod, mi, servingGroupName, taskName)
-	entryReq := &plugins.HookRequest{
-		ModelServing: mi,
-		ServingGroup: servingGroupName,
-		RoleName:     role.Name,
-		RoleID:       roleID,
-		IsEntry:      true,
-		Pod:          entryPod,
-	}
-	if err := chain.OnPodCreate(ctx, entryReq); err != nil {
-		return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
+	if chain != nil {
+		entryReq := &plugins.HookRequest{
+			ModelServing: mi,
+			ServingGroup: servingGroupName,
+			RoleName:     role.Name,
+			RoleID:       roleID,
+			IsEntry:      true,
+			Pod:          entryPod,
+		}
+		if err := chain.OnPodCreate(ctx, entryReq); err != nil {
+			return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
+		}
 	}
 	_, err = c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
@@ -1299,16 +1298,18 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
 		workerPod := utils.GenerateWorkerPod(role, mi, entryPod, servingGroupName, roleIndex, i, revision)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, mi, servingGroupName, taskName)
-		workerReq := &plugins.HookRequest{
-			ModelServing: mi,
-			ServingGroup: servingGroupName,
-			RoleName:     role.Name,
-			RoleID:       roleID,
-			IsEntry:      false,
-			Pod:          workerPod,
-		}
-		if err := chain.OnPodCreate(ctx, workerReq); err != nil {
-			return fmt.Errorf("execute OnPodCreate failed for worker pod %s: %v", workerPod.Name, err)
+		if chain != nil {
+			workerReq := &plugins.HookRequest{
+				ModelServing: mi,
+				ServingGroup: servingGroupName,
+				RoleName:     role.Name,
+				RoleID:       roleID,
+				IsEntry:      false,
+				Pod:          workerPod,
+			}
+			if err := chain.OnPodCreate(ctx, workerReq); err != nil {
+				return fmt.Errorf("execute OnPodCreate failed for worker pod %s: %v", workerPod.Name, err)
+			}
 		}
 		_, err := c.kubeClientSet.CoreV1().Pods(mi.Namespace).Create(ctx, workerPod, metav1.CreateOptions{})
 		if err != nil && !apierrors.IsAlreadyExists(err) {
