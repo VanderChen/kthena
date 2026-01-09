@@ -580,6 +580,8 @@ func TestModelRouteWithRateLimit(t *testing.T) {
 			"Rate limit should be active after exhausting quota")
 
 		const halfWindowDuration = 30 * time.Second
+		// ADD THIS TEMPORARY DEBUG
+		t.Logf("After 30s wait: Expected ~15 tokens refilled (0.5 tokens/sec × 30sec). Request needs 10 tokens.")
 		t.Logf("Waiting %v (within rate limit window)...", halfWindowDuration)
 		time.Sleep(halfWindowDuration)
 
