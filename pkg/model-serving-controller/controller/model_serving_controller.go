@@ -243,7 +243,7 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 		return
 	}
 
-	mi, servingGroupName, err := c.getModelServingForResource(newPod)
+	ms, servingGroupName, err := c.getModelServingByChildResource(newPod)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(4).Infof("modelServing of pod %s has been deleted", newPod.Name)
@@ -253,7 +253,7 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 		return
 	}
 
-	if c.shouldSkipPodHandling(mi, servingGroupName, newPod) {
+	if c.shouldSkipPodHandling(ms, servingGroupName, newPod) {
 		// Pod revision mismatch ServingGroup, this can rarely happen
 		return
 	}
@@ -261,7 +261,7 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	switch {
 	case utils.IsPodRunningAndReady(newPod):
 		// The pod is available, that is, the state is running, and the container is ready
-		err = c.handleReadyPod(mi, servingGroupName, newPod)
+		err = c.handleReadyPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle running pod failed: %v", err)
 		}
@@ -271,7 +271,7 @@ func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 			return
 		}
 		// Failure occurs in pod and we need to wait for a grace period before making a judgment.
-		err = c.handleErrorPod(mi, servingGroupName, newPod)
+		err = c.handleErrorPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle error pod failed: %v", err)
 		}
@@ -375,7 +375,7 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 		return
 	}
 	// check role status
-	// If role is delection, means the deletion of the svc is a normal occurrence.
+	// If role is deletion, means the deletion of the svc is a normal occurrence.
 	// Not reconcile
 	if c.store.GetRoleStatus(utils.GetNamespaceName(mi), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
 		return
@@ -714,8 +714,8 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, mi *wor
 	}
 }
 
-func (c *ModelServingController) getModelServingAndResourceDetails(resource utils.ResourceWithLabels) (*workloadv1alpha1.ModelServing, string, string, string) {
-	mi, servingGroupName, err := c.getModelServingForResource(resource)
+func (c *ModelServingController) getModelServingAndResourceDetails(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
+	mi, servingGroupName, err := c.getModelServingByChildResource(resource)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(4).Infof("modelServing of svc %s/%s has been deleted", resource.GetNamespace(), resource.GetName())
@@ -1021,8 +1021,8 @@ func (c *ModelServingController) isServingGroupOutdated(group datastore.ServingG
 	return false
 }
 
-// getModelServingForResource gets the ModelServing and group name for any resource that has the appropriate labels
-func (c *ModelServingController) getModelServingForResource(resource utils.ResourceWithLabels) (*workloadv1alpha1.ModelServing, string, error) {
+// getModelServingByChildResource gets the ModelServing and group name for any resource that has the appropriate labels
+func (c *ModelServingController) getModelServingByChildResource(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, error) {
 	modelServingName, servingGroupName, ok := utils.GetModelServingAndGroupByLabel(resource.GetLabels())
 	if !ok {
 		return nil, "", fmt.Errorf("cannot get modelServing name and ServingGroup name from resource %s/%s", resource.GetNamespace(), resource.GetName())
