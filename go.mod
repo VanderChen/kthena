@@ -136,3 +136,5 @@ require (
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 )
+
+replace volcano.sh/apis => volcano.sh/apis v0.0.0-20251222111824-40fed4793a6f
