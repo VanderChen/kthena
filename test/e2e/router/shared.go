@@ -464,39 +464,6 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	)
 	ctx := context.Background()
 
-	modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
-	modelRoute.Namespace = testNamespace
-
-	// Configure ParentRefs if using Gateway API
-	setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
-
-	createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
-	require.NoError(t, err, "Failed to create ModelRoute")
-	t.Logf("Successfully created ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
-
-	// Cleanup: Ensure ModelRoute is deleted after test completion
-	t.Cleanup(func() {
-		cleanupCtx := context.Background()
-		t.Logf("Cleaning up ModelRoute: %s/%s", createdModelRoute.Namespace, createdModelRoute.Name)
-		if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
-			t.Logf("Warning: Failed to delete ModelRoute: %v", err)
-		}
-	})
-
-	// Wait for ModelRoute to be ready
-	t.Log("Waiting for ModelRoute to be ready...")
-	require.Eventually(t, func() bool {
-		mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
-		if err != nil {
-			return false
-		}
-		return mr != nil
-	}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
-	t.Log("ModelRoute created, waiting for rate limit window to be fresh...")
-
-	// Wait for a full rate limit window to ensure we start with a clean slate
-	time.Sleep((rateLimitWindowSeconds * time.Second) + windowResetBuffer)
-
 	standardMessage := []utils.ChatMessage{
 		utils.NewChatMessage("user", "hello world"),
 	}
@@ -504,6 +471,25 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	// Test 1: Verify input token rate limit enforcement (30 tokens/minute)
 	t.Run("VerifyInputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 1: Verifying input token rate limit")
+
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
 		// Calculate expected successful requests
 		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
@@ -544,12 +530,26 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitWindowAccuracy", func(t *testing.T) {
 		t.Log("Test 2: Verifying rate limit window accuracy...")
 
-		// Wait for window to reset from previous test
-		windowResetDuration := (rateLimitWindowSeconds * time.Second) + windowResetBuffer
-		t.Logf("Waiting %v for rate limit window reset from previous test...", windowResetDuration)
-		time.Sleep(windowResetDuration)
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
-		// Exhaust quota again to ensure rate limit is active
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Exhaust quota to ensure rate limit is active
 		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
@@ -590,12 +590,26 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyRateLimitResetMechanism", func(t *testing.T) {
 		t.Log("Test 3: Verifying rate limit reset mechanism...")
 
-		// Wait for window to reset from previous test
-		windowResetDuration := (rateLimitWindowSeconds * time.Second) + windowResetBuffer
-		t.Logf("Waiting %v for rate limit window reset from previous test...", windowResetDuration)
-		time.Sleep(windowResetDuration)
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
 
-		// Consume the quota again
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
+
+		// Consume the quota
 		expectedSuccessfulRequests := inputTokenLimit / tokensPerRequest
 		for i := 0; i < expectedSuccessfulRequests; i++ {
 			resp := utils.SendChatRequest(t, createdModelRoute.Spec.ModelName, standardMessage)
@@ -611,7 +625,7 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 			"Rate limit should be active before window reset")
 
 		// Wait for complete window reset
-		windowResetDuration = (rateLimitWindowSeconds * time.Second) + windowResetBuffer
+		windowResetDuration := (rateLimitWindowSeconds * time.Second) + windowResetBuffer
 		t.Logf("Waiting %v for complete rate limit window reset...", windowResetDuration)
 		time.Sleep(windowResetDuration)
 
@@ -636,10 +650,29 @@ func TestModelRouteWithRateLimitShared(t *testing.T, testCtx *routercontext.Rout
 	t.Run("VerifyOutputTokenRateLimitEnforcement", func(t *testing.T) {
 		t.Log("Test 4: Verifying output token rate limit (100 tokens/minute)...")
 
-		// Wait for rate limit window to reset
-		windowResetDuration := (rateLimitWindowSeconds * time.Second) + windowResetBuffer
-		t.Logf("Waiting %v for rate limit window reset...", windowResetDuration)
-		time.Sleep(windowResetDuration)
+		modelRoute := utils.LoadYAMLFromFile[networkingv1alpha1.ModelRoute]("examples/kthena-router/ModelRouteWithRateLimit.yaml")
+		modelRoute.Namespace = testNamespace
+		setupModelRouteWithGatewayAPI(modelRoute, useGatewayApi, kthenaNamespace)
+
+		// Disable input token limit to test ONLY output token limit
+		modelRoute.Spec.RateLimit.InputTokensPerUnit = nil
+		outputLimit := uint32(outputTokenLimit)
+		modelRoute.Spec.RateLimit.OutputTokensPerUnit = &outputLimit
+
+		createdModelRoute, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Create(ctx, modelRoute, metav1.CreateOptions{})
+		require.NoError(t, err, "Failed to create ModelRoute")
+
+		t.Cleanup(func() {
+			cleanupCtx := context.Background()
+			if err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Delete(cleanupCtx, createdModelRoute.Name, metav1.DeleteOptions{}); err != nil {
+				t.Logf("Warning: Failed to delete ModelRoute: %v", err)
+			}
+		})
+
+		require.Eventually(t, func() bool {
+			mr, err := testCtx.KthenaClient.NetworkingV1alpha1().ModelRoutes(testNamespace).Get(ctx, createdModelRoute.Name, metav1.GetOptions{})
+			return err == nil && mr != nil
+		}, 2*time.Minute, 2*time.Second, "ModelRoute should be created")
 
 		longerPrompt := []utils.ChatMessage{
 			utils.NewChatMessage("user", "Write a detailed explanation of rate limiting"),
