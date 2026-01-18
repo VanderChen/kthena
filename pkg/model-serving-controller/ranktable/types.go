@@ -67,14 +67,6 @@ type RanktableTemplate struct {
 	// PodAnnotationName is the annotation key for pod ranktable data
 	// If not specified, defaults to PodRanktableAnnotation constant
 	PodAnnotationName string
-
-	// InitContainerImage is the image for the init container that waits for ranktable
-	// If not specified, defaults to "busybox:latest"
-	InitContainerImage string
-
-	// InitContainerName is the name of the init container
-	// If not specified, defaults to "wait-ranktable"
-	InitContainerName string
 }
 
 // PodRanktableData represents the ranktable information from a single pod

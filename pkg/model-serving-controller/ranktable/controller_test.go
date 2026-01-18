@@ -139,8 +139,6 @@ func TestControllerGetRanktableTemplate(t *testing.T) {
 				RanktableTemplate:  `{"version": "1.0"}`,
 				MountPath:          "/mnt",
 				Filename:           "file.json",
-				InitContainerImage: "busybox:latest",
-				InitContainerName:  "wait-ranktable",
 			},
 			wantErr: false,
 		},
@@ -307,6 +305,7 @@ devices:
 		},
 	}
 
+	// Test Case 1: Ready
 	err := controller.GenerateAndUpdateRanktables(context.TODO(), ms, template, pods)
 	assert.NoError(t, err)
 
@@ -314,79 +313,14 @@ devices:
 	assert.NoError(t, err)
 	assert.Contains(t, cm.Data["rt.json"], `"status": "completed"`)
 	assert.Contains(t, cm.Data["rt.json"], `"server_count": 1`)
-}
 
-func TestHandlePodRestart(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	controller := NewrRanktableController(client)
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "ms1", Namespace: "default", UID: "ms1-uid"},
-		TypeMeta:   metav1.TypeMeta{APIVersion: "workload.volcano.sh/v1alpha1", Kind: "ModelServing"},
-	}
-	template := &RanktableTemplate{
-		Level:    RoleLevelRanktable,
-		Filename: "rt.json",
-	}
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Labels: map[string]string{workloadv1alpha1.RoleLabelKey: "worker"},
-		},
-	}
-
-	err := controller.HandlePodRestart(context.TODO(), ms, template, pod)
+	// Test Case 2: Not Ready (e.g. restart)
+	// Clear annotation
+	pods[0].Annotations = nil
+	err = controller.GenerateAndUpdateRanktables(context.TODO(), ms, template, pods)
 	assert.NoError(t, err)
 
-	cm, _ := client.CoreV1().ConfigMaps("default").Get(context.TODO(), "ms1-worker-ranktable", metav1.GetOptions{})
+	cm, err = client.CoreV1().ConfigMaps("default").Get(context.TODO(), "ms1-worker-ranktable", metav1.GetOptions{})
+	assert.NoError(t, err)
 	assert.Equal(t, "", cm.Data["rt.json"])
-}
-
-func TestNeedsRanktableRefresh(t *testing.T) {
-	client := fake.NewSimpleClientset()
-	controller := NewrRanktableController(client)
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "ms1", Namespace: "default", UID: "ms1-uid"},
-		TypeMeta:   metav1.TypeMeta{APIVersion: "workload.volcano.sh/v1alpha1", Kind: "ModelServing"},
-	}
-	template := &RanktableTemplate{
-		Filename:          "rt.json",
-		PodAnnotationName: "rt-anno",
-		PodParserTemplate: `{{- $data := . | fromJson -}}
-podName: {{ index $data "pod_name" }}`,
-		RanktableTemplate: `{"status": "{{ .Status }}"}`,
-	}
-	groupName := "worker"
-	pods := []*corev1.Pod{
-		{
-			ObjectMeta: metav1.ObjectMeta{
-				Annotations: map[string]string{"rt-anno": `{"pod_name":"p1"}`},
-				Labels:      map[string]string{workloadv1alpha1.RoleLabelKey: "worker"},
-			},
-		},
-	}
-
-	// 1. ConfigMap missing
-	refresh, err := controller.NeedsRanktableRefresh(context.TODO(), ms, template, groupName, pods)
-	assert.Error(t, err)
-	assert.True(t, refresh)
-
-	// 2. ConfigMap exists but content mismatch
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{Name: "ms1-worker-ranktable", Namespace: "default"},
-		Data:       map[string]string{"rt.json": `{"status": "old"}`},
-	}
-	client.CoreV1().ConfigMaps("default").Create(context.TODO(), cm, metav1.CreateOptions{})
-
-	refresh, err = controller.NeedsRanktableRefresh(context.TODO(), ms, template, groupName, pods)
-	assert.NoError(t, err)
-	assert.True(t, refresh)
-
-	// 3. ConfigMap content matches
-	cm.Data["rt.json"] = `{"status": "completed"}`
-	client.CoreV1().ConfigMaps("default").Update(context.TODO(), cm, metav1.UpdateOptions{})
-
-	refresh, err = controller.NeedsRanktableRefresh(context.TODO(), ms, template, groupName, pods)
-	assert.NoError(t, err)
-	assert.False(t, refresh)
 }

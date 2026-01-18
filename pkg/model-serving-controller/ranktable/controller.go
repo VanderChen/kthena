@@ -211,43 +211,47 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 	podGroups := c.groupPods(ms, pods, template.Level)
 
 	for groupName, groupPods := range podGroups {
-		// Determine status based on pods readiness
+		var ranktableJSON string
 		status := "updating"
+
+		// Check if pods are ready (have ranktable annotations)
 		if c.CheckPodsRanktableReady(groupPods, template.PodAnnotationName) {
 			status = "completed"
-		}
 
-		// Parse each pod's ranktable annotation
-		podRanktables := make([]PodRanktableData, 0, len(groupPods))
-		for _, pod := range groupPods {
-			annotation := pod.Annotations[template.PodAnnotationName]
-			if annotation == "" {
-				klog.V(4).Infof("Skipping pod %s/%s without ranktable annotation %s", pod.Namespace, pod.Name, template.PodAnnotationName)
-				continue
+			// Parse each pod's ranktable annotation
+			podRanktables := make([]PodRanktableData, 0, len(groupPods))
+			for _, pod := range groupPods {
+				annotation := pod.Annotations[template.PodAnnotationName]
+				if annotation == "" {
+					klog.V(4).Infof("Skipping pod %s/%s without ranktable annotation %s", pod.Namespace, pod.Name, template.PodAnnotationName)
+					continue
+				}
+
+				podData, err := c.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation)
+				if err != nil {
+					klog.Errorf("Failed to parse ranktable for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+					continue
+				}
+				podRanktables = append(podRanktables, *podData)
 			}
 
-			podData, err := c.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation)
-			if err != nil {
-				klog.Errorf("Failed to parse ranktable for pod %s/%s: %v", pod.Namespace, pod.Name, err)
-				continue
+			if len(podRanktables) > 0 {
+				// Build ranktable template data
+				templateData := c.templateManager.BuildRanktableTemplateData(status, podRanktables)
+
+				// Render ranktable JSON
+				var err error
+				ranktableJSON, err = c.templateManager.RenderRanktable(template.RanktableTemplate, templateData)
+				if err != nil {
+					return fmt.Errorf("failed to render ranktable for group %s: %w", groupName, err)
+				}
+			} else {
+				klog.V(4).Infof("No valid pod ranktables found for group %s", groupName)
 			}
-			podRanktables = append(podRanktables, *podData)
-		}
-
-		// If status is completed, we expect to have ranktables.
-		// If status is updating, we might have 0 ranktables which is fine.
-		if len(podRanktables) == 0 && status == "completed" {
-			klog.V(4).Infof("No valid pod ranktables found for group %s", groupName)
-			continue
-		}
-
-		// Build ranktable template data
-		templateData := c.templateManager.BuildRanktableTemplateData(status, podRanktables)
-
-		// Render ranktable JSON
-		ranktableJSON, err := c.templateManager.RenderRanktable(template.RanktableTemplate, templateData)
-		if err != nil {
-			return fmt.Errorf("failed to render ranktable for group %s: %w", groupName, err)
+		} else {
+			// Not ready, clear content
+			ranktableJSON = ""
+			klog.V(4).Infof("Pods in group %s are not ready, clearing ranktable", groupName)
 		}
 
 		// Update ConfigMap
@@ -266,7 +270,7 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 			"ranktable-level":                  string(template.Level),
 		}
 
-		err = c.templateManager.EnsureRanktableConfigMap(
+		err := c.templateManager.EnsureRanktableConfigMap(
 			ctx,
 			ms.Namespace,
 			cmName,
@@ -337,224 +341,4 @@ func (c *RanktableController) ShouldRequeue(pods []*corev1.Pod, annotationName s
 		return true, 5 * time.Second
 	}
 	return false, 0
-}
-
-// HandlePodRestart handles ranktable refresh when a pod is restarted
-// This should be called when a pod in a role/group is recreated
-func (c *RanktableController) HandlePodRestart(
-	ctx context.Context,
-	ms *workloadv1alpha1.ModelServing,
-	template *RanktableTemplate,
-	restartedPod *corev1.Pod,
-) error {
-	klog.V(2).Infof("Handling ranktable refresh for restarted pod %s/%s", restartedPod.Namespace, restartedPod.Name)
-
-	// Determine the group/role this pod belongs to
-	var groupName string
-	if template.Level == RoleLevelRanktable {
-		groupName = utils.PodRoleName(restartedPod)
-	} else {
-		_, groupName, _ = utils.GetModelServingAndGroupByLabel(restartedPod.Labels)
-	}
-
-	if groupName == "" {
-		return fmt.Errorf("cannot determine group/role for pod %s/%s", restartedPod.Namespace, restartedPod.Name)
-	}
-
-	// Clear the ranktable ConfigMap to trigger init container wait
-	cmName := GenerateRanktableConfigMapName(ms.Name, groupName)
-	klog.V(2).Infof("Clearing ranktable ConfigMap %s for pod restart", cmName)
-
-	ownerRef := metav1.OwnerReference{
-		APIVersion: ms.APIVersion,
-		Kind:       ms.Kind,
-		Name:       ms.Name,
-		UID:        ms.UID,
-		Controller: func() *bool { b := true; return &b }(),
-	}
-
-	labels := map[string]string{
-		workloadv1alpha1.GroupNameLabelKey: groupName,
-		"app.kubernetes.io/component":      "ranktable",
-		"ranktable-level":                  string(template.Level),
-	}
-
-	// Clear the ConfigMap content to empty string
-	err := c.templateManager.EnsureRanktableConfigMap(
-		ctx,
-		ms.Namespace,
-		cmName,
-		[]metav1.OwnerReference{ownerRef},
-		labels,
-		template.Filename,
-		"", // Empty content to trigger init container wait
-	)
-	if err != nil {
-		return fmt.Errorf("failed to clear ranktable ConfigMap %s: %w", cmName, err)
-	}
-
-	klog.V(2).Infof("Successfully cleared ranktable ConfigMap %s, waiting for pod annotations", cmName)
-	return nil
-}
-
-// HandleRoleRestart handles ranktable refresh when an entire role is restarted
-// This clears the ranktable ConfigMap for the role
-func (c *RanktableController) HandleRoleRestart(
-	ctx context.Context,
-	ms *workloadv1alpha1.ModelServing,
-	template *RanktableTemplate,
-	roleName string,
-) error {
-	klog.V(2).Infof("Handling ranktable refresh for restarted role %s", roleName)
-
-	if template.Level != RoleLevelRanktable {
-		klog.V(4).Infof("Skipping role restart handling for group-level ranktable")
-		return nil
-	}
-
-	cmName := GenerateRanktableConfigMapName(ms.Name, roleName)
-	klog.V(2).Infof("Clearing ranktable ConfigMap %s for role restart", cmName)
-
-	ownerRef := metav1.OwnerReference{
-		APIVersion: ms.APIVersion,
-		Kind:       ms.Kind,
-		Name:       ms.Name,
-		UID:        ms.UID,
-		Controller: func() *bool { b := true; return &b }(),
-	}
-
-	labels := map[string]string{
-		workloadv1alpha1.GroupNameLabelKey: ms.Name,
-		"app.kubernetes.io/component":      "ranktable",
-		"ranktable-level":                  string(RoleLevelRanktable),
-	}
-
-	err := c.templateManager.EnsureRanktableConfigMap(
-		ctx,
-		ms.Namespace,
-		cmName,
-		[]metav1.OwnerReference{ownerRef},
-		labels,
-		template.Filename,
-		"", // Empty content
-	)
-	if err != nil {
-		return fmt.Errorf("failed to clear ranktable ConfigMap %s: %w", cmName, err)
-	}
-
-	klog.V(2).Infof("Successfully cleared ranktable ConfigMap %s for role restart", cmName)
-	return nil
-}
-
-// HandleGroupRestart handles ranktable refresh when an entire group is restarted
-// This clears the ranktable ConfigMap for the group
-func (c *RanktableController) HandleGroupRestart(
-	ctx context.Context,
-	ms *workloadv1alpha1.ModelServing,
-	template *RanktableTemplate,
-	groupName string,
-) error {
-	klog.V(2).Infof("Handling ranktable refresh for restarted group %s", groupName)
-
-	if template.Level != GroupLevelRanktable {
-		klog.V(4).Infof("Skipping group restart handling for role-level ranktable")
-		return nil
-	}
-
-	cmName := GenerateRanktableConfigMapName(ms.Name, groupName)
-	klog.V(2).Infof("Clearing ranktable ConfigMap %s for group restart", cmName)
-
-	ownerRef := metav1.OwnerReference{
-		APIVersion: ms.APIVersion,
-		Kind:       ms.Kind,
-		Name:       ms.Name,
-		UID:        ms.UID,
-		Controller: func() *bool { b := true; return &b }(),
-	}
-
-	labels := map[string]string{
-		workloadv1alpha1.GroupNameLabelKey: groupName,
-		"app.kubernetes.io/component":      "ranktable",
-		"ranktable-level":                  string(GroupLevelRanktable),
-	}
-
-	err := c.templateManager.EnsureRanktableConfigMap(
-		ctx,
-		ms.Namespace,
-		cmName,
-		[]metav1.OwnerReference{ownerRef},
-		labels,
-		template.Filename,
-		"", // Empty content
-	)
-	if err != nil {
-		return fmt.Errorf("failed to clear ranktable ConfigMap %s: %w", cmName, err)
-	}
-
-	klog.V(2).Infof("Successfully cleared ranktable ConfigMap %s for group restart", cmName)
-	return nil
-}
-
-// NeedsRanktableRefresh checks if ranktable needs to be refreshed for a group/role
-// This is useful to determine if we should regenerate ranktable after pod changes
-func (c *RanktableController) NeedsRanktableRefresh(
-	ctx context.Context,
-	ms *workloadv1alpha1.ModelServing,
-	template *RanktableTemplate,
-	groupName string,
-	currentPods []*corev1.Pod,
-) (bool, error) {
-	// Get current ranktable ConfigMap
-	cmName := GenerateRanktableConfigMapName(ms.Name, groupName)
-	cm, err := c.kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, cmName, metav1.GetOptions{})
-	if err != nil {
-		klog.Errorf("Failed to get ranktable ConfigMap %s: %v", cmName, err)
-		return true, err // If we can't get it, assume we need refresh
-	}
-
-	// If ConfigMap is empty, we need refresh
-	if cm.Data == nil || cm.Data[template.Filename] == "" {
-		klog.V(4).Infof("Ranktable ConfigMap %s is empty, needs refresh", cmName)
-		return true, nil
-	}
-
-	// Determine status
-	status := "updating"
-	if c.CheckPodsRanktableReady(currentPods, template.PodAnnotationName) {
-		status = "completed"
-	}
-
-	// Parse current pods' ranktable data
-	currentPodRanktables := make([]PodRanktableData, 0, len(currentPods))
-	for _, pod := range currentPods {
-		annotation := pod.Annotations[template.PodAnnotationName]
-		if annotation == "" {
-			continue
-		}
-
-		podData, err := c.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation)
-		if err != nil {
-			klog.Errorf("Failed to parse ranktable for pod %s/%s: %v", pod.Namespace, pod.Name, err)
-			continue
-		}
-		currentPodRanktables = append(currentPodRanktables, *podData)
-	}
-
-	// Generate what the ranktable should be
-	expectedTemplateData := c.templateManager.BuildRanktableTemplateData(status, currentPodRanktables)
-	expectedRanktableJSON, err := c.templateManager.RenderRanktable(template.RanktableTemplate, expectedTemplateData)
-	if err != nil {
-		klog.Errorf("Failed to render expected ranktable: %v", err)
-		return true, err
-	}
-
-	// Compare with current ConfigMap content
-	currentRanktableJSON := cm.Data[template.Filename]
-	if currentRanktableJSON != expectedRanktableJSON {
-		klog.V(2).Infof("Ranktable content mismatch for group %s, needs refresh", groupName)
-		return true, nil
-	}
-
-	klog.V(4).Infof("Ranktable for group %s is up to date", groupName)
-	return false, nil
 }

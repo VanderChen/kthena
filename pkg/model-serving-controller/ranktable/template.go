@@ -86,17 +86,6 @@ func (tm *TemplateManager) GetRanktableTemplate(ctx context.Context, templateNam
 		podAnnotationName = PodRanktableAnnotation
 	}
 
-	// Get init container configuration, with defaults
-	initContainerImage := roleTemplateCM.Data["init-container-image"]
-	if initContainerImage == "" {
-		initContainerImage = "busybox:latest"
-	}
-
-	initContainerName := roleTemplateCM.Data["init-container-name"]
-	if initContainerName == "" {
-		initContainerName = "wait-ranktable"
-	}
-
 	return &RanktableTemplate{
 		InferenceEngine:    roleTemplateCM.Data["inference-engine"],
 		Level:              level,
@@ -105,8 +94,6 @@ func (tm *TemplateManager) GetRanktableTemplate(ctx context.Context, templateNam
 		MountPath:          roleTemplateCM.Data["mount-path"],
 		Filename:           roleTemplateCM.Data["filename"],
 		PodAnnotationName:  podAnnotationName,
-		InitContainerImage: initContainerImage,
-		InitContainerName:  initContainerName,
 	}, nil
 }
 
@@ -271,6 +258,12 @@ func (tm *TemplateManager) EnsureRanktableConfigMap(
 			return nil
 		}
 		return fmt.Errorf("failed to get ranktable ConfigMap %s/%s: %w", namespace, name, err)
+	}
+
+	// Check if update is needed
+	if existingCM.Data != nil && existingCM.Data[filename] == content && len(existingCM.Data) == 1 {
+		klog.V(4).Infof("Ranktable ConfigMap %s/%s is up to date, skipping update", namespace, name)
+		return nil
 	}
 
 	// Update existing ConfigMap
