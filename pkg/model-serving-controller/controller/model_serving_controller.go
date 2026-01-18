@@ -812,6 +812,7 @@ func (c *ModelServingController) handleReadyPod(mi *workloadv1alpha1.ModelServin
 			RoleID:       utils.PodRoleID(newPod),
 			IsEntry:      newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
 			Pod:          newPod,
+			KubeClient:   c.kubeClientSet,
 		}); err != nil {
 			return err
 		}
@@ -1285,6 +1286,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			RoleID:       roleID,
 			IsEntry:      true,
 			Pod:          entryPod,
+			KubeClient:   c.kubeClientSet,
 		}
 		if err := chain.OnPodCreate(ctx, entryReq); err != nil {
 			return fmt.Errorf("execute OnPodCreate failed for entry pod %s: %v", entryPod.Name, err)
@@ -1306,6 +1308,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 				RoleID:       roleID,
 				IsEntry:      false,
 				Pod:          workerPod,
+				KubeClient:   c.kubeClientSet,
 			}
 			if err := chain.OnPodCreate(ctx, workerReq); err != nil {
 				return fmt.Errorf("execute OnPodCreate failed for worker pod %s: %v", workerPod.Name, err)

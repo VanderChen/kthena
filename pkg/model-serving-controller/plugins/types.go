@@ -20,6 +20,7 @@ import (
 	"context"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -32,6 +33,7 @@ type HookRequest struct {
 	RoleID       string
 	IsEntry      bool
 	Pod          *corev1.Pod
+	KubeClient   kubernetes.Interface
 }
 
 // Plugin defines the lifecycle hooks a plugin may implement.
