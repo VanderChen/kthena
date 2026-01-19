@@ -62,17 +62,20 @@ func (c *RanktableController) GetRanktableTemplate(ctx context.Context, ms *work
 
 	template, err := c.templateManager.GetRanktableTemplate(ctx, templateName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get ranktable template: %w", err)
+		return nil, fmt.Errorf("failed to get ranktable template %s: %w", templateName, err)
 	}
 
 	// Override level if specified in annotation
 	if levelOverride, ok := ms.Annotations[RanktableLevelAnnotation]; ok {
 		level := RanktableLevel(levelOverride)
 		if level == RoleLevelRanktable || level == GroupLevelRanktable {
+			klog.V(2).Infof("Overriding ranktable level to %s for ModelServing %s/%s", level, ms.Namespace, ms.Name)
 			template.Level = level
 		}
 	}
 
+	klog.V(3).Infof("Successfully retrieved ranktable template %s for ModelServing %s/%s (level: %s)",
+		templateName, ms.Namespace, ms.Name, template.Level)
 	return template, nil
 }
 
@@ -82,19 +85,26 @@ func (c *RanktableController) EnsureRanktableConfigMaps(
 	ms *workloadv1alpha1.ModelServing,
 	template *RanktableTemplate,
 ) error {
-	// Only set ownerReference if APIVersion and Kind are not empty
-	var ownerRefs []metav1.OwnerReference
-	if ms.APIVersion != "" && ms.Kind != "" {
-		ownerRefs = []metav1.OwnerReference{
-			{
-				APIVersion: ms.APIVersion,
-				Kind:       ms.Kind,
-				Name:       ms.Name,
-				UID:        ms.UID,
-				Controller: func() *bool { b := true; return &b }(),
-			},
-		}
+	apiVersion := ms.APIVersion
+	if apiVersion == "" {
+		apiVersion = workloadv1alpha1.SchemeGroupVersion.String()
 	}
+	kind := ms.Kind
+	if kind == "" {
+		kind = "ModelServing"
+	}
+
+	ownerRefs := []metav1.OwnerReference{
+		{
+			APIVersion: apiVersion,
+			Kind:       kind,
+			Name:       ms.Name,
+			UID:        ms.UID,
+			Controller: func() *bool { b := true; return &b }(),
+		},
+	}
+
+	klog.V(3).Infof("Ensuring ranktable ConfigMaps for ModelServing %s/%s at %s level", ms.Namespace, ms.Name, template.Level)
 
 	// Determine which ConfigMaps to create based on ranktable level
 	if template.Level == RoleLevelRanktable {
@@ -107,6 +117,7 @@ func (c *RanktableController) EnsureRanktableConfigMaps(
 				"ranktable-level":                  string(RoleLevelRanktable),
 			}
 
+			klog.V(3).Infof("Ensuring ranktable ConfigMap %s for role %s in ModelServing %s/%s", cmName, role.Name, ms.Namespace, ms.Name)
 			err := c.templateManager.EnsureRanktableConfigMap(
 				ctx,
 				ms.Namespace,
@@ -131,6 +142,7 @@ func (c *RanktableController) EnsureRanktableConfigMaps(
 				"ranktable-level":                  string(GroupLevelRanktable),
 			}
 
+			klog.V(3).Infof("Ensuring ranktable ConfigMap %s for group %s in ModelServing %s/%s", cmName, groupName, ms.Namespace, ms.Name)
 			err := c.templateManager.EnsureRanktableConfigMap(
 				ctx,
 				ms.Namespace,
@@ -155,6 +167,9 @@ func (c *RanktableController) InjectRanktableMount(
 	template *RanktableTemplate,
 	cmName string,
 ) {
+	klog.V(3).Infof("Injecting ranktable mount (ConfigMap: %s, MountPath: %s) into pod %s/%s",
+		cmName, template.MountPath, pod.Namespace, pod.Name)
+
 	// Add Volume
 	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
 		Name: "ranktable",
@@ -169,8 +184,24 @@ func (c *RanktableController) InjectRanktableMount(
 
 	// Add VolumeMount to all main containers
 	for i := range pod.Spec.Containers {
+		klog.V(4).Infof("Adding ranktable volume mount to container %s in pod %s/%s",
+			pod.Spec.Containers[i].Name, pod.Namespace, pod.Name)
 		pod.Spec.Containers[i].VolumeMounts = append(
 			pod.Spec.Containers[i].VolumeMounts,
+			corev1.VolumeMount{
+				Name:      "ranktable",
+				MountPath: template.MountPath,
+				ReadOnly:  true,
+			},
+		)
+	}
+
+	// Add VolumeMount to all init containers
+	for i := range pod.Spec.InitContainers {
+		klog.V(4).Infof("Adding ranktable volume mount to init-container %s in pod %s/%s",
+			pod.Spec.InitContainers[i].Name, pod.Namespace, pod.Name)
+		pod.Spec.InitContainers[i].VolumeMounts = append(
+			pod.Spec.InitContainers[i].VolumeMounts,
 			corev1.VolumeMount{
 				Name:      "ranktable",
 				MountPath: template.MountPath,
@@ -188,11 +219,12 @@ func (c *RanktableController) CheckPodsRanktableReady(pods []*corev1.Pod, annota
 
 	for _, pod := range pods {
 		if pod.Annotations == nil {
+			klog.V(3).Infof("Pod %s/%s has no annotations, ranktable not ready", pod.Namespace, pod.Name)
 			return false
 		}
 		annotation := pod.Annotations[annotationName]
 		if annotation == "" {
-			klog.V(4).Infof("Pod %s/%s does not have ranktable annotation %s yet", pod.Namespace, pod.Name, annotationName)
+			klog.V(3).Infof("Pod %s/%s does not have ranktable annotation %s yet", pod.Namespace, pod.Name, annotationName)
 			return false
 		}
 	}
@@ -209,21 +241,27 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 ) error {
 	// Group pods by role or group based on template level
 	podGroups := c.groupPods(ms, pods, template.Level)
+	klog.V(3).Infof("Processing ranktable generation for ModelServing %s/%s, found %d groups",
+		ms.Namespace, ms.Name, len(podGroups))
 
 	for groupName, groupPods := range podGroups {
 		var ranktableJSON string
 		status := "updating"
 
+		klog.V(3).Infof("Checking ranktable readiness for group %s with %d pods", groupName, len(groupPods))
+
 		// Check if pods are ready (have ranktable annotations)
 		if c.CheckPodsRanktableReady(groupPods, template.PodAnnotationName) {
 			status = "completed"
+			klog.V(2).Infof("All pods in group %s are ready with annotations, generating ranktable", groupName)
 
 			// Parse each pod's ranktable annotation
 			podRanktables := make([]PodRanktableData, 0, len(groupPods))
 			for _, pod := range groupPods {
 				annotation := pod.Annotations[template.PodAnnotationName]
 				if annotation == "" {
-					klog.V(4).Infof("Skipping pod %s/%s without ranktable annotation %s", pod.Namespace, pod.Name, template.PodAnnotationName)
+					klog.Warningf("Skipping pod %s/%s without ranktable annotation %s during generation",
+						pod.Namespace, pod.Name, template.PodAnnotationName)
 					continue
 				}
 
@@ -236,6 +274,7 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 			}
 
 			if len(podRanktables) > 0 {
+				klog.V(3).Infof("Building ranktable from %d pods for group %s", len(podRanktables), groupName)
 				// Build ranktable template data
 				templateData := c.templateManager.BuildRanktableTemplateData(status, podRanktables)
 
@@ -245,20 +284,32 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 				if err != nil {
 					return fmt.Errorf("failed to render ranktable for group %s: %w", groupName, err)
 				}
+				klog.V(3).Infof("Successfully rendered ranktable JSON for group %s (size: %d bytes)",
+					groupName, len(ranktableJSON))
 			} else {
-				klog.V(4).Infof("No valid pod ranktables found for group %s", groupName)
+				klog.Warningf("No valid pod ranktables found for group %s after parsing", groupName)
 			}
 		} else {
 			// Not ready, clear content
 			ranktableJSON = ""
-			klog.V(4).Infof("Pods in group %s are not ready, clearing ranktable", groupName)
+			klog.V(2).Infof("Pods in group %s are not ready (waiting for annotations), clearing ranktable content", groupName)
 		}
 
 		// Update ConfigMap
 		cmName := GenerateRanktableConfigMapName(ms.Name, groupName)
+
+		apiVersion := ms.APIVersion
+		if apiVersion == "" {
+			apiVersion = workloadv1alpha1.SchemeGroupVersion.String()
+		}
+		kind := ms.Kind
+		if kind == "" {
+			kind = "ModelServing"
+		}
+
 		ownerRef := metav1.OwnerReference{
-			APIVersion: ms.APIVersion,
-			Kind:       ms.Kind,
+			APIVersion: apiVersion,
+			Kind:       kind,
 			Name:       ms.Name,
 			UID:        ms.UID,
 			Controller: func() *bool { b := true; return &b }(),
@@ -270,6 +321,7 @@ func (c *RanktableController) GenerateAndUpdateRanktables(
 			"ranktable-level":                  string(template.Level),
 		}
 
+		klog.V(3).Infof("Updating ranktable ConfigMap %s for group %s", cmName, groupName)
 		err := c.templateManager.EnsureRanktableConfigMap(
 			ctx,
 			ms.Namespace,

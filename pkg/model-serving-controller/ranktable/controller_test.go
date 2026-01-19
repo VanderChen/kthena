@@ -224,7 +224,8 @@ func TestEnsureRanktableConfigMaps(t *testing.T) {
 func TestInjectRanktableMount(t *testing.T) {
 	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{Name: "main"}},
+			Containers:     []corev1.Container{{Name: "main"}},
+			InitContainers: []corev1.Container{{Name: "init"}},
 		},
 	}
 	template := &RanktableTemplate{MountPath: "/etc/rt"}
@@ -238,6 +239,8 @@ func TestInjectRanktableMount(t *testing.T) {
 	assert.Equal(t, cmName, pod.Spec.Volumes[0].ConfigMap.Name)
 	assert.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
 	assert.Equal(t, "/etc/rt", pod.Spec.Containers[0].VolumeMounts[0].MountPath)
+	assert.Len(t, pod.Spec.InitContainers[0].VolumeMounts, 1)
+	assert.Equal(t, "/etc/rt", pod.Spec.InitContainers[0].VolumeMounts[0].MountPath)
 }
 
 func TestCheckPodsRanktableReady(t *testing.T) {
