@@ -170,38 +170,64 @@ func (c *RanktableController) InjectRanktableMount(
 	klog.V(3).Infof("Injecting ranktable mount (ConfigMap: %s, MountPath: %s) into pod %s/%s",
 		cmName, template.MountPath, pod.Namespace, pod.Name)
 
-	// Add Volume
-	pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
-		Name: "ranktable",
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmName,
+	volumeName := "ranktable"
+	// Check if volume already exists
+	volumeExists := false
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == volumeName {
+			volumeExists = true
+			break
+		}
+	}
+
+	// Add Volume if it doesn't exist
+	if !volumeExists {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cmName,
+					},
 				},
 			},
-		},
-	})
+		})
+	}
 
 	mount := corev1.VolumeMount{
-		Name:      "ranktable",
+		Name:      volumeName,
 		MountPath: template.MountPath,
 		ReadOnly:  true,
 	}
 
+	// Helper function to check if mount exists
+	hasMount := func(mounts []corev1.VolumeMount, name string) bool {
+		for _, m := range mounts {
+			if m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
 	// Add VolumeMount to all main containers
 	for i := range pod.Spec.Containers {
-		pod.Spec.Containers[i].VolumeMounts = append(
-			pod.Spec.Containers[i].VolumeMounts,
-			mount,
-		)
+		if !hasMount(pod.Spec.Containers[i].VolumeMounts, volumeName) {
+			pod.Spec.Containers[i].VolumeMounts = append(
+				pod.Spec.Containers[i].VolumeMounts,
+				mount,
+			)
+		}
 	}
 
 	// Add VolumeMount to all init containers
 	for i := range pod.Spec.InitContainers {
-		pod.Spec.InitContainers[i].VolumeMounts = append(
-			pod.Spec.InitContainers[i].VolumeMounts,
-			mount,
-		)
+		if !hasMount(pod.Spec.InitContainers[i].VolumeMounts, volumeName) {
+			pod.Spec.InitContainers[i].VolumeMounts = append(
+				pod.Spec.InitContainers[i].VolumeMounts,
+				mount,
+			)
+		}
 	}
 }
 
