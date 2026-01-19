@@ -66,20 +66,19 @@ spec:
                           items:
                             type: string
                           type: array
-                        targets:
-                          description: Targets limits the plugin to specific pod targets
-                            (entry/worker/all).
-                          items:
-                            description: |-
-                              PluginTarget specifies which pod kinds a plugin applies to.
-                              If empty, it defaults to All.
-                            type: string
-                          type: array
+                        target:
+                          description: |-
+                            Target limits the plugin to specific pod target (Entry/Worker/All).
+                            kubebuilder:default=All
+                            kubebuilder:validation:Enum={All,Entry,Worker}
+                          type: string
                       type: object
                     type:
                       default: BuiltIn
                       description: Type indicates plugin category. For now, only BuiltIn
                         is supported.
+                      enum:
+                      - BuiltIn
                       type: string
                   required:
                   - name

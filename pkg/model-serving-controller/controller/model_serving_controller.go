@@ -927,7 +927,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		return fmt.Errorf("build plugin chain: %w", err)
 	}
 	if chain != nil {
-		if err := chain.OnPodReady(context.TODO(), &plugins.HookRequest{
+		if err := chain.OnPodReady(context.Background(), &plugins.HookRequest{
 			ModelServing: ms,
 			ServingGroup: servingGroupName,
 			RoleName:     utils.GetRoleName(newPod),

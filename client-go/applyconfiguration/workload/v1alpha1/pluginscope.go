@@ -25,8 +25,8 @@ import (
 // PluginScopeApplyConfiguration represents a declarative configuration of the PluginScope type for use
 // with apply.
 type PluginScopeApplyConfiguration struct {
-	Roles   []string                        `json:"roles,omitempty"`
-	Targets []workloadv1alpha1.PluginTarget `json:"targets,omitempty"`
+	Roles  []string                       `json:"roles,omitempty"`
+	Target *workloadv1alpha1.PluginTarget `json:"target,omitempty"`
 }
 
 // PluginScopeApplyConfiguration constructs a declarative configuration of the PluginScope type for use with
@@ -45,12 +45,10 @@ func (b *PluginScopeApplyConfiguration) WithRoles(values ...string) *PluginScope
 	return b
 }
 
-// WithTargets adds the given value to the Targets field in the declarative configuration
-// and returns the receiver, so that objects can be build by chaining "With" function invocations.
-// If called multiple times, values provided by each call will be appended to the Targets field.
-func (b *PluginScopeApplyConfiguration) WithTargets(values ...workloadv1alpha1.PluginTarget) *PluginScopeApplyConfiguration {
-	for i := range values {
-		b.Targets = append(b.Targets, values[i])
-	}
+// WithTarget sets the Target field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the Target field is set to the value of the last call.
+func (b *PluginScopeApplyConfiguration) WithTarget(value workloadv1alpha1.PluginTarget) *PluginScopeApplyConfiguration {
+	b.Target = &value
 	return b
 }

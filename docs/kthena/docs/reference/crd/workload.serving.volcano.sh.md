@@ -617,7 +617,7 @@ _Appears in:_
 
 PluginScope restricts where a plugin is applied.
 Roles is a whitelist; empty means all roles.
-Targets limits to entry/worker pods; empty means all pods.
+Target limits to entry/worker/all pods; empty means all pods.
 
 
 
@@ -627,7 +627,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `roles` _string array_ | Roles limits the plugin to the specified role names. |  |  |
-| `targets` _[PluginTarget](#plugintarget) array_ | Targets limits the plugin to specific pod targets (entry/worker/all). |  |  |
+| `target` _[PluginTarget](#plugintarget)_ | Target limits the plugin to specific pod target (Entry/Worker/All).<br />kubebuilder:default=All<br />kubebuilder:validation:Enum=\{All,Entry,Worker\} |  |  |
 
 
 #### PluginSpec
@@ -644,7 +644,7 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `name` _string_ | Name uniquely identifies the plugin instance within the ModelServing. |  |  |
-| `type` _[PluginType](#plugintype)_ | Type indicates plugin category. For now, only BuiltIn is supported. | BuiltIn |  |
+| `type` _[PluginType](#plugintype)_ | Type indicates plugin category. For now, only BuiltIn is supported. | BuiltIn | Enum: [BuiltIn] <br /> |
 | `config` _[JSON](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#json-v1-apiextensions-k8s-io)_ | Config is an opaque JSON blob interpreted by the plugin implementation. |  |  |
 | `scope` _[PluginScope](#pluginscope)_ | Scope optionally narrows where this plugin runs.<br />By default, it runs on all pods. |  |  |
 

@@ -86,14 +86,15 @@ const (
 
 // PluginScope restricts where a plugin is applied.
 // Roles is a whitelist; empty means all roles.
-// Targets limits to entry/worker pods; empty means all pods.
+// Target limits to entry/worker/all pods; empty means all pods.
 type PluginScope struct {
 	// Roles limits the plugin to the specified role names.
 	// +optional
 	Roles []string `json:"roles,omitempty"`
-	// Targets limits the plugin to specific pod targets (entry/worker/all).
-	// +optional
-	Targets []PluginTarget `json:"targets,omitempty"`
+	// Target limits the plugin to specific pod target (Entry/Worker/All).
+	// kubebuilder:default=All
+	// kubebuilder:validation:Enum={All,Entry,Worker}
+	Target PluginTarget `json:"target,omitempty"`
 }
 
 // PluginSpec declares a plugin instance attached to a ModelServing.
@@ -102,6 +103,7 @@ type PluginSpec struct {
 	Name string `json:"name"`
 	// Type indicates plugin category. For now, only BuiltIn is supported.
 	// +kubebuilder:default=BuiltIn
+	// +kubebuilder:validation:Enum={BuiltIn}
 	Type PluginType `json:"type"`
 	// Config is an opaque JSON blob interpreted by the plugin implementation.
 	// +optional

@@ -111,13 +111,8 @@ func (c *Chain) OnPodReady(ctx context.Context, req *HookRequest) error {
 	return nil
 }
 
-func containsTarget(targets []workloadv1alpha1.PluginTarget, needle workloadv1alpha1.PluginTarget) bool {
-	for _, t := range targets {
-		if t == needle || t == workloadv1alpha1.PluginTargetAll {
-			return true
-		}
-	}
-	return false
+func matchesTarget(target workloadv1alpha1.PluginTarget, needle workloadv1alpha1.PluginTarget) bool {
+	return target == needle || target == workloadv1alpha1.PluginTargetAll
 }
 
 func containsRole(roles []string, role string) bool {
@@ -134,13 +129,13 @@ func shouldRun(spec workloadv1alpha1.PluginSpec, req *HookRequest) bool {
 	if len(spec.Scope.Roles) > 0 && !containsRole(spec.Scope.Roles, req.RoleName) {
 		return false
 	}
-	if len(spec.Scope.Targets) == 0 {
+	if spec.Scope.Target == "" {
 		return true
 	}
 	if req.IsEntry {
-		return containsTarget(spec.Scope.Targets, workloadv1alpha1.PluginTargetEntry)
+		return matchesTarget(spec.Scope.Target, workloadv1alpha1.PluginTargetEntry)
 	}
-	return containsTarget(spec.Scope.Targets, workloadv1alpha1.PluginTargetWorker)
+	return matchesTarget(spec.Scope.Target, workloadv1alpha1.PluginTargetWorker)
 }
 
 // DecodeJSON decodes a plugin config into the provided out struct. It is a helper for built-in plugins.

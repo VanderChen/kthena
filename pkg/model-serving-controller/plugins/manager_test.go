@@ -63,7 +63,7 @@ func TestChainOrderingAndScope(t *testing.T) {
 
 	chain := &Chain{entries: []entry{
 		{plugin: p1, spec: workloadv1alpha1.PluginSpec{Name: "p1"}},
-		{plugin: p2, spec: workloadv1alpha1.PluginSpec{Name: "p2", Scope: &workloadv1alpha1.PluginScope{Targets: []workloadv1alpha1.PluginTarget{workloadv1alpha1.PluginTargetWorker}}}},
+		{plugin: p2, spec: workloadv1alpha1.PluginSpec{Name: "p2", Scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetWorker}}},
 	}}
 
 	entryReq := &HookRequest{RoleName: "role", RoleID: "role-0", IsEntry: true, Pod: &corev1.Pod{}}
