@@ -182,31 +182,25 @@ func (c *RanktableController) InjectRanktableMount(
 		},
 	})
 
+	mount := corev1.VolumeMount{
+		Name:      "ranktable",
+		MountPath: template.MountPath,
+		ReadOnly:  true,
+	}
+
 	// Add VolumeMount to all main containers
 	for i := range pod.Spec.Containers {
-		klog.V(4).Infof("Adding ranktable volume mount to container %s in pod %s/%s",
-			pod.Spec.Containers[i].Name, pod.Namespace, pod.Name)
 		pod.Spec.Containers[i].VolumeMounts = append(
 			pod.Spec.Containers[i].VolumeMounts,
-			corev1.VolumeMount{
-				Name:      "ranktable",
-				MountPath: template.MountPath,
-				ReadOnly:  true,
-			},
+			mount,
 		)
 	}
 
 	// Add VolumeMount to all init containers
 	for i := range pod.Spec.InitContainers {
-		klog.V(4).Infof("Adding ranktable volume mount to init-container %s in pod %s/%s",
-			pod.Spec.InitContainers[i].Name, pod.Namespace, pod.Name)
 		pod.Spec.InitContainers[i].VolumeMounts = append(
 			pod.Spec.InitContainers[i].VolumeMounts,
-			corev1.VolumeMount{
-				Name:      "ranktable",
-				MountPath: template.MountPath,
-				ReadOnly:  true,
-			},
+			mount,
 		)
 	}
 }
