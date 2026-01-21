@@ -754,7 +754,7 @@ func TestModelRouteLoraShared(t *testing.T, testCtx *routercontext.RouterTestCon
 	// Note: /v1/load_lora_adapter is a management endpoint that should be called directly on the pod, not through the router
 	t.Log("Setting up port-forward to LLM-Mock pod for LoRA adapter loading...")
 	podList, err := testCtx.KubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{
-		LabelSelector: "app=deepseek-r1-1-5b",
+		LabelSelector: "app=deepseek-r1-7b",
 	})
 	require.NoError(t, err, "Failed to list LLM-Mock pods")
 	require.Greater(t, len(podList.Items), 0, "At least one LLM-Mock pod should be available")

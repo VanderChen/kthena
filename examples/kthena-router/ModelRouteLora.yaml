@@ -10,4 +10,4 @@ spec:
   rules:
   - name: "lora-route"
     targetModels:
-    - modelServerName: "deepseek-r1-1-5b"
+    - modelServerName: "deepseek-r1-7b"
