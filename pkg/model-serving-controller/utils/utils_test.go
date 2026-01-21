@@ -138,7 +138,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromInt(2),
+							MaxUnavailable: ptr.To(intstr.FromInt(2)),
 						},
 					},
 				},
@@ -154,12 +154,12 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromInt(0),
+							MaxUnavailable: ptr.To(intstr.FromInt(0)),
 						},
 					},
 				},
 			},
-			expectedResult: 1, // default maxUnavailable is 1
+			expectedResult: 0,
 			expectError:    false,
 		},
 		{
@@ -170,7 +170,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromString("20%"),
+							MaxUnavailable: ptr.To(intstr.FromString("20%")),
 						},
 					},
 				},
@@ -186,12 +186,12 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromString("50%"),
+							MaxUnavailable: ptr.To(intstr.FromString("50%")),
 						},
 					},
 				},
 			},
-			expectedResult: 5, // 50% of 9 is 4.5, rounded up to 5
+			expectedResult: 4, // 50% of 9 is 4.5, rounded down to 4
 			expectError:    false,
 		},
 		{
@@ -202,7 +202,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromString("100%"),
+							MaxUnavailable: ptr.To(intstr.FromString("100%")),
 						},
 					},
 				},
@@ -218,7 +218,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						Type: "ServingGroupRollingUpdate",
 						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-							MaxUnavailable: intstr.FromString("0%"),
+							MaxUnavailable: ptr.To(intstr.FromString("0%")),
 						},
 					},
 				},

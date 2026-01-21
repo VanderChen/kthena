@@ -129,10 +129,6 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 	maxUnavailablePath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable")
 	allErrs = append(allErrs, validateIntOrPercent(maxUnavailable, maxUnavailablePath)...)
 
-	maxSurge := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge
-	maxSurgePath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxSurge")
-	allErrs = append(allErrs, validateIntOrPercent(maxSurge, maxSurgePath)...)
-
 	// Validate partition field
 	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
 		partitionPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("partition")
@@ -150,18 +146,13 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 		}
 	}
 
-	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, int(*ms.Spec.Replicas), false)
+	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
 	if err != nil {
-		allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "validate maxUnavailable"))
-	}
-	maxSurgeValue, err := intstr.GetScaledValueFromIntOrPercent(&maxSurge, int(*ms.Spec.Replicas), true)
-	if err != nil {
-		allErrs = append(allErrs, field.Invalid(maxSurgePath, maxSurge, "validate maxSurge"))
-	}
-	if maxUnavailableValue == 0 && maxSurgeValue == 0 {
+		allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, "invalidate maxUnavailable"))
+	} else if maxUnavailableValue == 0 {
 		allErrs = append(allErrs, field.Invalid(field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
 			"",
-			"maxUnavailable and maxSurge cannot both be 0"))
+			"maxUnavailable cannot be 0"))
 	}
 	return allErrs
 }
@@ -279,7 +270,7 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	return allErrs
 }
 
-func validateIntOrPercent(value intstr.IntOrString, fieldPath *field.Path) field.ErrorList {
+func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	switch value.Type {
 	case intstr.String:

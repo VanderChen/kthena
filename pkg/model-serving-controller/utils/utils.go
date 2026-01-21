@@ -548,13 +548,12 @@ func RoleIDIndexFunc(obj interface{}) ([]string, error) {
 
 func GetMaxUnavailable(mi *workloadv1alpha1.ModelServing) (int, error) {
 	maxUnavailable := intstr.FromInt(1) // Default value
+	replicas := int(*mi.Spec.Replicas)
 	if mi.Spec.RolloutStrategy != nil && mi.Spec.RolloutStrategy.RollingUpdateConfiguration != nil {
-		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.IntVal != 0 ||
-			mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.StrVal != "" {
-			maxUnavailable = mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
+		if mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable != nil {
+			maxUnavailable = *mi.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
 		}
 	}
 	// Calculate maxUnavailable as absolute numbers
-	replicas := int(*mi.Spec.Replicas)
-	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, true)
+	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
 }

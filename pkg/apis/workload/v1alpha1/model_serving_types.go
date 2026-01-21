@@ -104,21 +104,12 @@ type RollingUpdateConfiguration struct {
 	// The maximum number of replicas that can be unavailable during the update.
 	// Value can be an absolute number (ex: 5) or a percentage of total replicas at the start of update (ex: 10%).
 	// Absolute number is calculated from percentage by rounding down.
-	// This can not be 0 if MaxSurge is 0.
+	// This can not be 0.
 	// By default, a fixed value of 1 is used.
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:default=1
-	MaxUnavailable intstr.IntOrString `json:"maxUnavailable,omitempty"`
+	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
-	// The maximum number of replicas that can be scheduled above the original number of
-	// replicas.
-	// Value can be an absolute number (ex: 5) or a percentage of total replicas at
-	// the start of the update (ex: 10%).
-	// Absolute number is calculated from percentage by rounding up.
-	// By default, a value of 0 is used.
-	// +kubebuilder:validation:XIntOrString
-	// +kubebuilder:default=0
-	MaxSurge intstr.IntOrString `json:"maxSurge,omitempty"`
 	// Partition indicates the ordinal at which the ModelServing should be partitioned
 	// for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to
 	// Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.

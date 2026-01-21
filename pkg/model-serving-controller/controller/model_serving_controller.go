@@ -851,20 +851,20 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	}
 
 	// Count how many groups are currently not running(Unavailable)
-	unavailableCount := 0
+	currentUnavailableCount := 0
 	for _, sg := range servingGroupList {
 		if sg.Status != datastore.ServingGroupRunning {
-			unavailableCount++
+			currentUnavailableCount++
 		}
 	}
 	// Check if kthena have reached the maxUnavailable limit
-	if unavailableCount >= maxUnavailable {
+	if currentUnavailableCount >= maxUnavailable {
 		// Wait until some groups become available before continuing updates
-		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", unavailableCount, maxUnavailable)
+		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", currentUnavailableCount, maxUnavailable)
 		return nil
 	}
-	// Calculate how many more groups we can make unavailable
-	remainingUnavailable := maxUnavailable - unavailableCount
+	// Calculate how many more groups we can delete in this reconcile.
+	groupToDelete := maxUnavailable - currentUnavailableCount
 
 	// Determine if partition is set
 	partition := c.getPartition(ms)
@@ -874,7 +874,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 	updateCount := 0
 	if partition > 0 {
 		// When partition is set, delete ServingGroups with ordinal >= partition
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < remainingUnavailable; i-- {
+		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
 			_, ordinal := utils.GetParentNameAndOrdinal(servingGroupList[i].Name)
 			if ordinal < partition {
 				// Skip partition-protected ServingGroups
@@ -893,7 +893,7 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 		klog.V(2).Infof("all target groups of modelServing %s have been updated (partition=%d)", ms.Name, partition)
 	} else {
 		// Original behavior: terminate the ServingGroup with the largest ordinal that does not match the update revision
-		for i := len(servingGroupList) - 1; i >= 0 && updateCount < remainingUnavailable; i-- {
+		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
 			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
 				// target ServingGroup is not the latest version, needs to be updated
 				klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
