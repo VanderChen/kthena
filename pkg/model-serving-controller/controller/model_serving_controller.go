@@ -840,16 +840,41 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
+	maxUnavailable, err := utils.GetMaxUnavailable(ms)
+	if err != nil {
+		return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
+	}
+
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil {
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
+	// Count how many groups are currently not running(Unavailable)
+	currentUnavailableCount := 0
+	for _, sg := range servingGroupList {
+		if sg.Status != datastore.ServingGroupRunning {
+			currentUnavailableCount++
+		}
+	}
+	// Check if kthena have reached the maxUnavailable limit
+	if currentUnavailableCount >= maxUnavailable {
+		// Wait until some groups become available before continuing updates
+		klog.V(4).Infof("current unavailable ServingGroup count %d has reached the maxUnavailable limit %d, waiting for next reconcile", currentUnavailableCount, maxUnavailable)
+		return nil
+	}
+	// Calculate how many more groups we can delete in this reconcile.
+	groupToDelete := maxUnavailable - currentUnavailableCount
+
+	// Determine if partition is set
 	partition := c.getPartition(ms)
 
+	// we terminate the ServingGroup with the largest ordinal that does not match the update revision.
+	// Update outdated groups respecting the maxUnavailable constraint
+	updateCount := 0
 	if partition > 0 {
 		// When partition is set, delete ServingGroups with ordinal >= partition
-		for i := len(servingGroupList) - 1; i >= 0; i-- {
+		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
 			_, ordinal := utils.GetParentNameAndOrdinal(servingGroupList[i].Name)
 			if ordinal < partition {
 				// Skip partition-protected ServingGroups
@@ -859,32 +884,24 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
 				// target ServingGroup is not the latest version, needs to be updated
 				klog.V(2).Infof("ServingGroup %s will be terminated for update (partition=%d)", servingGroupList[i].Name, partition)
-				return c.deleteServingGroup(ctx, ms, servingGroupList[i].Name)
-			}
-			if servingGroupList[i].Status != datastore.ServingGroupRunning {
-				// target ServingGroup is the latest version, but not running. We need to wait for the status to change to running.
-				klog.V(4).Infof("waiting for the ServingGroup %s status become running", servingGroupList[i].Name)
-				return nil
+				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
+					return err
+				}
+				updateCount += 1
 			}
 		}
 		klog.V(2).Infof("all target groups of modelServing %s have been updated (partition=%d)", ms.Name, partition)
 	} else {
 		// Original behavior: terminate the ServingGroup with the largest ordinal that does not match the update revision
-		for i := len(servingGroupList) - 1; i >= 0; i-- {
+		for i := len(servingGroupList) - 1; i >= 0 && updateCount < groupToDelete; i-- {
 			if c.isServingGroupOutdated(servingGroupList[i], ms.Namespace, revision) {
 				// target ServingGroup is not the latest version, needs to be updated
 				klog.V(2).Infof("ServingGroup %s will be terminated for update", servingGroupList[i].Name)
-				return c.deleteServingGroup(ctx, ms, servingGroupList[i].Name)
+				if err := c.deleteServingGroup(ctx, ms, servingGroupList[i].Name); err != nil {
+					return err
+				}
+				updateCount += 1
 			}
-			if servingGroupList[i].Status != datastore.ServingGroupRunning {
-				// target ServingGroup is the latest version, but not running. We need to wait for the status to change to running.
-				// If the group fails after rolling, it will automatically be deleted and rebuilt when detecting the pod failure.
-				// If the group still pending due to reasons such as being unable to be scheduled, rolling update process will stop
-				// to avoid affecting other groups that are running normally.
-				klog.V(4).Infof("waiting for the ServingGroup %s status become running", servingGroupList[i].Name)
-				return nil
-			}
-			// target ServingGroup is already the latest version and running, processing the rolling update of the next group.
 		}
 		klog.V(2).Infof("all target groups of modelServing %s have been updated", ms.Name)
 	}

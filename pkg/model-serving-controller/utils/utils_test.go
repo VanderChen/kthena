@@ -21,6 +21,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -96,4 +98,146 @@ func TestSetCondition(t *testing.T) {
 		assert.Equal(t, metav1.ConditionTrue, cond.Status)
 		assert.Contains(t, cond.Message, SomeGroupsAreProgressing)
 	})
+}
+
+func TestGetMaxUnavailable(t *testing.T) {
+	tests := []struct {
+		name           string
+		modelServing   *workloadv1alpha1.ModelServing
+		expectedResult int
+		expectError    bool
+	}{
+		{
+			name: "Default case - no rollout strategy",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](5),
+				},
+			},
+			expectedResult: 1, // Default value
+			expectError:    false,
+		},
+		{
+			name: "Default case - rollout strategy but no rolling update config",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](10),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+					},
+				},
+			},
+			expectedResult: 1, // Default value
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as integer - value 2",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](10),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromInt(2)),
+						},
+					},
+				},
+			},
+			expectedResult: 2,
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as integer - value 0",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](5),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromInt(0)),
+						},
+					},
+				},
+			},
+			expectedResult: 0,
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 20%",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](10),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("20%")),
+						},
+					},
+				},
+			},
+			expectedResult: 2, // 20% of 10 is 2
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 50%",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](9),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("50%")),
+						},
+					},
+				},
+			},
+			expectedResult: 4, // 50% of 9 is 4.5, rounded down to 4
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 100%",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("100%")),
+						},
+					},
+				},
+			},
+			expectedResult: 3, // 100% of 3 is 3
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 0%",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](10),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("0%")),
+						},
+					},
+				},
+			},
+			expectedResult: 0, // 0% of 10 is 0
+			expectError:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := GetMaxUnavailable(tt.modelServing)
+
+			if tt.expectError {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expectedResult, result)
+			}
+		})
+	}
 }

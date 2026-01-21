@@ -110,11 +110,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
@@ -133,51 +129,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.String,
-									StrVal: "invalid",
-								},
-								MaxSurge: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-							},
-						},
-					},
-				},
-			},
-			want: field.ErrorList{
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
-					intstr.IntOrString{
-						Type:   intstr.String,
-						StrVal: "invalid",
-					},
-					"a valid percent string must be a numeric string followed by an ending '%' (e.g. '1%',  or '93%', regex used for validation is '[0-9]+%')",
-				),
-				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
-					intstr.IntOrString{
-						Type:   intstr.String,
-						StrVal: "invalid",
-					},
-					"validate maxUnavailable",
-				),
-			},
-		},
-		{
-			name: "invalid maxSurge format",
-			args: args{
-				ms: &workloadv1alpha1.ModelServing{
-					Spec: workloadv1alpha1.ModelServingSpec{
-						Replicas: &replicas,
-						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
-							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.String,
 									StrVal: "invalid",
 								},
@@ -188,20 +140,20 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			},
 			want: field.ErrorList{
 				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxSurge"),
-					intstr.IntOrString{
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
+					&intstr.IntOrString{
 						Type:   intstr.String,
 						StrVal: "invalid",
 					},
 					"a valid percent string must be a numeric string followed by an ending '%' (e.g. '1%',  or '93%', regex used for validation is '[0-9]+%')",
 				),
 				field.Invalid(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxSurge"),
-					intstr.IntOrString{
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration").Child("maxUnavailable"),
+					&intstr.IntOrString{
 						Type:   intstr.String,
 						StrVal: "invalid",
 					},
-					"validate maxSurge",
+					"invalidate maxUnavailable",
 				),
 			},
 		},
@@ -213,11 +165,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 0,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 0,
 								},
@@ -230,7 +178,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
 					"",
-					"maxUnavailable and maxSurge cannot both be 0",
+					"maxUnavailable cannot be 0",
 				),
 			},
 		},
@@ -242,11 +190,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
@@ -266,11 +210,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
@@ -296,11 +236,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
@@ -326,11 +262,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
@@ -356,11 +288,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 						Replicas: &replicas,
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-								MaxUnavailable: intstr.IntOrString{
-									Type:   intstr.Int,
-									IntVal: 1,
-								},
-								MaxSurge: intstr.IntOrString{
+								MaxUnavailable: &intstr.IntOrString{
 									Type:   intstr.Int,
 									IntVal: 1,
 								},
