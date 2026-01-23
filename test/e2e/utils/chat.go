@@ -52,6 +52,7 @@ type ChatCompletionsRequest struct {
 type ChatCompletionsResponse struct {
 	StatusCode int
 	Body       string
+	Attempts   int
 }
 
 // CheckChatCompletions sends a chat completions request to the router service and verifies the response.
@@ -95,8 +96,9 @@ func SendChatRequestWithRetry(t *testing.T, url string, modelName string, messag
 
 	var resp *http.Response
 	var responseStr string
+	var attempt int
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	for attempt = 0; attempt < maxRetries; attempt++ {
 		req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
 		require.NoError(t, err, "Failed to create HTTP request")
 		req.Header.Set("Content-Type", "application/json")
@@ -156,6 +158,7 @@ func SendChatRequestWithRetry(t *testing.T, url string, modelName string, messag
 	return &ChatCompletionsResponse{
 		StatusCode: resp.StatusCode,
 		Body:       responseStr,
+		Attempts:   attempt + 1,
 	}
 }
 
