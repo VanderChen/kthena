@@ -107,46 +107,65 @@ func TestModelServingPodRecovery(t *testing.T) {
 	// Wait until ModelServing is ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// Wait until any pod exists in the test namespace
-	var originalPod *corev1.Pod
-	require.Eventually(t, func() bool {
-		podList, err := kubeClient.
-			CoreV1().
-			Pods(testNamespace).
-			List(ctx, metav1.ListOptions{})
-		if err != nil || len(podList.Items) == 0 {
-			return false
-		}
-		originalPod = &podList.Items[0]
-		return true
-	}, 2*time.Minute, 5*time.Second, "No pods found in test namespace")
+	// Get the ModelServing to obtain its UID
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
 
+	// List pods in the namespace and filter by OwnerReferences
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err, "Failed to list pods")
+
+	// Find a pod owned by this ModelServing
+	var originalPod *corev1.Pod
+	for _, pod := range podList.Items {
+		for _, ref := range pod.OwnerReferences {
+			if ref.UID == ms.UID {
+				originalPod = &pod
+				break
+			}
+		}
+		if originalPod != nil {
+			break
+		}
+	}
+
+	// If no pod owned by the ModelServing is found, skip the test
+	if originalPod == nil {
+		t.Log("No pod owned by ModelServing found, skipping pod recovery test")
+		t.Skip()
+	}
+
+	originalPodUID := originalPod.UID
 	originalPodName := originalPod.Name
-	t.Logf("Deleting pod %s", originalPodName)
+	t.Logf("Deleting pod %s (UID: %s)", originalPodName, originalPodUID)
 
 	// Delete the pod
-	err = kubeClient.
-		CoreV1().
-		Pods(testNamespace).
-		Delete(ctx, originalPodName, metav1.DeleteOptions{})
+	err = kubeClient.CoreV1().Pods(testNamespace).Delete(ctx, originalPodName, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete pod")
 
-	// Wait for a new pod with a different name to reach Running state
+	// Wait for a new pod owned by the same ModelServing with a different UID to reach Running
 	require.Eventually(t, func() bool {
-		pods, err := kubeClient.
-			CoreV1().
-			Pods(testNamespace).
-			List(ctx, metav1.ListOptions{})
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false
 		}
 		for _, pod := range pods.Items {
-			if pod.Name != originalPodName && pod.Status.Phase == corev1.PodRunning {
+			// Check if pod is owned by the same ModelServing
+			ownedByMS := false
+			for _, ref := range pod.OwnerReferences {
+				if ref.UID == ms.UID {
+					ownedByMS = true
+					break
+				}
+			}
+			// Return true if it's a new pod (different UID) owned by the ModelServing and is Running
+			if ownedByMS && pod.UID != originalPodUID && pod.Status.Phase == corev1.PodRunning {
+				t.Logf("New pod created: %s (UID: %s)", pod.Name, pod.UID)
 				return true
 			}
 		}
 		return false
-	}, 2*time.Minute, 5*time.Second, "New pod was not recreated after deletion")
+	}, 2*time.Minute, 5*time.Second, "New pod owned by ModelServing was not recreated after deletion")
 
 	t.Log("Pod recovery test passed successfully")
 }
@@ -175,55 +194,69 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	// Wait until ModelServing is ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
 
-	// List all Services in the test namespace
-	serviceList, err := kubeClient.
-		CoreV1().
-		Services(testNamespace).
-		List(ctx, metav1.ListOptions{})
+	// Get the ModelServing to obtain its UID
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+
+	// List all Services in the namespace
+	serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err, "Failed to list Services in namespace")
 
-	// Try to find a headless Service (Spec.ClusterIP == ClusterIPNone)
+	// Filter Services owned by this ModelServing and find the headless one
 	var originalService *corev1.Service
 	var originalServiceUID string
 	for _, svc := range serviceList.Items {
-		if svc.Spec.ClusterIP == corev1.ClusterIPNone {
+		// Check if service is owned by the ModelServing
+		ownedByMS := false
+		for _, ref := range svc.OwnerReferences {
+			if ref.UID == ms.UID {
+				ownedByMS = true
+				break
+			}
+		}
+		// Select if it's owned by the ModelServing and is headless
+		if ownedByMS && svc.Spec.ClusterIP == corev1.ClusterIPNone {
 			originalService = &svc
 			originalServiceUID = string(svc.UID)
 			break
 		}
 	}
 
-	// If no headless Service exists, gracefully skip the test
+	// If no headless Service owned by the ModelServing exists, gracefully skip the test
 	if originalService == nil {
-		t.Log("No headless Service created for ModelServing, skipping service recovery test")
+		t.Log("No headless Service owned by ModelServing found, skipping service recovery test")
 		t.Skip()
 	}
 
-	t.Logf("Deleting headless Service %s", originalService.Name)
+	t.Logf("Deleting headless Service %s (UID: %s)", originalService.Name, originalServiceUID)
 
 	// Delete the Service
-	err = kubeClient.
-		CoreV1().
-		Services(testNamespace).
-		Delete(ctx, originalService.Name, metav1.DeleteOptions{})
+	err = kubeClient.CoreV1().Services(testNamespace).Delete(ctx, originalService.Name, metav1.DeleteOptions{})
 	require.NoError(t, err, "Failed to delete headless Service")
 
-	// Wait for a new headless Service with a different UID to appear
+	// Wait for a new headless Service with same owner but different UID to appear
 	require.Eventually(t, func() bool {
-		serviceList, err := kubeClient.
-			CoreV1().
-			Services(testNamespace).
-			List(ctx, metav1.ListOptions{})
+		serviceList, err := kubeClient.CoreV1().Services(testNamespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
 			return false
 		}
 		for _, svc := range serviceList.Items {
-			if svc.Spec.ClusterIP == corev1.ClusterIPNone && string(svc.UID) != originalServiceUID {
+			// Check if service is owned by the same ModelServing
+			ownedByMS := false
+			for _, ref := range svc.OwnerReferences {
+				if ref.UID == ms.UID {
+					ownedByMS = true
+					break
+				}
+			}
+			// Return true if it's a new service (different UID) owned by the ModelServing and is headless
+			if ownedByMS && string(svc.UID) != originalServiceUID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
+				t.Logf("New Service created: %s (UID: %s)", svc.Name, svc.UID)
 				return true
 			}
 		}
 		return false
-	}, 2*time.Minute, 5*time.Second, "Headless Service was not recreated after deletion")
+	}, 2*time.Minute, 5*time.Second, "Headless Service owned by ModelServing was not recreated after deletion")
 
 	// Verify ModelServing is still ready
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
