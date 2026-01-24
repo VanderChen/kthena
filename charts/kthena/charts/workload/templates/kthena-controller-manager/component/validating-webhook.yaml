@@ -77,4 +77,31 @@ webhooks:
         resources: [ "autoscalingpolicybindings" ]
         operations: [ "CREATE", "UPDATE" ]
         scope: "Namespaced"
+  - name: validate-configmap.volcano.sh
+    admissionReviewVersions: [ "v1" ]
+    sideEffects: None
+    failurePolicy: Fail
+    timeoutSeconds: 30
+    clientConfig:
+      service:
+        name: kthena-controller-manager-webhook
+        namespace: {{ .Release.Namespace }}
+        path: "/validate-v1-configmap"
+        port: 443
+      {{- if or (eq .Values.global.certManagementMode "auto") (eq .Values.global.certManagementMode "cert-manager") }}
+      caBundle: ""
+      {{- else }}
+      caBundle: {{ required "A caBundle is required for the kthena-controller-manager validating webhook when certManagementMode is set to 'manual' (global.webhook.caBundle)" .Values.global.webhook.caBundle | quote }}
+      {{- end }}
+    rules:
+      - apiGroups: [ "" ]
+        apiVersions: [ "v1" ]
+        resources: [ "configmaps" ]
+        operations: [ "UPDATE", "DELETE" ]
+        scope: "Namespaced"
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["kthena-system"]
 {{- end }}
