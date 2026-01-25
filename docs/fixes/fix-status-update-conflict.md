@@ -8,12 +8,18 @@ This occurs because the controller calculates the new status based on an in-memo
 ## Solution
 We modify `UpdateModelServingStatus` in `pkg/model-serving-controller/controller/model_serving_controller.go` to use `k8s.io/client-go/util/retry.RetryOnConflict`.
 
-Inside the retry loop:
-1. We fetch the latest version of the `ModelServing` object from the API server.
-2. We re-apply the status calculations (replica counts, revisions, etc.) to this latest object.
-3. We attempt to update the status.
+**Optimization:** To reduce pressure on the API server, we do **not** unconditionally fetch the latest version of the object on the first attempt. Instead, we use the cached object provided to the function. Only if the update fails with a conflict error do we fetch the latest version from the API server and retry.
 
-This ensures that even if a conflict occurs, the controller will fetch the latest version and retry the update, resolving the optimistic locking conflict.
+Inside the retry loop:
+1. Use the current `ModelServing` object (initially the cached one).
+2. Apply status calculations to this object.
+3. Attempt to update the status.
+4. If the update fails with a conflict:
+   - Fetch the latest version from the API server.
+   - Update the current object reference to this new version.
+   - Return the error to trigger the retry mechanism.
+
+This ensures that we only perform the extra `Get` operation when necessary.
 
 ## Impact
-This change significantly reduces "object has been modified" errors in the controller logs and ensures that `ModelServing` status is reliably updated, improving observability and system stability.
+This change significantly reduces "object has been modified" errors in the controller logs and ensures that `ModelServing` status is reliably updated, while minimizing unnecessary API server requests.

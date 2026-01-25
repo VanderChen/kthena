@@ -1360,13 +1360,11 @@ func (c *ModelServingController) getServicesByIndex(indexName, indexValue string
 
 // UpdateModelServingStatus update replicas in modelServing status.
 func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.ModelServing, revision string) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get the latest version of ModelServing
-		latestMS, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.TODO(), ms.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
+	// Start with the cached object
+	latestMS := ms
 
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Calculate status based on latestMS
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
 		if err != nil {
 			// If no groups exist, handle gracefully by setting revisions to the new revision
@@ -1376,6 +1374,12 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 					copy.Status.CurrentRevision = revision
 					copy.Status.UpdateRevision = revision
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+					if updateErr != nil && apierrors.IsConflict(updateErr) {
+						// Refresh latestMS for the NEXT attempt
+						if newMS, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(latestMS.Namespace).Get(context.TODO(), latestMS.Name, metav1.GetOptions{}); getErr == nil {
+							latestMS = newMS
+						}
+					}
 					return updateErr
 				}
 				return nil
@@ -1502,6 +1506,12 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 
 		if shouldUpdate {
 			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+			if err != nil && apierrors.IsConflict(err) {
+				// Refresh latestMS for the NEXT attempt
+				if newMS, getErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(latestMS.Namespace).Get(context.TODO(), latestMS.Name, metav1.GetOptions{}); getErr == nil {
+					latestMS = newMS
+				}
+			}
 			if err != nil {
 				return err
 			}
