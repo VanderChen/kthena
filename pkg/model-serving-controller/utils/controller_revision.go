@@ -43,7 +43,11 @@ const (
 // In ModelServing, we typically have at most two revisions: CurrentRevision and UpdateRevision.
 func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string, templateData interface{}) (*appsv1.ControllerRevision, error) {
 	// Serialize template data
-	data, err := json.Marshal(templateData)
+	// Wrap data in a map to ensure it's a valid JSON object (Kubernetes requirement for RawExtension)
+	wrappedData := map[string]interface{}{
+		"data": templateData,
+	}
+	data, err := json.Marshal(wrappedData)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal template data: %v", err)
 	}
@@ -124,6 +128,19 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
 
+	// Try to unmarshal as wrapped data first
+	var wrapper map[string]json.RawMessage
+	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
+		if rawData, ok := wrapper["data"]; ok {
+			var roles []workloadv1alpha1.Role
+			if err := json.Unmarshal(rawData, &roles); err != nil {
+				return nil, fmt.Errorf("failed to unmarshal roles from wrapped data: %v", err)
+			}
+			return roles, nil
+		}
+	}
+
+	// Fallback: try to unmarshal directly (for backward compatibility or if not wrapped)
 	var roles []workloadv1alpha1.Role
 	if err := json.Unmarshal(cr.Data.Raw, &roles); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal roles from ControllerRevision: %v", err)
