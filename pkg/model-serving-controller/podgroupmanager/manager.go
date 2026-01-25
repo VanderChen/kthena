@@ -162,9 +162,7 @@ func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
 	// If schedulerName is empty, Kubernetes uses the default scheduler, which doesn't support gang/network topology.
 	isVolcano := schedulerName == "volcano"
 
-	hasGangOrTopology := ms.Spec.Template.GangPolicy != nil || ms.Spec.Template.NetworkTopology != nil
-
-	return isVolcano && hasGangOrTopology
+	return isVolcano
 }
 
 // createPodGroup creates a PodGroup for group-level gang scheduling
