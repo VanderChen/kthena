@@ -2038,66 +2038,65 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			expectedRemainingNames: []string{"0", "1"}, // Group 2 (not ready) and highest ready index (3) deleted
 			description:            "Groups in non-running state should be deleted first regardless of index",
 		},
-		{
-			name:            "lower_deletion_cost_deleted_first_among_ready",
-			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   2,
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupRunning,
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupRunning,
-			},
-			podDeletionCosts: map[int]int{
-				0: 100, // High cost - protected
-				1: 50,  // Medium cost
-				2: 0,   // Low cost - delete first
-				3: 75,  // Medium-high cost
-			},
-			expectedRemainingNames: []string{"0", "3"}, // Groups 2 (cost 0) and 1 (cost 50) deleted, keeping 0 and 3
-			description:            "Among ready groups, lower deletion cost should be deleted first",
-		},
-		{
-			name:            "not_ready_status_has_priority_over_deletion_cost",
-			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   2,
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupCreating, // Not ready - deleted first despite high cost
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupRunning,
-			},
-			podDeletionCosts: map[int]int{
-				0: 10,
-				1: 1000, // Very high cost but not ready - still deleted
-				2: 20,
-				3: 30,
-			},
-			expectedRemainingNames: []string{"2", "3"}, // Group 1 (not ready) and Group 0 (lowest cost among ready) deleted
-			description:            "Not-ready status should take priority over deletion cost",
-		},
-		{
-			name:            "mixed_status_and_deletion_cost",
-			existingIndices: []int{0, 1, 2, 3, 4},
-			expectedCount:   2,
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupScaling, // Not ready
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupDeleting, // Not ready
-				4: datastore.ServingGroupRunning,
-			},
-			podDeletionCosts: map[int]int{
-				0: 100,
-				1: 0,
-				2: 50,
-				3: 0,
-				4: 200, // Highest cost among ready groups
-			},
-			expectedRemainingNames: []string{"0", "4"}, // Groups 1,3 (not ready) and 2 (lowest cost among ready) deleted
-			description:            "Complex scenario with mixed status and costs",
-		},
-		{
+		        {
+		            name:            "lower_deletion_cost_deleted_first_among_ready",
+		            existingIndices: []int{0, 1, 2, 3},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupRunning,
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 100, // High cost
+		                1: 50,  // Medium cost
+		                2: 0,   // Low cost
+		                3: 75,  // Medium-high cost
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "Highest index should be deleted first regardless of deletion cost to maintain index continuity",
+		        },
+		        {
+		            name:            "not_ready_status_has_priority_over_deletion_cost",
+		            existingIndices: []int{0, 1, 2, 3},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupCreating, // Not ready
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 10,
+		                1: 1000, // Very high cost
+		                2: 20,
+		                3: 30,
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "Highest index should be deleted first regardless of status to maintain index continuity",
+		        },
+		        {
+		            name:            "mixed_status_and_deletion_cost",
+		            existingIndices: []int{0, 1, 2, 3, 4},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupNotFound, // Not ready
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupScaling,  // Not ready
+		                4: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 100,
+		                1: 0,
+		                2: 50,
+		                3: 10,
+		                4: 200,
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "Highest index should be deleted first to maintain index continuity",
+		        },		{
 			name:            "all_groups_not_ready_delete_by_index",
 			existingIndices: []int{0, 1, 2, 3},
 			expectedCount:   2,
@@ -2130,26 +2129,25 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			expectedRemainingNames: []string{"0", "1"}, // All same cost, delete by index
 			description:            "When deletion costs are equal, use index as tiebreaker",
 		},
-		{
-			name:            "negative_deletion_cost_prioritized_for_deletion",
-			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   2,
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupRunning,
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupRunning,
-			},
-			podDeletionCosts: map[int]int{
-				0: 100,
-				1: -100, // Negative cost - high deletion priority
-				2: 50,
-				3: 75,
-			},
-			expectedRemainingNames: []string{"0", "3"}, // Group 1 (negative cost) and 2 (low positive cost) deleted
-			description:            "Negative deletion cost should prioritize deletion",
-		},
-	}
+		        {
+		            name:            "negative_deletion_cost_prioritized_for_deletion",
+		            existingIndices: []int{0, 1, 2, 3},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupRunning,
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 10,
+		                1: 20,
+		                2: -100, // Negative cost - should be a candidate but index takes priority
+		                3: 30,
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "Highest index should be deleted first regardless of negative deletion cost",
+		        },	}
 
 	for idx, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2334,47 +2332,44 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			expectedRemainingNames: []string{"0", "1", "2"}, // R-3, R-4 deleted, R-1 protected even though not ready
 			description:            "Partition-protected replicas should never be deleted even if not ready",
 		},
-		{
-			name:            "no partition, all replicas can be deleted",
-			partition:       nil,
-			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   2,
-			podDeletionCosts: map[int]int{
-				0: 100, // High cost
-				1: 50,  // Medium cost
-				2: 0,   // Low cost - should be deleted
-				3: 75,  // Medium-high cost
-			},
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupRunning,
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupRunning,
-			},
-			expectedRemainingNames: []string{"0", "3"}, // R-2 (low cost) and R-1 (medium cost) deleted
-			description:            "Without partition, all replicas are candidates for deletion based on binpack scoring",
-		},
-		{
-			name:            "partition=5, all replicas protected",
-			partition:       ptr.To[int32](5),
-			existingIndices: []int{0, 1, 2, 3},
-			expectedCount:   2, // Scale down to trigger deletion of protected replicas
-			podDeletionCosts: map[int]int{
-				0: 100, // High cost, protected
-				1: 50,  // Medium cost, protected
-				2: 0,   // Low cost, protected (should be deleted first)
-				3: 200, // Very high cost, protected (should be deleted last)
-			},
-			groupStatuses: map[int]datastore.ServingGroupStatus{
-				0: datastore.ServingGroupRunning,
-				1: datastore.ServingGroupRunning,
-				2: datastore.ServingGroupRunning,
-				3: datastore.ServingGroupRunning,
-			},
-			expectedRemainingNames: []string{"0", "3"}, // R-2 (lowest cost) and R-1 (medium cost) deleted based on binpack scoring
-			description:            "When partition exceeds all replica indices, all replicas are classified as protected and deletion is based on binpack scoring within protected list",
-		},
-		{
+		        {
+		            name:            "no_partition,_all_replicas_can_be_deleted",
+		            existingIndices: []int{0, 1, 2, 3},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupRunning,
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 100,
+		                1: 100,
+		                2: 0,
+		                3: 0,
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "Without partition, highest index replicas are deleted first",
+		        },
+		        {
+		            name:            "partition=5,_all_replicas_protected",
+		            existingIndices: []int{0, 1, 2, 3},
+		            expectedCount:   2,
+		            groupStatuses: map[int]datastore.ServingGroupStatus{
+		                0: datastore.ServingGroupRunning,
+		                1: datastore.ServingGroupRunning,
+		                2: datastore.ServingGroupRunning,
+		                3: datastore.ServingGroupRunning,
+		            },
+		            podDeletionCosts: map[int]int{
+		                0: 100,
+		                1: 100,
+		                2: 0,
+		                3: 0,
+		            },
+		            expectedRemainingNames: []string{"0", "1"},
+		            description:              "When partition exceeds all replica indices, all replicas are classified as protected and highest index is deleted first",
+		        },		{
 			name:            "partition=3, scale down below partition - delete protected after non-protected",
 			partition:       ptr.To[int32](3),
 			existingIndices: []int{0, 1, 2, 3, 4},
@@ -3248,13 +3243,13 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				3: datastore.RoleRunning,
 			},
 			podDeletionCosts: map[int]int{
-				0: 100, // High cost - protected
+				0: 100, // High cost
 				1: 50,  // Medium cost
-				2: 0,   // Low cost - delete first
+				2: 0,   // Low cost
 				3: 75,  // Medium-high cost
 			},
-			expectedRemainingNames: []string{"prefill-0", "prefill-3"}, // Roles 2 (cost 0) and 1 (cost 50) deleted, keeping 0 and 3
-			description:            "Among ready roles, lower deletion cost should be deleted first",
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+			description:            "Highest index should be deleted first regardless of deletion cost to maintain index continuity",
 		},
 		{
 			name:            "not_ready_status_has_priority_over_deletion_cost",
@@ -3262,18 +3257,18 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			expectedCount:   2,
 			roleStatuses: map[int]datastore.RoleStatus{
 				0: datastore.RoleRunning,
-				1: datastore.RoleCreating, // Not ready - deleted first despite high cost
+				1: datastore.RoleCreating, // Not ready
 				2: datastore.RoleRunning,
 				3: datastore.RoleRunning,
 			},
 			podDeletionCosts: map[int]int{
 				0: 10,
-				1: 1000, // Very high cost but not ready - still deleted
+				1: 1000, // Very high cost
 				2: 20,
 				3: 30,
 			},
-			expectedRemainingNames: []string{"prefill-2", "prefill-3"}, // Role 1 (not ready) and Role 0 (lowest cost among ready) deleted
-			description:            "Not-ready status should take priority over deletion cost",
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+			description:            "Highest index should be deleted first regardless of status to maintain index continuity",
 		},
 		{
 			name:            "mixed_status_and_deletion_cost",
@@ -3293,8 +3288,8 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				3: 0,
 				4: 200, // Highest cost among ready roles
 			},
-			expectedRemainingNames: []string{"prefill-0", "prefill-4"}, // Roles 1,3 (not ready) and 2 (lowest cost among ready) deleted
-			description:            "Complex scenario with mixed status and costs",
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+			description:            "Highest index should be deleted first to maintain index continuity",
 		},
 		{
 			name:            "all_roles_not_ready_delete_by_index",
@@ -3341,12 +3336,12 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			},
 			podDeletionCosts: map[int]int{
 				0: 100,
-				1: -100, // Negative cost - high deletion priority
+				1: -100, // Negative cost
 				2: 50,
 				3: 75,
 			},
-			expectedRemainingNames: []string{"prefill-0", "prefill-3"}, // Role 1 (negative cost) and 2 (low positive cost) deleted
-			description:            "Negative deletion cost should prioritize deletion",
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+			description:            "Highest index should be deleted first regardless of negative deletion cost",
 		},
 		{
 			name:            "partial_deletion_costs_use_index_for_unspecified",
@@ -3363,8 +3358,8 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				2: 50,  // Medium cost
 				// Roles 1 and 3 have no explicit cost (default to 0)
 			},
-			expectedRemainingNames: []string{"prefill-0", "prefill-2"}, // Roles 1 and 3 (default cost 0) deleted, keeping 0 and 2
-			description:            "Roles without explicit deletion cost should default to 0",
+			expectedRemainingNames: []string{"prefill-0", "prefill-1"},
+			description:            "Highest index should be deleted first among roles with same (default) cost",
 		},
 	}
 

@@ -373,7 +373,7 @@ func (c *RanktableController) groupPods(
 		var groupKey string
 		if level == RoleLevelRanktable {
 			// Group by role name
-			groupKey = utils.PodRoleName(pod)
+			groupKey = utils.GetRoleName(pod)
 		} else {
 			// Group by serving group name
 			_, groupKey, _ = utils.GetModelServingAndGroupByLabel(pod.Labels)
@@ -398,7 +398,7 @@ func (c *RanktableController) GetRanktableConfigMapName(
 ) string {
 	var groupName string
 	if level == RoleLevelRanktable {
-		groupName = utils.PodRoleName(pod)
+		groupName = utils.GetRoleName(pod)
 	} else {
 		_, groupName, _ = utils.GetModelServingAndGroupByLabel(pod.Labels)
 	}
