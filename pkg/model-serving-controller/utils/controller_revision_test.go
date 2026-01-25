@@ -59,7 +59,7 @@ func TestCreateControllerRevision(t *testing.T) {
 	cr, err := CreateControllerRevision(ctx, client, ms, "revision-v1", templateData)
 	assert.NoError(t, err)
 	assert.NotNil(t, cr)
-	assert.Equal(t, "test-ms-revision-v1", cr.Name)
+	assert.Equal(t, "default-test-ms-revision-v1", cr.Name)
 	assert.Equal(t, "default", cr.Namespace)
 	assert.Equal(t, "test-ms", cr.Labels[ControllerRevisionLabelKey])
 	assert.Equal(t, "revision-v1", cr.Labels[ControllerRevisionRevisionLabelKey])
@@ -103,7 +103,7 @@ func TestGetControllerRevision(t *testing.T) {
 	cr, err := GetControllerRevision(ctx, client, ms, "revision-v2")
 	assert.NoError(t, err)
 	assert.NotNil(t, cr)
-	assert.Equal(t, "test-ms-revision-v2", cr.Name)
+	assert.Equal(t, "default-test-ms-revision-v2", cr.Name)
 	assert.Equal(t, "revision-v2", cr.Labels[ControllerRevisionRevisionLabelKey])
 }
 
@@ -163,8 +163,8 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 	assert.NoError(t, err)
 
 	// Verify CurrentRevision and UpdateRevision are preserved
-	currentRevisionName := GenerateControllerRevisionName(ms.GetName(), ms.Status.CurrentRevision)
-	updateRevisionName := GenerateControllerRevisionName(ms.GetName(), ms.Status.UpdateRevision)
+	currentRevisionName := GenerateControllerRevisionName(ms.Namespace, ms.Name, ms.Status.CurrentRevision)
+	updateRevisionName := GenerateControllerRevisionName(ms.Namespace, ms.Name, ms.Status.UpdateRevision)
 
 	remainingRevisionNames := make(map[string]bool)
 	for _, cr := range list.Items {

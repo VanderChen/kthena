@@ -88,8 +88,8 @@ func generateEntryPodName(groupName, roleName string) string {
 	return groupName + "-" + roleName + "-" + "0"
 }
 
-func GenerateControllerRevisionName(msName, revision string) string {
-	return msName + "-" + revision
+func GenerateControllerRevisionName(msNamespace, msName, revision string) string {
+	return msNamespace + "-" + msName + "-" + revision
 }
 
 func generateWorkerPodName(groupName, roleName string, podIndex int) string {

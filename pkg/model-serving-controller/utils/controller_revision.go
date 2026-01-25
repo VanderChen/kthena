@@ -53,7 +53,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	}
 
 	// Check if ControllerRevision already exists
-	controllerRevisionName := GenerateControllerRevisionName(ms.GetName(), revision)
+	controllerRevisionName := GenerateControllerRevisionName(ms.Namespace, ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
 		// If already exists, check if data has changed
@@ -111,7 +111,7 @@ func GetControllerRevision(
 	revision string,
 ) (*appsv1.ControllerRevision, error) {
 	//TODO: get it from a informer's store
-	controllerRevisionName := GenerateControllerRevisionName(ms.GetName(), revision)
+	controllerRevisionName := GenerateControllerRevisionName(ms.Namespace, ms.Name, revision)
 	cr, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -172,10 +172,10 @@ func CleanupOldControllerRevisions(
 	// Get the revision names that must be preserved (CurrentRevision and UpdateRevision)
 	var currentRevisionName, updateRevisionName string
 	if ms.Status.CurrentRevision != "" {
-		currentRevisionName = GenerateControllerRevisionName(ms.GetName(), ms.Status.CurrentRevision)
+		currentRevisionName = GenerateControllerRevisionName(ms.Namespace, ms.Name, ms.Status.CurrentRevision)
 	}
 	if ms.Status.UpdateRevision != "" {
-		updateRevisionName = GenerateControllerRevisionName(ms.GetName(), ms.Status.UpdateRevision)
+		updateRevisionName = GenerateControllerRevisionName(ms.Namespace, ms.Name, ms.Status.UpdateRevision)
 	}
 
 	// Delete all revisions except CurrentRevision and UpdateRevision
