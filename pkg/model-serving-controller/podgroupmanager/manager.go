@@ -143,6 +143,10 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 		return m.createPodGroup(ctx, ms, pgName)
 	}
 
+	if podGroup.DeletionTimestamp != nil {
+		return fmt.Errorf("PodGroup %s is terminating", pgName)
+	}
+
 	return m.updatePodGroupIfNeeded(ctx, podGroup, ms)
 }
 
