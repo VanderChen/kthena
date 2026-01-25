@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -379,6 +380,11 @@ func (c *ModelServingController) enqueueModelServing(ms *workloadv1alpha1.ModelS
 		utilruntime.HandleError(err)
 		return
 	}
+	// we used the key "namespace/name" before, but it can not distinguish the old and new object with the same name.
+	// so we add the uid to the key, the key format is "namespace/name/uid"
+	if len(ms.UID) > 0 {
+		key = key + "/" + string(ms.UID)
+	}
 	c.workqueue.Add(key)
 }
 
@@ -408,6 +414,14 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 
 func (c *ModelServingController) syncModelServing(ctx context.Context, key string) error {
 	klog.V(4).InfoS("Started syncing ModelServing", "key", key)
+	// key format: namespace/name/uid or namespace/name
+	parts := strings.Split(key, "/")
+	var expectedUID types.UID
+	if len(parts) == 3 {
+		key = parts[0] + "/" + parts[1]
+		expectedUID = types.UID(parts[2])
+	}
+
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
 		return fmt.Errorf("invalid resource key: %s", err)
@@ -420,6 +434,11 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 	if err != nil {
 		return err
+	}
+
+	if len(expectedUID) > 0 && ms.UID != expectedUID {
+		klog.V(4).Infof("ModelServing %s/%s with UID %s is not the one we want to sync (expected UID %s)", namespace, name, ms.UID, expectedUID)
+		return nil
 	}
 
 	// only fields in roles can be modified in rolling updates.
@@ -442,6 +461,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
 	}
+
 
 	if err := c.manageRole(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage role replicas: %v", err)
