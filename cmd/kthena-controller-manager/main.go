@@ -175,13 +175,6 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	autoscalingPolicyValidator := modelboosterwebhook.NewAutoscalingPolicyValidator()
 	autoscalingPolicyMutator := modelboosterwebhook.NewAutoscalingPolicyMutator()
 	autoscalingBindingValidator := modelboosterwebhook.NewAutoscalingBindingValidator(kthenaClient)
-
-
-	modelValidator := handlers.NewModelValidator()
-	modelMutator := handlers.NewModelMutator()
-	autoscalingPolicyValidator := handlers.NewAutoscalingPolicyValidator()
-	autoscalingPolicyMutator := handlers.NewAutoscalingPolicyMutator()
-	autoscalingBindingValidator := handlers.NewAutoscalingBindingValidator(kthenaClient)
 	mux.HandleFunc("/validate/modelbooster", modelValidator.Handle)
 	mux.HandleFunc("/mutate/modelbooster", modelMutator.Handle)
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)

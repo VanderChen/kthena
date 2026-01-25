@@ -326,13 +326,13 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if ms == nil {
 		return
 	}
-	// Remove the pod from running pods in the store
-	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
-
 	// skip handling if pod revision mismatches serving group revision
 	if c.shouldSkipPodHandling(ms, servingGroupName, pod) {
 		return
 	}
+
+	// Remove the pod from running pods in the store
+	c.store.DeleteRunningPodFromServingGroup(utils.GetNamespaceName(ms), servingGroupName, pod.Name)
 
 	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
 		return
@@ -462,7 +462,6 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
 	}
-
 
 	if err := c.manageRole(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage role replicas: %v", err)
@@ -1729,7 +1728,6 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			klog.Errorf("Failed to get ranktable template when creating worker pod: %v", err)
 		}
 	}
-
 
 	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, entryPod, metav1.CreateOptions{})
 	if err != nil && !apierrors.IsAlreadyExists(err) {
