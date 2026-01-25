@@ -491,7 +491,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 3, // 2*1 (entry) + 3 (workers) = 5 total, min=3 is valid
+									"worker": 2, // 2 (role replicas) >= 2 (min), valid
 								},
 							},
 						},
@@ -532,7 +532,7 @@ func TestValidateGangPolicy(t *testing.T) {
 			},
 		},
 		{
-			name: "invalid minRoleReplicas - exceeds total replicas",
+			name: "invalid minRoleReplicas - exceeds role replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -547,7 +547,7 @@ func TestValidateGangPolicy(t *testing.T) {
 							},
 							GangPolicy: &workloadv1alpha1.GangPolicy{
 								MinRoleReplicas: map[string]int32{
-									"worker": 10, // 2*1 (entry) + 3 (workers) = 5 total, min=10 is invalid
+									"worker": 10, // exceeds replicas 2
 								},
 							},
 						},
@@ -558,7 +558,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("template").Child("gangPolicy").Child("minRoleReplicas").Key("worker"),
 					int32(10),
-					"minRoleReplicas (10) for role worker cannot exceed total replicas (5)",
+					"minRoleReplicas (10) for role worker cannot exceed replicas (2)",
 				),
 			},
 		},
@@ -641,6 +641,106 @@ func TestValidateGangPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validateGangPolicy(tt.args.ms)
+			if got != nil {
+				assert.EqualValues(t, tt.want, got)
+			} else {
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestValidateRoleNames(t *testing.T) {
+	type args struct {
+		ms *workloadv1alpha1.ModelServing
+	}
+	tests := []struct {
+		name string
+		args args
+		want field.ErrorList
+	}{
+		{
+			name: "valid role name",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "valid-name-123"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "invalid role name - too long",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "this-role-name-is-definitely-longer-than-32-characters"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"this-role-name-is-definitely-longer-than-32-characters",
+					"must be no more than 32 characters",
+				),
+			},
+		},
+		{
+			name: "invalid role name - invalid format (uppercase)",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "InvalidName"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"InvalidName",
+					"a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')",
+				),
+			},
+		},
+		{
+			name: "invalid role name - invalid format (starts with dash)",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Template: workloadv1alpha1.ServingGroup{
+							Roles: []workloadv1alpha1.Role{
+								{Name: "-invalid"},
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("template").Child("roles").Index(0).Child("name"),
+					"-invalid",
+					"a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '[a-z0-9]([-a-z0-9]*[a-z0-9])?')",
+				),
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := validateRoleNames(tt.args.ms)
 			if got != nil {
 				assert.EqualValues(t, tt.want, got)
 			} else {

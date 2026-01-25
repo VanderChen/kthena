@@ -88,6 +88,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
+	allErrs = append(allErrs, validateRoleNames(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -220,19 +221,19 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		// Find the role to check its actual replicas
 		for _, role := range ms.Spec.Template.Roles {
 			if role.Name == roleName {
-				// Calculate total replicas for this role (entry + workers)
-				totalReplicas := int32(1) // Entry pod
+				// Calculate total replicas for this role
+				// minRoleReplicas is compared against the number of Role replicas
+				replicas := int32(1)
 				if role.Replicas != nil {
-					totalReplicas *= *role.Replicas
+					replicas = *role.Replicas
 				}
-				totalReplicas += role.WorkerReplicas
 
 				// Validate minReplicas doesn't exceed total replicas
-				if minReplicas > totalReplicas {
+				if minReplicas > replicas {
 					allErrs = append(allErrs, field.Invalid(
 						minRoleReplicasPath.Key(roleName),
 						minReplicas,
-						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed total replicas (%d)", minReplicas, roleName, totalReplicas),
+						fmt.Sprintf("minRoleReplicas (%d) for role %s cannot exceed replicas (%d)", minReplicas, roleName, replicas),
 					))
 				}
 
@@ -249,6 +250,25 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 		}
 	}
 
+	return allErrs
+}
+
+func validateRoleNames(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	for i, role := range ms.Spec.Template.Roles {
+		path := field.NewPath("spec").Child("template").Child("roles").Index(i).Child("name")
+
+		// Validate length
+		if len(role.Name) > 32 {
+			allErrs = append(allErrs, field.Invalid(path, role.Name, "must be no more than 32 characters"))
+		}
+
+		// Validate DNS-1123 Label
+		errs := validation.IsDNS1123Label(role.Name)
+		for _, e := range errs {
+			allErrs = append(allErrs, field.Invalid(path, role.Name, e))
+		}
+	}
 	return allErrs
 }
 
