@@ -1208,11 +1208,18 @@ func (c *ModelServingController) shouldSkipPodHandling(ms *workloadv1alpha1.Mode
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
 	}, servingGroupName)
-	if servingGroup != nil && servingGroup.Revision != podRevision {
-		// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
-		klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
-			pod.Namespace, pod.Name, podRevision, servingGroupName, servingGroup.Revision)
-		return true
+	if servingGroup != nil {
+		// If the ServingGroup is in Deleting status, we should handle the pod regardless of revision mismatch
+		// to ensure proper cleanup and state transition.
+		if servingGroup.Status == datastore.ServingGroupDeleting {
+			return false
+		}
+		if servingGroup.Revision != podRevision {
+			// If the pod revision is not equal to the ServingGroup revision, we do not need to handle it.
+			klog.V(4).Infof("pod %s/%s revision %s is not equal to ServingGroup %s revision %s, skip handling",
+				pod.Namespace, pod.Name, podRevision, servingGroupName, servingGroup.Revision)
+			return true
+		}
 	}
 	return false
 }
