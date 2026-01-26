@@ -1093,6 +1093,7 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 		// Rebuild the entire ServingGroup directly
 		if err := c.deleteServingGroup(context.TODO(), ms, servingGroupName); err != nil {
 			klog.Errorf("failed to delete ServingGroup %s: %v", servingGroupName, err)
+			return err
 		}
 	case workloadv1alpha1.RoleRecreate:
 		// If Rolling update in RoleRecreate mode, requires re-entering the queue during the pod delete event.
