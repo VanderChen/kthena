@@ -727,23 +727,23 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		roleScores = append(roleScores, scoreInfo)
 	}
 
-	// Sort by priority tuple: (index, priority, deletionCost)
-	// Primary: Higher index = higher deletion priority (delete first) to maintain index continuity
-	// Secondary: Sort by priority (not-ready first)
-	// Tertiary: Among groups with same priority, lower deletion cost comes first
+	// Sort by priority tuple: (priority, deletionCost, index)
+	// Primary: Sort by priority (not-ready first)
+	// Secondary: Among roles with same priority, lower deletion cost comes first
+	// Tertiary: Higher index = higher deletion priority (delete first) to maintain index continuity
 	slices.SortFunc(roleScores, func(a, b RoleWithScore) int {
-		// Primary: Higher index comes first
-		if a.Index != b.Index {
-			return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-		}
-
-		// Secondary: Sort by priority (not-ready first)
+		// Primary: Sort by priority (not-ready first)
 		if a.Priority != b.Priority {
 			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
 		}
 
-		// Tertiary: Among roles with same priority, lower deletion cost comes first
-		return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		// Secondary: Among roles with same priority, lower deletion cost comes first
+		if a.DeletionCost != b.DeletionCost {
+			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		}
+
+		// Tertiary: Higher index comes first
+		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
 	})
 
 	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
@@ -1561,23 +1561,23 @@ func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms 
 		nonProtectedScores = allScores
 	}
 
-	// Sort both lists by priority tuple: (index, priority, deletionCost)
-	// Primary: Higher index = higher deletion priority (delete first) to maintain index continuity
-	// Secondary: Sort by priority (not-ready first)
-	// Tertiary: Among groups with same priority, lower deletion cost comes first
+	// Sort both lists by priority tuple: (priority, deletionCost, index)
+	// Primary: Sort by priority (not-ready first)
+	// Secondary: Among groups with same priority, lower deletion cost comes first
+	// Tertiary: Higher index = higher deletion priority (delete first) to maintain index continuity
 	sortGroups := func(a, b ServingGroupWithScore) int {
-		// Primary: Higher index comes first
-		if a.Index != b.Index {
-			return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-		}
-
-		// Secondary: Sort by priority (not-ready first)
+		// Primary: Sort by priority (not-ready first)
 		if a.Priority != b.Priority {
 			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
 		}
 
-		// Tertiary: Among groups with same priority, lower deletion cost comes first
-		return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		// Secondary: Among groups with same priority, lower deletion cost comes first
+		if a.DeletionCost != b.DeletionCost {
+			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+		}
+
+		// Tertiary: Higher index comes first
+		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
 	}
 
 	slices.SortFunc(nonProtectedScores, sortGroups)
