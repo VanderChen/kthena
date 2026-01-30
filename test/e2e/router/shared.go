@@ -330,7 +330,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		v2Count := 0
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 
@@ -403,7 +403,7 @@ func TestModelRouteSubsetShared(t *testing.T, testCtx *routercontext.RouterTestC
 		v2Count := 0
 
 		for i := 0; i < totalRequests; i++ {
-			resp := utils.CheckChatCompletions(t, modelRoute.Spec.ModelName, messages)
+			resp := utils.CheckChatCompletionsQuiet(t, modelRoute.Spec.ModelName, messages)
 			assert.Equal(t, 200, resp.StatusCode)
 			assert.NotEmpty(t, resp.Body)
 

@@ -75,6 +75,16 @@ func CheckChatCompletionsWithHeaders(t *testing.T, modelName string, messages []
 // SendChatRequestWithRetry sends a chat completions request with retry logic but without assertions.
 // It returns the final response regardless of status code.
 func SendChatRequestWithRetry(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {
+	return sendChatRequestWithRetry(t, url, modelName, messages, headers, false)
+}
+
+// SendChatRequestWithRetryQuiet is like SendChatRequestWithRetry but does not log response status/body on success.
+// Use it in loops or high-volume checks to avoid log flood (e.g. TestModelRouteSubsetShared weighted distribution).
+func SendChatRequestWithRetryQuiet(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string) *ChatCompletionsResponse {
+	return sendChatRequestWithRetry(t, url, modelName, messages, headers, true)
+}
+
+func sendChatRequestWithRetry(t *testing.T, url string, modelName string, messages []ChatMessage, headers map[string]string, quiet bool) *ChatCompletionsResponse {
 	requestBody := ChatCompletionsRequest{
 		Model:    modelName,
 		Messages: messages,
@@ -136,12 +146,13 @@ func SendChatRequestWithRetry(t *testing.T, url string, modelName string, messag
 
 		// Check if response is successful
 		if resp.StatusCode == http.StatusOK && responseStr != "" && !containsError(responseStr) {
-			t.Logf("Chat response status: %d", resp.StatusCode)
-			t.Logf("Chat response: %s", responseStr)
+			if !quiet {
+				t.Logf("Chat response status: %d", resp.StatusCode)
+				t.Logf("Chat response: %s", responseStr)
+			}
 			break
 		}
 
-		// If not successful and we have retries left, retry
 		if attempt < maxRetries-1 {
 			t.Logf("Attempt %d/%d returned status %d or error response, retrying in %v...", attempt+1, maxRetries, resp.StatusCode, backoff)
 			time.Sleep(backoff)
@@ -149,9 +160,10 @@ func SendChatRequestWithRetry(t *testing.T, url string, modelName string, messag
 			continue
 		}
 
-		// Last attempt - log the response but don't assert success
-		t.Logf("Chat response status: %d", resp.StatusCode)
-		t.Logf("Chat response: %s", responseStr)
+		if !quiet {
+			t.Logf("Chat response status: %d", resp.StatusCode)
+			t.Logf("Chat response: %s", responseStr)
+		}
 		break
 	}
 
@@ -170,6 +182,16 @@ func CheckChatCompletionsWithURLAndHeaders(t *testing.T, url string, modelName s
 	assert.NotEmpty(t, resp.Body, "Chat response is empty")
 	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 
+	return resp
+}
+
+// CheckChatCompletionsQuiet is like CheckChatCompletions but does not log response status/body on success.
+// Use it in high-volume loops (e.g. weighted distribution tests) to avoid log flood.
+func CheckChatCompletionsQuiet(t *testing.T, modelName string, messages []ChatMessage) *ChatCompletionsResponse {
+	resp := SendChatRequestWithRetryQuiet(t, DefaultRouterURL, modelName, messages, nil)
+	assert.Equal(t, http.StatusOK, resp.StatusCode, "Expected HTTP 200 status code")
+	assert.NotEmpty(t, resp.Body, "Chat response is empty")
+	assert.NotContains(t, resp.Body, "error", "Chat response contains error")
 	return resp
 }
 
