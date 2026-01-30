@@ -10,7 +10,7 @@ Thank you for your interest in improving Kthena! This guide outlines how to get 
 * Chat with maintainers via Slack (link in the project README)
 * Review the [code of conduct](https://github.com/volcano-sh/community/blob/master/code_of_conduct.md) before participating
 
-## 🚀 Contribution Workflow
+##  Contribution Workflow
 
 ### 1. Pick or Propose Work
 
@@ -85,39 +85,42 @@ To make it easier for your PR to receive reviews, consider the reviewers will ne
 * Reply to each comment once addressed
 * Squash commits if asked by reviewers to keep history clean
 
-### 10. Celebrate the Merge 🎉
+### 10. Celebrate the Merge 
 
 * Once the PR is approved and checks are green, the maintainer will merge it
 * Your contribution becomes part of the Kthena history!
 
-## 📐 Coding Standards
+##  Coding Standards
 
 * Follow Go `gofmt` formatting automatically (run `go fmt ./...`)
 * Maintain consistent log semantics via the shared logging packages under `pkg/`
 * Keep public API changes backward compatible; update CRDs and generated clients when fields change (`make generate`)
 * Document new features under `docs/` and update READMEs/examples when behavior changes
 
-## 🧪 Testing Guidelines
+##  AI Guidance
+Using AI tools to help write your PR is acceptable, but as the author, you are responsible for understanding every change. Do not leave the first review of AI generated changes to the reviewers, verify the changes (code review, testing, etc.) before submitting your PR. Reviewers may ask questions about your AI-assisted code, and if you cannot explain why a change was made, the PR will be closed. When responding to review comments, please do so without relying on AI tools. Reviewers want to engage directly with you, not with generated responses. If you used AI tools in preparing your PR, please disclose this in the "Special notes for your reviewer" section. All contributions must follow the contributions policies and use commit messages that align with the policy. Large AI generated PRs and AI generated commit messages are discouraged.
+
+##  Testing Guidelines
 
 * Unit tests are mandatory for new functionality and bug fixes
 * Use table-driven tests where appropriate for clarity
 * For concurrency-sensitive code, add race detector checks (`go test -race ./...`)
 * Integration tests should target scenarios under `test/` or `examples/`
 
-## 📚 Documentation Expectations
+##  Documentation Expectations
 
 * Update relevant docs under `docs/kthena/docs/`
 * Provide getting-started examples if introducing new CRDs or CLI commands
 * Refresh charts/examples under `examples/` when changing deployments
 * Include release notes summary for significant changes (tag `release-note`) in PRs
 
-## 🧭 Governance and Ownership
+##  Governance and Ownership
 
 * Maintainers are listed in the top-level [`OWNERS`](./OWNERS) file and `OWNERS` files in subdirectories
 * Subsystem owners review and approve changes in their areas
 * Major design decisions go through design docs in `docs/proposal/`
 
-## 🛠 Tooling
+##  Tooling
 
 * `make lint` runs linters (`golangci-lint`)
 * `make test` runs unit tests
@@ -125,11 +128,11 @@ To make it easier for your PR to receive reviews, consider the reviewers will ne
 * `make generate` regenerates codegen artifacts (CRDs, clients)
 * `make gen-docs` builds documentation (Docusaurus)
 
-## 🔐 Security Reporting
+##  Security Reporting
 
 * For sensitive issues, email volcano-security@googlegroups.com instead of filing a public issue
 * Provide steps to reproduce, affected components, and impact assessment
 
-## 📝 License
+##  License
 
 By contributing, you agree that your contributions will be licensed under the Apache 2.0 License. See [LICENSE](./LICENSE) for details.
