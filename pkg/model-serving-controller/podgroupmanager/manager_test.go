@@ -18,17 +18,24 @@ package podgroupmanager
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
+	v1beta1 "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -1116,4 +1123,67 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestUpdatePodGroupIfNeeded_Conflict(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				GangPolicy: &workloadv1alpha1.GangPolicy{},
+			},
+		},
+	}
+
+	pg := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            "test-ms-0",
+			Namespace:       "default",
+			ResourceVersion: "1",
+		},
+		Spec: schedulingv1beta1.PodGroupSpec{
+			MinMember: 1,
+		},
+	}
+
+	// Create fake client
+	fakeVolcanoClient := volcanofake.NewSimpleClientset(pg)
+	_, _ = fakeVolcanoClient.SchedulingV1beta1().PodGroups(pg.Namespace).Create(context.Background(), pg, metav1.CreateOptions{})
+
+	store := datastore.New()
+	apiextfake := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
+
+	manager := NewManager(nil, fakeVolcanoClient, apiextfake, store)
+	manager.hasPodGroupCRD.Store(true)
+
+	// Manually populate the lister to avoid "not found" error since we are not starting the informer
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	indexer.Add(pg)
+	manager.podGroupLister = v1beta1.NewPodGroupLister(indexer)
+
+	// Inject reactor to simulate conflict
+	conflictCount := 0
+	fakeVolcanoClient.PrependReactor("update", "podgroups", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if conflictCount == 0 {
+			conflictCount++
+			return true, nil, apierrors.NewConflict(schema.GroupResource{Group: "scheduling.volcano.sh", Resource: "podgroups"}, "test-ms-0", fmt.Errorf("conflict"))
+		}
+		return false, nil, nil
+	})
+
+	// ms has empty roles, so calculated minMember will be 0.
+	// pg has MinMember 1.
+	// So 0 != 1, update should happen.
+
+	err := manager.updatePodGroupIfNeeded(context.Background(), pg, ms)
+	assert.NoError(t, err)
+	assert.Equal(t, 1, conflictCount, "Should have retried once")
+
+	// Verify final state
+	updatedPG, err := fakeVolcanoClient.SchedulingV1beta1().PodGroups("default").Get(context.Background(), "test-ms-0", metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Equal(t, int32(0), updatedPG.Spec.MinMember)
 }

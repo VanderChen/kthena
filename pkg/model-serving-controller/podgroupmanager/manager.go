@@ -31,11 +31,14 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	volcanoclient "volcano.sh/apis/pkg/client/clientset/versioned"
+	"volcano.sh/apis/pkg/client/informers/externalversions"
+	"volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -55,6 +58,9 @@ type Manager struct {
 	hasSubGroupPolicy atomic.Bool
 
 	CrdInformer cache.SharedIndexInformer
+
+	PodGroupInformer cache.SharedIndexInformer
+	podGroupLister   v1beta1.PodGroupLister
 }
 
 // NewManager creates a new gang scheduling manager
@@ -123,6 +129,12 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 	})
 
 	newManager.CrdInformer = crdInformer
+
+	// Set up a shared informer factory for podgroup
+	podGroupInformerFactory := externalversions.NewSharedInformerFactory(volcanoClient, 0)
+	podGroupInformer := podGroupInformerFactory.Scheduling().V1beta1().PodGroups()
+	newManager.PodGroupInformer = podGroupInformer.Informer()
+	newManager.podGroupLister = podGroupInformer.Lister()
 
 	return &newManager
 }
@@ -335,29 +347,37 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 
 // updatePodGroupIfNeeded updates a PodGroup if needed for group-level scheduling
 func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
-	// Calculate current requirements
-	minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, existing.GetName())
-
-	updated := existing.DeepCopy()
-	updated.Spec.MinMember = int32(minMember)
-	updated.Spec.MinResources = &minResources
-
-	// Apply network topology policy
-	if m.hasSubGroupPolicy.Load() {
-		updated = appendSubGroupPolicy(ms, updated, minRoleMember)
-	} else {
-		updated.Spec.MinTaskMember = minTaskMember
-	}
-
-	if hasPodGroupChanged(existing, updated) {
-		_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
-		if err != nil {
-			return err
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		// Get latest podgroup from informer store
+		currentPodGroup, getErr := m.podGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
+		if getErr != nil {
+			return getErr
 		}
-		klog.V(2).Infof("Updated PodGroup %s for group-level gang scheduling", existing.Name)
-	}
 
-	return nil
+		// Calculate current requirements
+		minMember, minRoleMember, minTaskMember, minResources := m.calculateRequirements(ms, currentPodGroup.GetName())
+
+		updated := currentPodGroup.DeepCopy()
+		updated.Spec.MinMember = int32(minMember)
+		updated.Spec.MinResources = &minResources
+
+		// Apply network topology policy
+		if m.hasSubGroupPolicy.Load() {
+			updated = appendSubGroupPolicy(ms, updated, minRoleMember)
+		} else {
+			updated.Spec.MinTaskMember = minTaskMember
+		}
+
+		if hasPodGroupChanged(currentPodGroup, updated) {
+			_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+			if err != nil {
+				return err
+			}
+			klog.V(2).Infof("Updated PodGroup %s for group-level gang scheduling", currentPodGroup.Name)
+		}
+
+		return nil
+	})
 }
 
 func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {

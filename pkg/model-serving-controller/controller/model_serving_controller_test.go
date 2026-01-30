@@ -2861,6 +2861,14 @@ func TestModelServingVersionControl(t *testing.T) {
 				})
 			}
 
+			// Create ModelServing in API server first
+			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), ms, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			// Add to informer indexer so lister can find it
+			err = controller.modelServingsInformer.GetIndexer().Add(ms)
+			assert.NoError(t, err)
+
 			// Call scaleUpServingGroups directly to test its behavior
 			newRevision := "revision-v2"
 			err = controller.scaleUpServingGroups(context.Background(), ms, existingGroupsList, int(tt.scaleUpTo), newRevision)
@@ -2878,10 +2886,6 @@ func TestModelServingVersionControl(t *testing.T) {
 			}
 
 			// Verify status revisions
-			// Create ModelServing in API server first
-			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), ms, metav1.CreateOptions{})
-			assert.NoError(t, err)
-
 			err = controller.UpdateModelServingStatus(ms, newRevision)
 			assert.NoError(t, err)
 
@@ -3223,6 +3227,10 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 
 			// Create ModelServing in API server
 			_, err = kthenaClient.WorkloadV1alpha1().ModelServings("default").Create(context.Background(), ms, metav1.CreateOptions{})
+			assert.NoError(t, err)
+
+			// Add to informer indexer so lister can find it
+			err = controller.modelServingsInformer.GetIndexer().Add(ms)
 			assert.NoError(t, err)
 
 			// Create servingGroups with specified revisions
