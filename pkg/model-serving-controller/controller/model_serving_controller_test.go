@@ -1759,28 +1759,27 @@ func TestScaleUpRoles(t *testing.T) {
 			expectedNewIndices: []int{0, 1},
 			expectNoCreation:   false,
 		},
-		{
-			name:               "scale up from 1 to 3 roles with continuous indices",
-			existingIndices:    []int{0},
-			expectedCount:      3,
-			expectedNewIndices: []int{1, 2},
-			expectNoCreation:   false,
-		},
-		{
-			name:               "scale up with gap in indices - should use increasing indices from max",
-			existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
-			expectedCount:      4,
-			expectedNewIndices: []int{6, 7}, // Should continue from max index (5) + 1
-			expectNoCreation:   false,
-		},
-		{
-			name:               "scale up with only high index existing",
-			existingIndices:    []int{10},
-			expectedCount:      3,
-			expectedNewIndices: []int{11, 12}, // Should continue from max index (10) + 1
-			expectNoCreation:   false,
-		},
-		{
+		        {
+					name:               "scale up from 1 to 3 roles with continuous indices",
+					existingIndices:    []int{0},
+					expectedCount:      3,
+					expectedNewIndices: []int{1, 2},
+					expectNoCreation:   false,
+				},
+				{
+					name:               "scale up with gap in indices - should fill gaps",
+					existingIndices:    []int{0, 5}, // Gap: indices 1-4 missing
+					expectedCount:      4,
+					expectedNewIndices: []int{1, 2, 3}, // Should fill gaps 1, 2, 3
+					expectNoCreation:   false,
+				},
+				{
+					name:               "scale up with only high index existing - should fill from 0",
+					existingIndices:    []int{10},
+					expectedCount:      3,
+					expectedNewIndices: []int{0, 1, 2}, // Should fill 0, 1, 2
+					expectNoCreation:   false,
+				},		{
 			name:               "no scale up needed - validCount equals expectedCount",
 			existingIndices:    []int{0, 1},
 			expectedCount:      2,

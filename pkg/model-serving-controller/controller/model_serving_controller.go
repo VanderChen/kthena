@@ -730,18 +730,8 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 }
 
 // scaleUpRoles handles Role scaling up.
-// It creates new Roles with increasing indices starting from the current max index + 1.
+// It creates new Roles by filling missing indices in the range [0, expectedCount).
 func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
-	startingIndex := 0
-	if len(roleList) > 0 {
-		_, ordinal := utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
-		// since roleList is already sorted in ascending order by index
-		startingIndex = ordinal + 1
-	}
-
-	// Calculate how many new Roles we need to create
-	toCreate := expectedCount - len(roleList)
-
 	// Role needs to scale up, and the ServingGroup status needs to be set to Scaling
 	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
 	if err != nil {
@@ -749,17 +739,28 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 		return
 	}
 
-	klog.V(2).Infof("scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
-	// Create new Roles with increasing indices
-	for i := 0; i < toCreate; i++ {
-		newIndex := startingIndex + i
+	// Use a map to track existing role indices
+	existingIndices := make(map[int]bool)
+	for _, role := range roleList {
+		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+		existingIndices[ordinal] = true
+	}
+
+	klog.V(2).Infof("scaling up role %s in ServingGroup %s to %d replicas", targetRole.Name, groupName, expectedCount)
+
+	// Iterate from 0 to expectedCount - 1 to find and create missing roles
+	for i := 0; i < expectedCount; i++ {
+		if existingIndices[i] {
+			continue
+		}
+
 		// Create pods for role
-		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision)
+		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, i, servingGroupOrdinal, newRevision)
 		if err != nil {
-			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
+			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, i), groupName, err)
 		} else {
 			// Insert new Role to global storage
-			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, utils.GenerateRoleID(targetRole.Name, newIndex), newRevision)
+			c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, utils.GenerateRoleID(targetRole.Name, i), newRevision)
 		}
 	}
 }
