@@ -47,6 +47,7 @@ const (
 	ModelServingController = "modelserving"
 	ModelBoosterController = "modelbooster"
 	AutoscalerController   = "autoscaler"
+	LwsController          = "lws"
 )
 
 func SetupController(ctx context.Context, cc Config) {
@@ -87,6 +88,7 @@ func SetupController(ctx context.Context, cc Config) {
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}
+			case LwsController:
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)

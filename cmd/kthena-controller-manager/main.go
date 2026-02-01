@@ -264,6 +264,7 @@ func parseControllers(controllers []string) map[string]bool {
 		controller.ModelServingController: true,
 		controller.ModelBoosterController: true,
 		controller.AutoscalerController:   true,
+		controller.LwsController:          true,
 	}
 
 	enableControllers := make(map[string]bool)
