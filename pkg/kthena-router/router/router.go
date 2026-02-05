@@ -186,13 +186,21 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		defer func() {
 			// Decrement downstream request count when request completes
 			r.metrics.DecActiveDownstreamRequests(modelName)
+			if metricsRecorder != nil {
+				statusCode := strconv.Itoa(c.Writer.Status())
+				reason := "successful_request"
+				if r, exists := c.Get("finishReason"); exists {
+					reason = r.(string)
+				}
+				metricsRecorder.Finish(statusCode, reason)
+			}
 		}()
 
 		prompt, err := utils.ParsePrompt(modelRequest)
 		if err != nil {
 			accesslog.SetError(c, "prompt_parsing", "prompt not found")
 			c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
-			metricsRecorder.Finish(strconv.Itoa(http.StatusNotFound), "prompt_parsing")
+			c.Set("finishReason", "prompt_parsing")
 			return
 		}
 		promptStr := utils.GetPromptString(prompt)
@@ -237,7 +245,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			// Record rate limit exceeded
 			metricsRecorder.RecordRateLimitExceeded(tokenType)
 			c.AbortWithStatusJSON(http.StatusTooManyRequests, errorMsg)
-			metricsRecorder.Finish(strconv.Itoa(http.StatusTooManyRequests), "rate_limit")
+			c.Set("finishReason", "rate_limit")
 			return
 		}
 
@@ -258,7 +266,7 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 		// step 3.2: load balancing for Fairness scheduling enabled case
 		if err := r.handleFairnessScheduling(c, modelRequest, requestID, modelName); err != nil {
 			accesslog.SetError(c, "scheduling", err.Error())
-			metricsRecorder.Finish(strconv.Itoa(c.Writer.Status()), "scheduling")
+			c.Set("finishReason", "scheduling")
 			return
 		}
 	}
