@@ -29,6 +29,9 @@ const (
 	// RanktableConfigMapSuffix is the suffix for ranktable ConfigMap names
 	RanktableConfigMapSuffix = "ranktable"
 
+	// VolumeName
+	VolumeName = "ranktable"
+
 	// RanktableStatusInitializing represents the initializing status
 	RanktableStatusInitializing = "Initializing"
 

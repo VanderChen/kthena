@@ -116,33 +116,7 @@ func (p *RanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequ
 	}
 
 	// Inject Mount
-	volumeName := "ranktable"
-	volume := corev1.Volume{
-		Name: volumeName,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmName,
-				},
-			},
-		},
-	}
-	req.Pod.Spec.Volumes = append(req.Pod.Spec.Volumes, volume)
-
-	volumeMount := corev1.VolumeMount{
-		Name:      volumeName,
-		MountPath: template.MountPath,
-		ReadOnly:  true,
-	}
-
-	// Mount to all containers
-	for i := range req.Pod.Spec.Containers {
-		req.Pod.Spec.Containers[i].VolumeMounts = append(req.Pod.Spec.Containers[i].VolumeMounts, volumeMount)
-	}
-	// Mount to all init containers
-	for i := range req.Pod.Spec.InitContainers {
-		req.Pod.Spec.InitContainers[i].VolumeMounts = append(req.Pod.Spec.InitContainers[i].VolumeMounts, volumeMount)
-	}
+	p.injectRanktableMount(req.Pod, template, cmName)
 
 	return nil
 }
@@ -336,4 +310,58 @@ func (p *RanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins
 	}
 
 	return nil
+}
+
+func (p *RanktablePlugin) injectRanktableMount(pod *corev1.Pod, template *RanktableTemplate, cmName string) {
+	klog.V(4).Infof("Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
+	// Check if volume already exists
+	volumeExists := false
+	for _, vol := range pod.Spec.Volumes {
+		if vol.Name == VolumeName {
+			volumeExists = true
+			break
+		}
+	}
+	if !volumeExists {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: VolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cmName,
+					},
+				},
+			},
+		})
+	}
+
+	mount := corev1.VolumeMount{
+		Name:      VolumeName,
+		MountPath: template.MountPath,
+		ReadOnly:  true,
+	}
+
+	// Helper function to check if mount exists
+	hasMount := func(mounts []corev1.VolumeMount, name string) bool {
+		for _, m := range mounts {
+			if m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Add VolumeMount to main containers
+	for i := range pod.Spec.Containers {
+		if !hasMount(pod.Spec.Containers[i].VolumeMounts, VolumeName) {
+			pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, mount)
+		}
+	}
+
+	// Add VolumeMount to main containers
+	for i := range pod.Spec.InitContainers {
+		if !hasMount(pod.Spec.InitContainers[i].VolumeMounts, VolumeName) {
+			pod.Spec.InitContainers[i].VolumeMounts = append(pod.Spec.InitContainers[i].VolumeMounts, mount)
+		}
+	}
 }
