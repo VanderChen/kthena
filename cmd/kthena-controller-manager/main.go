@@ -71,6 +71,7 @@ func main() {
 	pflag.BoolVar(&cc.EnableLeaderElection, "leader-elect", false, "Enable leader election for controller. "+
 		"Enabling this will ensure there is only one active controller. Default is false.")
 	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
+	pflag.BoolVar(&cc.Debug, "debug", false, "Enable debug mode for controllers. Default is false.")
 	pflag.StringSliceVar(&controllers, "controllers", []string{"*"}, "A list of controllers to enable. '*' enables all controllers, 'foo' enables the controller "+
 		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster', 'autoscaler'")
 	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")

@@ -918,7 +918,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 	// Create controller
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 	assert.NoError(t, err)
 
 	stop := make(chan struct{})
@@ -1836,7 +1836,7 @@ func TestScaleUpServingGroups(t *testing.T) {
 			apiextfake := apiextfake.NewSimpleClientset()
 
 			// Create controller without running it to avoid background sync interference
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			// Create a unique ModelServing for this test
@@ -1988,7 +1988,7 @@ func TestScaleUpRoles(t *testing.T) {
 			apiextfake := apiextfake.NewSimpleClientset()
 
 			// Create controller without running it to avoid background sync interference
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			// Create a unique ModelServing for this test
@@ -2137,7 +2137,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 			assert.NoError(t, err)
 
 			roleName := "default"
@@ -2268,7 +2268,7 @@ func TestScaleDownServingGroups(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-scaledown-%d", idx)
@@ -2482,7 +2482,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-priority-scaledown-%d", idx)
@@ -2729,7 +2729,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-partition-scaledown-%d", idx)
@@ -2970,7 +2970,7 @@ func TestModelServingVersionControl(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-version-control-%d", idx)
@@ -3150,7 +3150,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			// Use short name to avoid Kubernetes label length limits
@@ -3358,7 +3358,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-revision-fields-%d", idx)
@@ -3474,7 +3474,7 @@ func TestScaleDownRoles(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextfake := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-role-scaledown-%d", idx)
@@ -3707,7 +3707,7 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 			assert.NoError(t, err)
 
 			msName := fmt.Sprintf("test-role-priority-scaledown-%d", idx)
@@ -3841,7 +3841,7 @@ func TestCalculateRoleScore(t *testing.T) {
 	kthenaClient := kthenafake.NewSimpleClientset()
 	volcanoClient := volcanofake.NewSimpleClientset()
 
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 	assert.NoError(t, err)
 
 	ms := &workloadv1alpha1.ModelServing{
@@ -4058,7 +4058,7 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextClient := apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRD())
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 			assert.NoError(t, err)
 
 			// Create ModelServing
@@ -4173,7 +4173,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 	kthenaClient := kthenafake.NewSimpleClientset()
 	volcanoClient := volcanofake.NewSimpleClientset()
 
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 	assert.NoError(t, err)
 
 	ms := &workloadv1alpha1.ModelServing{
@@ -4407,7 +4407,7 @@ func TestCheckRoleReady(t *testing.T) {
 			kthenaClient := kthenafake.NewSimpleClientset()
 			volcanoClient := volcanofake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset())
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake.NewSimpleClientset(), false)
 			assert.NoError(t, err)
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
@@ -4669,7 +4669,7 @@ func TestManageHeadlessService(t *testing.T) {
 			apiextClient := apiextfake.NewSimpleClientset()
 
 			// Create controller
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 			assert.NoError(t, err)
 
 			// Setup the datastore with serving groups and roles
@@ -4729,7 +4729,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	apiextClient := apiextfake.NewSimpleClientset()
 
 	// Create controller first to get access to informers
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 	assert.NoError(t, err)
 
 	// Create the ModelServing resource with a UID for owner reference
@@ -4824,7 +4824,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 	apiextClient := apiextfake.NewSimpleClientset()
 
 	// Create controller first to get access to informers
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 	assert.NoError(t, err)
 
 	// Create the ModelServing resource
@@ -4917,7 +4917,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	apiextClient := apiextfake.NewSimpleClientset()
 
 	// Create controller first to get access to informers
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 	assert.NoError(t, err)
 
 	// Create the ModelServing resource
@@ -5103,7 +5103,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	apiextClient := apiextfake.NewSimpleClientset()
 
 	// Create controller first to get access to informers
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 	assert.NoError(t, err)
 
 	ms := &workloadv1alpha1.ModelServing{
@@ -5314,7 +5314,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 			volcanoClient := volcanofake.NewSimpleClientset()
 			apiextClient := apiextfake.NewSimpleClientset()
 
-			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient)
+			controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextClient, false)
 			assert.NoError(t, err)
 
 			// This should not panic - before fix it would panic with nil pointer dereference
@@ -5385,7 +5385,7 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 			// Create controller
-			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			stop := make(chan struct{})
@@ -5877,7 +5877,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			kthenaInformerFactory := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0)
 
 			// Create controller
-			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
+			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake, false)
 			assert.NoError(t, err)
 
 			stop := make(chan struct{})

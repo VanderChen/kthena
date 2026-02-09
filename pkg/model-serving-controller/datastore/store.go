@@ -46,6 +46,7 @@ type Store interface {
 	AddServingGroupAndRole(modelServingName types.NamespacedName, servingGroupName, revision, roleName, roleID string)
 	DeleteRunningPodFromServingGroup(modelServingName types.NamespacedName, groupName string, pod string)
 	UpdateServingGroupStatus(modelServingName types.NamespacedName, groupName string, Status ServingGroupStatus) error
+	Dump() map[types.NamespacedName]map[string]*ServingGroup
 }
 
 type store struct {
@@ -57,17 +58,17 @@ type store struct {
 }
 
 type ServingGroup struct {
-	Name        string
-	runningPods map[string]struct{} // Map of pod names in this ServingGroup
-	Revision    string
-	Status      ServingGroupStatus
-	roles       map[string]map[string]*Role // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
+	Name        string                      `json:"name"`
+	RunningPods map[string]struct{}         `json:"runningPods"` // Map of pod names in this ServingGroup
+	Revision    string                      `json:"revision"`
+	Status      ServingGroupStatus          `json:"status"`
+	Roles       map[string]map[string]*Role `json:"roles"` // roleName -> roleID -> *Role, like prefill -> prefill-0 -> *Role
 }
 
 type Role struct {
-	Name     string
-	Revision string
-	Status   RoleStatus
+	Name     string     `json:"name"`
+	Revision string     `json:"revision"`
+	Status   RoleStatus `json:"status"`
 }
 
 type ServingGroupStatus string
@@ -134,7 +135,7 @@ func (s *store) GetRoleList(modelServingName types.NamespacedName, groupName, ro
 	if !ok {
 		return nil, ErrServingGroupNotFound
 	}
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		// If the roleName does not exist, return an empty list instead of an error
 		return []Role{}, nil
@@ -170,7 +171,7 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 		return ErrServingGroupNotFound
 	}
 
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		return fmt.Errorf("roleName %s not found in group %s", roleName, groupName)
 	}
@@ -191,7 +192,7 @@ func (s *store) GetRoleStatus(modelServingName types.NamespacedName, groupName, 
 
 	if servingGroups, exist := s.servingGroup[modelServingName]; exist {
 		if group, ok := servingGroups[groupName]; ok {
-			if roleMap, exists := group.roles[roleName]; exists {
+			if roleMap, exists := group.Roles[roleName]; exists {
 				if role, found := roleMap[roleID]; found {
 					return role.Status
 				}
@@ -214,7 +215,7 @@ func (s *store) GetRunningPodNumByServingGroup(modelServingName types.Namespaced
 	if !ok {
 		return 0, nil
 	}
-	return len(group.runningPods), nil
+	return len(group.RunningPods), nil
 }
 
 // GetServingGroup returns the GetServingGroup
@@ -275,7 +276,7 @@ func (s *store) DeleteRole(modelServingName types.NamespacedName, groupName, rol
 		return
 	}
 
-	roleMap, ok := servingGroup.roles[roleName]
+	roleMap, ok := servingGroup.Roles[roleName]
 	if !ok {
 		return
 	}
@@ -289,10 +290,10 @@ func (s *store) AddServingGroup(modelServingName types.NamespacedName, idx int, 
 
 	newGroup := &ServingGroup{
 		Name:        utils.GenerateServingGroupName(modelServingName.Name, idx),
-		runningPods: make(map[string]struct{}),
+		RunningPods: make(map[string]struct{}),
 		Status:      ServingGroupCreating,
 		Revision:    revision,
-		roles:       make(map[string]map[string]*Role),
+		Roles:       make(map[string]map[string]*Role),
 	}
 
 	if _, ok := s.servingGroup[modelServingName]; !ok {
@@ -320,19 +321,19 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 	if !ok {
 		group = &ServingGroup{
 			Name:        groupName,
-			runningPods: make(map[string]struct{}),
+			RunningPods: make(map[string]struct{}),
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 		s.servingGroup[modelServingName][groupName] = group
 	}
 
-	if _, exists := group.roles[roleName]; !exists {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, exists := group.Roles[roleName]; !exists {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	group.roles[roleName][roleID] = newRole
+	group.Roles[roleName][roleID] = newRole
 }
 
 // AddRunningPodToServingGroup add ServingGroup in runningPodOfServingGroup map
@@ -349,29 +350,29 @@ func (s *store) AddRunningPodToServingGroup(modelServingName types.NamespacedNam
 		// If ServingGroupName not exist, create a new one
 		group = &ServingGroup{
 			Name:        servingGroupName,
-			runningPods: map[string]struct{}{},
+			RunningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
 	}
 
-	group.runningPods[runningPodName] = struct{}{} // runningPods map has been initialized during AddServingGroup.
+	group.RunningPods[runningPodName] = struct{}{} // RunningPods map has been initialized during AddServingGroup.
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.roles[roleName]; !ok {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, ok = group.Roles[roleName]; !ok {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.roles[roleName][roleID]; !ok {
+	if _, ok = group.Roles[roleName][roleID]; !ok {
 		role := &Role{
 			Name:     roleID,
 			Status:   RoleCreating,
 			Revision: revision,
 		}
-		group.roles[roleName][roleID] = role
+		group.Roles[roleName][roleID] = role
 	}
 }
 
@@ -389,27 +390,27 @@ func (s *store) AddServingGroupAndRole(modelServingName types.NamespacedName, se
 		// If ServingGroupName not exist, create a new one
 		group = &ServingGroup{
 			Name:        servingGroupName,
-			runningPods: map[string]struct{}{},
+			RunningPods: map[string]struct{}{},
 			Status:      ServingGroupCreating,
 			Revision:    revision,
-			roles:       make(map[string]map[string]*Role),
+			Roles:       make(map[string]map[string]*Role),
 		}
 
 		s.servingGroup[modelServingName][servingGroupName] = group
 	}
 
 	// Check if roleName exists, and initialize it if not
-	if _, ok = group.roles[roleName]; !ok {
-		group.roles[roleName] = make(map[string]*Role)
+	if _, ok = group.Roles[roleName]; !ok {
+		group.Roles[roleName] = make(map[string]*Role)
 	}
 
-	if _, ok = group.roles[roleName][roleID]; !ok {
+	if _, ok = group.Roles[roleName][roleID]; !ok {
 		role := &Role{
 			Name:     roleID,
 			Status:   RoleCreating,
 			Revision: revision,
 		}
-		group.roles[roleName][roleID] = role
+		group.Roles[roleName][roleID] = role
 	}
 }
 
@@ -420,7 +421,7 @@ func (s *store) DeleteRunningPodFromServingGroup(modelServingName types.Namespac
 
 	if groups, exist := s.servingGroup[modelServingName]; exist {
 		if group, ok := groups[servingGroupName]; ok {
-			delete(group.runningPods, pod)
+			delete(group.RunningPods, pod)
 		}
 	}
 }
@@ -441,4 +442,46 @@ func (s *store) UpdateServingGroupStatus(modelServingName types.NamespacedName, 
 		return fmt.Errorf("failed to find ServingGroup %s in modelServing %s", groupName, modelServingName.Namespace+"/"+modelServingName.Name)
 	}
 	return nil
+}
+
+// Dump returns a snapshot of the store's contents
+func (s *store) Dump() map[types.NamespacedName]map[string]*ServingGroup {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	dump := make(map[types.NamespacedName]map[string]*ServingGroup)
+	for msName, groups := range s.servingGroup {
+		groupDump := make(map[string]*ServingGroup)
+		for groupName, group := range groups {
+			// Create a copy of the ServingGroup
+			newGroup := &ServingGroup{
+				Name:        group.Name,
+				RunningPods: make(map[string]struct{}),
+				Revision:    group.Revision,
+				Status:      group.Status,
+				Roles:       make(map[string]map[string]*Role),
+			}
+
+			// Copy RunningPods
+			for pod := range group.RunningPods {
+				newGroup.RunningPods[pod] = struct{}{}
+			}
+
+			// Copy Roles
+			for roleName, roles := range group.Roles {
+				newRoleMap := make(map[string]*Role)
+				for roleID, role := range roles {
+					newRoleMap[roleID] = &Role{
+						Name:     role.Name,
+						Revision: role.Revision,
+						Status:   role.Status,
+					}
+				}
+				newGroup.Roles[roleName] = newRoleMap
+			}
+			groupDump[groupName] = newGroup
+		}
+		dump[msName] = groupDump
+	}
+	return dump
 }

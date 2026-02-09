@@ -19,8 +19,10 @@ package controller
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"slices"
 	"sync"
@@ -81,9 +83,10 @@ type ModelServingController struct {
 	graceMap        sync.Map // key: errorPod.namespace/errorPod.name, value:time
 	initialSync     bool     // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
+	debug           bool
 }
 
-func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
+func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface, debug bool) (*ModelServingController, error) {
 	selector, err := labels.NewRequirement(workloadv1alpha1.GroupNameLabelKey, selection.Exists, nil)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create label selector, err: %v", err)
@@ -132,6 +135,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		workqueue:       workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ModelServings"),
 		store:           store,
 		pluginsRegistry: plugins.DefaultRegistry,
+		debug:           debug,
 	}
 
 	registerPodGroupHandler := func(pgInformer cache.SharedIndexInformer) {
@@ -552,12 +556,47 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	c.syncAll()
 	klog.Info("initial sync has been done")
 
+	if c.debug {
+		go c.startDumpServer(ctx)
+	}
+
 	klog.Info("start modelServing controller")
 	for i := 0; i < workers; i++ {
 		go c.worker(ctx)
 	}
 	<-ctx.Done()
 	klog.Info("shut down modelServing controller")
+}
+
+func (c *ModelServingController) startDumpServer(ctx context.Context) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/debug/store", func(w http.ResponseWriter, r *http.Request) {
+		dump := c.store.Dump()
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(dump); err != nil {
+			klog.Errorf("failed to encode store dump: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	server := &http.Server{
+		Addr:    ":9090",
+		Handler: mux,
+	}
+
+	go func() {
+		klog.Infof("Starting dump server on :9090")
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			klog.Errorf("dump server failed: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		klog.Errorf("dump server shutdown failed: %v", err)
+	}
 }
 
 func (c *ModelServingController) syncAll() {
