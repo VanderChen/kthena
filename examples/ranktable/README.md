@@ -6,6 +6,48 @@ This directory contains examples for generating role/group level ranktables for 
 
 The ranktable feature supports vLLM-Ascend and MindIE inference engines' HCCL communication needs by automatically generating ranktable ConfigMaps based on pod annotations.
 
+## Plugins
+
+Kthena provides two ranktable plugins:
+
+### 1. `ranktable` Plugin
+
+Uses the `server_id` from pod annotations to organize server lists.
+
+**Use case**: When your external component (e.g., device plugin) provides a consistent server_id in the pod annotation.
+
+**Example annotation**:
+```json
+{
+  "pod_name": "qwen-inference-worker-0",
+  "server_id": "192.168.1.10",
+  "devices": [
+    {"device_id": "0", "device_ip": "10.20.0.2"},
+    {"device_id": "1", "device_ip": "10.20.0.3"}
+  ]
+}
+```
+
+### 2. `pod-ranktable` Plugin
+
+Uses the **Pod IP address** as the `server_id`, ignoring any `server_id` from annotations.
+
+**Use case**: When you want to use Pod IPs to identify servers in the ranktable, regardless of what's in the annotation.
+
+**Example annotation** (server_id field is ignored):
+```json
+{
+  "pod_name": "qwen-inference-worker-0",
+  "server_id": "ignored-value",
+  "devices": [
+    {"device_id": "0", "device_ip": "10.20.0.2"},
+    {"device_id": "1", "device_ip": "10.20.0.3"}
+  ]
+}
+```
+
+**Generated ranktable** will use Pod IP (e.g., `10.244.1.5`) as the `server_id` instead of `ignored-value`.
+
 ## Components
 
 ### 1. Pod Ranktable Parser Template
@@ -109,8 +151,9 @@ kubectl get configmap qwen-inference-worker-ranktable -o jsonpath='{.data.rankta
 
 ### ModelServing Plugins
 
-To enable ranktable generation, add the `ranktable` plugin to your ModelServing spec:
+To enable ranktable generation, add either the `ranktable` or `pod-ranktable` plugin to your ModelServing spec:
 
+**Using `ranktable` plugin** (server_id from annotation):
 ```yaml
 spec:
   plugins:
@@ -118,6 +161,16 @@ spec:
       type: BuiltIn
       config:
         template: "ranktable-template-name"
+```
+
+**Using `pod-ranktable` plugin** (server_id from Pod IP):
+```yaml
+spec:
+  plugins:
+    - name: pod-ranktable
+      type: BuiltIn
+      config:
+        template: "pod-ranktable-template-name"
 ```
 
 ### ModelServing Annotations
