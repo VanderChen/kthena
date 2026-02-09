@@ -1,0 +1,375 @@
+/*
+Copyright The Volcano Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package podranktable
+
+import (
+	"context"
+	"fmt"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/klog/v2"
+
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+)
+
+const PluginName = "pod-ranktable"
+
+type RanktableConfig struct {
+	Template string `json:"template"`
+}
+
+type PodRanktablePlugin struct {
+	templateManager *TemplateManager
+	cfg             RanktableConfig
+}
+
+func init() {
+	plugins.DefaultRegistry.Register(PluginName, NewPodRanktablePlugin)
+}
+
+// NewPodRanktablePlugin creates a new PodRanktablePlugin.
+func NewPodRanktablePlugin(spec workloadv1alpha1.PluginSpec) (plugins.Plugin, error) {
+	pluginCfg := RanktableConfig{}
+	if err := plugins.DecodeJSON(spec.Config, &pluginCfg); err != nil {
+		return nil, fmt.Errorf("failed to decode pod-ranktable plugin config: %w", err)
+	}
+	if pluginCfg.Template == "" {
+		return nil, fmt.Errorf("pod-ranktable template is required in plugin config")
+	}
+
+	return &PodRanktablePlugin{
+		templateManager: NewTemplateManager(),
+		cfg:             pluginCfg,
+	}, nil
+}
+
+func (p *PodRanktablePlugin) Name() string {
+	return PluginName
+}
+
+func (p *PodRanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequest) error {
+	ms := req.ModelServing
+
+	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
+	if err != nil {
+		return fmt.Errorf("failed to get ranktable template: %w", err)
+	}
+
+	// Override level if specified in annotation (keep this for backward compatibility or override flexibility)
+	if levelOverride, ok := ms.Annotations[RanktableLevelAnnotation]; ok {
+		level := RanktableLevel(levelOverride)
+		if level == RoleLevelRanktable || level == GroupLevelRanktable {
+			template.Level = level
+		}
+	}
+
+	// Determine ConfigMap name based on level
+	var cmName string
+	cmLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		"app.kubernetes.io/component":             "ranktable",
+	}
+
+	if template.Level == RoleLevelRanktable {
+		cmName = GenerateRanktableConfigMapName(ms.Name, fmt.Sprintf("%s-%s", req.ServingGroup, req.RoleID))
+		cmLabels[workloadv1alpha1.RoleLabelKey] = req.RoleName
+		cmLabels[workloadv1alpha1.RoleIDKey] = req.RoleID
+		cmLabels[workloadv1alpha1.GroupNameLabelKey] = req.ServingGroup
+		cmLabels["ranktable-level"] = string(RoleLevelRanktable)
+	} else {
+		cmName = GenerateRanktableConfigMapName(ms.Name, req.ServingGroup)
+		cmLabels[workloadv1alpha1.GroupNameLabelKey] = req.ServingGroup
+		cmLabels["ranktable-level"] = string(GroupLevelRanktable)
+	}
+
+	// Ensure ConfigMap exists (create empty if needed)
+	// We use ControllerRef to ensure garbage collection
+	ownerRef := *metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))
+
+	// Create initial ranktable content
+	templateData := p.templateManager.BuildRanktableTemplateData(RanktableStatusInitializing, nil)
+	ranktableJSON, err := p.templateManager.RenderRanktable(template.RanktableTemplate, templateData)
+	if err != nil {
+		return fmt.Errorf("failed to render initial ranktable: %w", err)
+	}
+
+	if err := p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON); err != nil {
+		return err
+	}
+
+	// Inject Mount
+	p.injectRanktableMount(req.Pod, template, cmName)
+
+	return nil
+}
+
+func (p *PodRanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
+	ms := req.ModelServing
+
+	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
+	if err != nil {
+		return fmt.Errorf("failed to get ranktable template: %w", err)
+	}
+
+	// Override level if specified in annotation
+	if levelOverride, ok := ms.Annotations[RanktableLevelAnnotation]; ok {
+		level := RanktableLevel(levelOverride)
+		if level == RoleLevelRanktable || level == GroupLevelRanktable {
+			template.Level = level
+		}
+	}
+
+	// List pods for the scope to check readiness
+	labelSet := labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        req.ServingGroup,
+	}
+
+	if template.Level == RoleLevelRanktable {
+		labelSet[workloadv1alpha1.RoleIDKey] = req.RoleID
+	}
+
+	pods, err := req.PodLister.Pods(ms.Namespace).List(labelSet.AsSelector())
+	if err != nil {
+		return err
+	}
+
+	klog.V(4).Infof("Found %d pods for ranktable generation (Level: %s, RoleID: %s)", len(pods), template.Level, req.RoleID)
+
+	// Check readiness and collect data
+	allReady := true
+	var podRanktables []PodRanktableData
+	activePods := 0
+
+	for _, pod := range pods {
+		isRunning := pod.Status.Phase == corev1.PodRunning
+		klog.V(4).Infof("Checking pod %s: Phase=%s, DeletionTimestamp=%v, Running=%v", pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
+
+		// Skip pods that are deleting
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+		activePods++
+
+		// Check if pod is running
+		if !isRunning {
+			allReady = false
+			klog.V(4).Infof("Pod %s/%s is not running, waiting for ranktable", pod.Namespace, pod.Name)
+			continue
+		}
+
+		// Get pod IP
+		podIP := pod.Status.PodIP
+		if podIP == "" {
+			allReady = false
+			klog.V(4).Infof("Pod %s/%s has no IP address assigned yet", pod.Namespace, pod.Name)
+			continue
+		}
+
+		ann, ok := pod.Annotations[template.PodAnnotationName]
+		if !ok {
+			allReady = false
+			klog.V(4).Infof("Pod %s/%s missing ranktable annotation %s", pod.Namespace, pod.Name, template.PodAnnotationName)
+			continue
+		}
+
+		// Parse annotation with Pod IP as Server ID
+		data, err := p.templateManager.ParsePodRanktable(template.PodParserTemplate, ann, podIP, pod.Name)
+		if err != nil {
+			klog.Errorf("Failed to parse annotation for pod %s: %v", pod.Name, err)
+			allReady = false
+			continue
+		}
+		podRanktables = append(podRanktables, *data)
+	}
+
+	status := RanktableStatusCompleted
+	if !allReady || len(podRanktables) == 0 {
+		status = RanktableStatusInitializing
+		podRanktables = nil // Force empty data if not ready
+		klog.V(4).Infof("Ranktable status set to Initializing. allReady: %v, podRanktables count: %d", allReady, len(podRanktables))
+	} else {
+		// Double check if we have enough pods
+		if template.Level == RoleLevelRanktable {
+			var roleReplicas int32
+			found := false
+			for _, r := range ms.Spec.Template.Roles {
+				if r.Name == req.RoleName {
+					// For a specific RoleID (Role Instance), expected count is 1 (entry) + WorkerReplicas
+					roleReplicas = 1 + r.WorkerReplicas
+					found = true
+					break
+				}
+			}
+			klog.V(4).Infof("Role %s/%s check: activePods=%d, roleReplicas=%d, foundRole=%v", ms.Name, req.RoleID, activePods, roleReplicas, found)
+			if found && int32(activePods) < roleReplicas {
+				allReady = false
+				status = RanktableStatusInitializing
+				podRanktables = nil
+				klog.V(4).Infof("Role %s/%s (Group: %s) has %d active pods, expected %d. Setting status to Initializing.", ms.Name, req.RoleID, req.ServingGroup, activePods, roleReplicas)
+			}
+		}
+	}
+
+	templateData := p.templateManager.BuildRanktableTemplateData(status, podRanktables)
+	ranktableJSON, err := p.templateManager.RenderRanktable(template.RanktableTemplate, templateData)
+	if err != nil {
+		return fmt.Errorf("failed to render ranktable: %w", err)
+	}
+
+	// Update ConfigMap
+	var cmName string
+	cmLabels := map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		"app.kubernetes.io/component":             "ranktable",
+	}
+
+	if template.Level == RoleLevelRanktable {
+		cmName = GenerateRanktableConfigMapName(ms.Name, fmt.Sprintf("%s-%s", req.ServingGroup, req.RoleID))
+		cmLabels[workloadv1alpha1.RoleLabelKey] = req.RoleName
+		cmLabels[workloadv1alpha1.RoleIDKey] = req.RoleID
+		cmLabels[workloadv1alpha1.GroupNameLabelKey] = req.ServingGroup
+		cmLabels["ranktable-level"] = string(RoleLevelRanktable)
+	} else {
+		cmName = GenerateRanktableConfigMapName(ms.Name, req.ServingGroup)
+		cmLabels[workloadv1alpha1.GroupNameLabelKey] = req.ServingGroup
+		cmLabels["ranktable-level"] = string(GroupLevelRanktable)
+	}
+
+	ownerRef := *metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))
+
+	return p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON)
+}
+
+func (p *PodRanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookRequest) error {
+	ms := req.ModelServing
+
+	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
+	if err != nil {
+		return fmt.Errorf("failed to get ranktable template: %w", err)
+	}
+
+	// Override level if specified in annotation
+	if levelOverride, ok := ms.Annotations[RanktableLevelAnnotation]; ok {
+		level := RanktableLevel(levelOverride)
+		if level == RoleLevelRanktable || level == GroupLevelRanktable {
+			template.Level = level
+		}
+	}
+
+	if template.Level == RoleLevelRanktable {
+		cmName := GenerateRanktableConfigMapName(ms.Name, fmt.Sprintf("%s-%s", req.ServingGroup, req.RoleID))
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cmName, metav1.DeleteOptions{}); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("failed to delete ranktable configmap %s: %w", cmName, err)
+			}
+		}
+		klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
+	}
+
+	return nil
+}
+
+func (p *PodRanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins.HookRequest) error {
+	ms := req.ModelServing
+
+	// Delete all ranktable ConfigMaps for this group using labels.
+	// This covers both group-level and role-level ranktables associated with this group.
+	selector := labels.SelectorFromSet(map[string]string{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        req.ServingGroup,
+		"app.kubernetes.io/component":             "ranktable",
+	})
+
+	// List ConfigMaps first because DeleteCollection is often restricted in RBAC (delete vs deletecollection)
+	cms, err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list ranktable configmaps for group %s: %w", req.ServingGroup, err)
+	}
+
+	for _, cm := range cms.Items {
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil {
+			if !apierrors.IsNotFound(err) {
+				klog.Errorf("failed to delete ranktable configmap %s/%s: %v", ms.Namespace, cm.Name, err)
+			}
+		} else {
+			klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)
+		}
+	}
+
+	return nil
+}
+
+func (p *PodRanktablePlugin) injectRanktableMount(pod *corev1.Pod, template *RanktableTemplate, cmName string) {
+	klog.V(4).Infof("Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
+	// Check if volume already exists
+	volumeExists := false
+	for _, vol := range pod.Spec.Volumes {
+		if vol.Name == VolumeName {
+			volumeExists = true
+			break
+		}
+	}
+	if !volumeExists {
+		pod.Spec.Volumes = append(pod.Spec.Volumes, corev1.Volume{
+			Name: VolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cmName,
+					},
+				},
+			},
+		})
+	}
+
+	mount := corev1.VolumeMount{
+		Name:      VolumeName,
+		MountPath: template.MountPath,
+		ReadOnly:  true,
+	}
+
+	// Helper function to check if mount exists
+	hasMount := func(mounts []corev1.VolumeMount, name string) bool {
+		for _, m := range mounts {
+			if m.Name == name {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Add VolumeMount to main containers
+	for i := range pod.Spec.Containers {
+		if !hasMount(pod.Spec.Containers[i].VolumeMounts, VolumeName) {
+			pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, mount)
+		}
+	}
+
+	// Add VolumeMount to main containers
+	for i := range pod.Spec.InitContainers {
+		if !hasMount(pod.Spec.InitContainers[i].VolumeMounts, VolumeName) {
+			pod.Spec.InitContainers[i].VolumeMounts = append(pod.Spec.InitContainers[i].VolumeMounts, mount)
+		}
+	}
+}
