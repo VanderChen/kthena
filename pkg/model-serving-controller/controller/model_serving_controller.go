@@ -572,8 +572,40 @@ func (c *ModelServingController) startDumpServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/debug/store", func(w http.ResponseWriter, r *http.Request) {
 		dump := c.store.Dump()
+
+		// Convert to a JSON-serializable format
+		type SerializableServingGroup struct {
+			Name        string                                `json:"name"`
+			RunningPods []string                              `json:"runningPods"`
+			Revision    string                                `json:"revision"`
+			Status      datastore.ServingGroupStatus          `json:"status"`
+			Roles       map[string]map[string]*datastore.Role `json:"roles"`
+		}
+
+		serializable := make(map[string]map[string]*SerializableServingGroup)
+		for nsName, groups := range dump {
+			key := nsName.Namespace + "/" + nsName.Name
+			serializedGroups := make(map[string]*SerializableServingGroup)
+			for groupName, group := range groups {
+				// Convert RunningPods from map[string]struct{} to []string
+				runningPods := make([]string, 0, len(group.RunningPods))
+				for pod := range group.RunningPods {
+					runningPods = append(runningPods, pod)
+				}
+
+				serializedGroups[groupName] = &SerializableServingGroup{
+					Name:        group.Name,
+					RunningPods: runningPods,
+					Revision:    group.Revision,
+					Status:      group.Status,
+					Roles:       group.Roles,
+				}
+			}
+			serializable[key] = serializedGroups
+		}
+
 		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(dump); err != nil {
+		if err := json.NewEncoder(w).Encode(serializable); err != nil {
 			klog.Errorf("failed to encode store dump: %v", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
