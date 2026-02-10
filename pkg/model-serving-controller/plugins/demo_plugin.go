@@ -82,6 +82,11 @@ func (p *DemoPlugin) OnPodCreate(_ context.Context, req *HookRequest) error {
 	return nil
 }
 
+// OnPodRunning is a no-op for the demo plugin.
+func (p *DemoPlugin) OnPodRunning(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 // OnPodReady is a no-op for the demo plugin.
 func (p *DemoPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil

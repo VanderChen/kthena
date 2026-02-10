@@ -33,10 +33,10 @@ const (
 	VolumeName = "ranktable"
 
 	// RanktableStatusInitializing represents the initializing status
-	RanktableStatusInitializing = "Initializing"
+	RanktableStatusInitializing = "initializing"
 
 	// RanktableStatusCompleted represents the completed status
-	RanktableStatusCompleted = "Completed"
+	RanktableStatusCompleted = "completed"
 )
 
 // RanktableLevel defines the level at which ranktable is generated

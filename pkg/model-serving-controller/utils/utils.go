@@ -283,6 +283,11 @@ func IsOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
 	return false
 }
 
+// IsPodRunning returns true if pod is in the PodRunning Phase.
+func IsPodRunning(pod *corev1.Pod) bool {
+	return pod.Status.Phase == corev1.PodRunning
+}
+
 // IsPodRunningAndReady returns true if pod is in the PodRunning Phase, if it has a condition of PodReady.
 func IsPodRunningAndReady(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodRunning && isPodReady(pod)

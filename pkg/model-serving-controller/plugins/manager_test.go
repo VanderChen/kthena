@@ -42,9 +42,33 @@ func (t *testPlugin) OnPodCreate(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnPodRunning(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "running-"+t.name)
+	if t.errOn == "running" {
+		return assertError
+	}
+	return nil
+}
+
 func (t *testPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	*t.calls = append(*t.calls, "ready-"+t.name)
 	if t.errOn == "ready" {
+		return assertError
+	}
+	return nil
+}
+
+func (t *testPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "roledelete-"+t.name)
+	if t.errOn == "roledelete" {
+		return assertError
+	}
+	return nil
+}
+
+func (t *testPlugin) OnServingGroupDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "groupdelete-"+t.name)
+	if t.errOn == "groupdelete" {
 		return assertError
 	}
 	return nil

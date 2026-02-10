@@ -121,7 +121,7 @@ func (p *RanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequ
 	return nil
 }
 
-func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
+func (p *RanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.HookRequest) error {
 	ms := req.ModelServing
 
 	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
@@ -249,6 +249,10 @@ func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookReque
 	ownerRef := *metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))
 
 	return p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON)
+}
+
+func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
+	return nil
 }
 
 func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookRequest) error {

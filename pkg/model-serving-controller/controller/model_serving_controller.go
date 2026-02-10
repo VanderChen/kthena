@@ -314,7 +314,19 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	switch {
 	case utils.IsPodRunningAndReady(newPod):
 		// The pod is available, that is, the state is running, and the container is ready
+		// First call OnPodRunning hook if not called yet
+		err = c.handleRunningPod(ms, servingGroupName, newPod)
+		if err != nil {
+			klog.Errorf("handle running pod (for ready pod) failed: %v", err)
+		}
+		// Then handle ready pod logic
 		err = c.handleReadyPod(ms, servingGroupName, newPod)
+		if err != nil {
+			klog.Errorf("handle ready pod failed: %v", err)
+		}
+	case utils.IsPodRunning(newPod):
+		// The pod is running but not ready yet
+		err = c.handleRunningPod(ms, servingGroupName, newPod)
 		if err != nil {
 			klog.Errorf("handle running pod failed: %v", err)
 		}
@@ -1052,6 +1064,29 @@ func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Con
 			}
 		}
 		klog.V(2).Infof("all target groups of modelServing %s have been updated", ms.Name)
+	}
+	return nil
+}
+
+func (c *ModelServingController) handleRunningPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {
+	chain, err := c.buildPluginChain(ms)
+	if err != nil {
+		return fmt.Errorf("build plugin chain: %w", err)
+	}
+	if chain != nil {
+		if err := chain.OnPodRunning(context.Background(), &plugins.HookRequest{
+			ModelServing:    ms,
+			ServingGroup:    servingGroupName,
+			RoleName:        utils.GetRoleName(newPod),
+			RoleID:          utils.GetRoleID(newPod),
+			IsEntry:         newPod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
+			Pod:             newPod,
+			PodLister:       c.podsLister,
+			ConfigMapLister: c.configMapsLister,
+			KubeClient:      c.kubeClientSet,
+		}); err != nil {
+			return err
+		}
 	}
 	return nil
 }

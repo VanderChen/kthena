@@ -95,6 +95,22 @@ func (c *Chain) OnPodCreate(ctx context.Context, req *HookRequest) error {
 	return nil
 }
 
+// OnPodRunning executes plugins' running hooks in order.
+func (c *Chain) OnPodRunning(ctx context.Context, req *HookRequest) error {
+	if c == nil {
+		return nil
+	}
+	for _, entry := range c.entries {
+		if !shouldRun(entry.spec, req) {
+			continue
+		}
+		if err := entry.plugin.OnPodRunning(ctx, req); err != nil {
+			return fmt.Errorf("plugin %s OnPodRunning: %w", entry.plugin.Name(), err)
+		}
+	}
+	return nil
+}
+
 // OnPodReady executes plugins' ready hooks in order.
 func (c *Chain) OnPodReady(ctx context.Context, req *HookRequest) error {
 	if c == nil {
