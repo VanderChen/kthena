@@ -122,6 +122,22 @@ func (p *PodRanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookR
 }
 
 func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.HookRequest) error {
+	return p.updateRanktableFromPods(ctx, req, "OnPodRunning")
+}
+
+func (p *PodRanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
+	return nil
+}
+
+func (p *PodRanktablePlugin) OnPodDelete(ctx context.Context, req *plugins.HookRequest) error {
+	// When a pod is deleted (e.g., during scale-down), update the ranktable to reflect the change.
+	// This ensures the ranktable stays in sync even when pods are removed without triggering OnPodRunning.
+	return p.updateRanktableFromPods(ctx, req, "OnPodDelete")
+}
+
+// updateRanktableFromPods is a common function to update ranktable based on current pods in the lister.
+// It's used by both OnPodRunning and OnPodDelete to avoid code duplication.
+func (p *PodRanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plugins.HookRequest, hookName string) error {
 	ms := req.ModelServing
 
 	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
@@ -152,7 +168,7 @@ func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.Hook
 		return err
 	}
 
-	klog.V(4).Infof("Found %d pods for ranktable generation (Level: %s, RoleID: %s)", len(pods), template.Level, req.RoleID)
+	klog.V(4).Infof("%s: Found %d pods for ranktable generation (Level: %s, RoleID: %s)", hookName, len(pods), template.Level, req.RoleID)
 
 	// Check readiness and collect data
 	allReady := true
@@ -161,10 +177,11 @@ func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.Hook
 
 	for _, pod := range pods {
 		isRunning := pod.Status.Phase == corev1.PodRunning
-		klog.V(4).Infof("Checking pod %s: Phase=%s, DeletionTimestamp=%v, Running=%v", pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
+		klog.V(4).Infof("%s: Checking pod %s: Phase=%s, DeletionTimestamp=%v, Running=%v", hookName, pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
 
 		// Skip pods that are deleting
 		if pod.DeletionTimestamp != nil {
+			klog.V(4).Infof("%s: Skipping pod %s because it's being deleted", hookName, pod.Name)
 			continue
 		}
 		activePods++
@@ -205,7 +222,7 @@ func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.Hook
 	if !allReady || len(podRanktables) == 0 {
 		status = RanktableStatusInitializing
 		podRanktables = nil // Force empty data if not ready
-		klog.V(4).Infof("Ranktable status set to Initializing. allReady: %v, podRanktables count: %d", allReady, len(podRanktables))
+		klog.V(4).Infof("%s: Ranktable status set to Initializing. allReady: %v, podRanktables count: %d", hookName, allReady, len(podRanktables))
 	} else {
 		// Double check if we have enough pods
 		if template.Level == RoleLevelRanktable {
@@ -219,12 +236,12 @@ func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.Hook
 					break
 				}
 			}
-			klog.V(4).Infof("Role %s/%s check: activePods=%d, roleReplicas=%d, foundRole=%v", ms.Name, req.RoleID, activePods, roleReplicas, found)
+			klog.V(4).Infof("%s: Role %s/%s check: activePods=%d, roleReplicas=%d, foundRole=%v", hookName, ms.Name, req.RoleID, activePods, roleReplicas, found)
 			if found && int32(activePods) < roleReplicas {
 				allReady = false
 				status = RanktableStatusInitializing
 				podRanktables = nil
-				klog.V(4).Infof("Role %s/%s (Group: %s) has %d active pods, expected %d. Setting status to Initializing.", ms.Name, req.RoleID, req.ServingGroup, activePods, roleReplicas)
+				klog.V(4).Infof("%s: Role %s/%s (Group: %s) has %d active pods, expected %d. Setting status to Initializing.", hookName, ms.Name, req.RoleID, req.ServingGroup, activePods, roleReplicas)
 			}
 		}
 	}
@@ -256,11 +273,8 @@ func (p *PodRanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.Hook
 
 	ownerRef := *metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))
 
+	klog.V(2).Infof("%s: Updating ranktable ConfigMap %s/%s", hookName, ms.Namespace, cmName)
 	return p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON)
-}
-
-func (p *PodRanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
-	return nil
 }
 
 func (p *PodRanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookRequest) error {
