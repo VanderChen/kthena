@@ -58,6 +58,14 @@ func (t *testPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "delete-"+t.name)
+	if t.errOn == "delete" {
+		return assertError
+	}
+	return nil
+}
+
 func (t *testPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
 	*t.calls = append(*t.calls, "roledelete-"+t.name)
 	if t.errOn == "roledelete" {

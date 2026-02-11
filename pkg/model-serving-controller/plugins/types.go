@@ -48,6 +48,8 @@ type Plugin interface {
 	OnPodRunning(ctx context.Context, req *HookRequest) error
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
 	OnPodReady(ctx context.Context, req *HookRequest) error
+	// OnPodDelete is invoked when a pod is deleted (e.g., during scale-down).
+	OnPodDelete(ctx context.Context, req *HookRequest) error
 	// OnRoleDelete is invoked when all pods in a role are deleted.
 	OnRoleDelete(ctx context.Context, req *HookRequest) error
 	// OnServingGroupDelete is invoked when a serving group is deleted.

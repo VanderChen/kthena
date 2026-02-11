@@ -92,6 +92,11 @@ func (p *DemoPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+// OnPodDelete is a no-op for the demo plugin.
+func (p *DemoPlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 // OnRoleDelete is a no-op for the demo plugin.
 func (p *DemoPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
 	return nil

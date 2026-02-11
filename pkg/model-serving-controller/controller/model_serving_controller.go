@@ -381,7 +381,27 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 
-	err := c.handleDeletedPod(ms, servingGroupName, pod)
+	// Call OnPodDelete hook to allow plugins to update their state (e.g., ranktable)
+	chain, err := c.buildPluginChain(ms)
+	if err != nil {
+		klog.Errorf("failed to build plugin chain for pod deletion: %v", err)
+	} else if chain != nil {
+		if err := chain.OnPodDelete(context.Background(), &plugins.HookRequest{
+			ModelServing:    ms,
+			ServingGroup:    servingGroupName,
+			RoleName:        roleName,
+			RoleID:          roleID,
+			IsEntry:         pod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
+			Pod:             pod,
+			PodLister:       c.podsLister,
+			ConfigMapLister: c.configMapsLister,
+			KubeClient:      c.kubeClientSet,
+		}); err != nil {
+			klog.Errorf("OnPodDelete hook failed for pod %s/%s: %v", pod.Namespace, pod.Name, err)
+		}
+	}
+
+	err = c.handleDeletedPod(ms, servingGroupName, pod)
 	if err != nil {
 		klog.Errorf("handle deleted pod failed: %v", err)
 	}
