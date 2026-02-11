@@ -1,0 +1,95 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: modelserving-test-runner
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: modelserving-test-runner
+rules:
+  # ModelServing resources
+  - apiGroups: ["workload.serving.volcano.sh"]
+    resources: ["modelservings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["workload.serving.volcano.sh"]
+    resources: ["modelservings/status"]
+    verbs: ["get", "watch"]
+  # Pod operations
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Namespace operations
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete"]
+  # ConfigMap and Service operations (for fixtures)
+  - apiGroups: [""]
+    resources: ["configmaps", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Events (for assertions)
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: modelserving-test-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: modelserving-test-runner
+subjects:
+  - kind: ServiceAccount
+    name: modelserving-test-runner
+    namespace: default
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: modelserving-integration-test
+  namespace: default
+  labels:
+    app: modelserving-test
+    test-type: integration
+spec:
+  # Keep completed job for 1 hour for log inspection
+  ttlSecondsAfterFinished: 3600
+  backoffLimit: 0  # Don't retry on failure
+  template:
+    metadata:
+      labels:
+        app: modelserving-test
+        test-type: integration
+    spec:
+      serviceAccountName: modelserving-test-runner
+      restartPolicy: Never
+      containers:
+        - name: test-runner
+          image: modelserving-test:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            # Test configuration
+            - name: TEST_TIMEOUT
+              value: "30m"
+            # Run all tests by default, can be overridden
+            - name: TEST_FILTER
+              value: ".*"
+            # Kubeconfig is provided by service account
+            - name: KUBECONFIG
+              value: ""
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi

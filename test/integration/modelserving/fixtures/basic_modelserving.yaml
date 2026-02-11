@@ -1,0 +1,23 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: basic-ms
+  namespace: default
+spec:
+  replicas: 1
+  schedulerName: volcano
+  template:
+    roles:
+      - name: worker
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+            - name: test-container
+              image: nginx:latest
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+            restartPolicy: Never
+        workerReplicas: 0

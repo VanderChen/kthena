@@ -1,0 +1,97 @@
+apiVersion: test.kthena.io/v1
+kind: TestCase
+metadata:
+  name: servinggroup-scale-up-down
+  description: Test ServingGroup replica scaling from 1→3→1
+  tags: [scaling, servinggroup, smoke]
+spec:
+  timeout: 10m
+
+  setup:
+    - name: create-modelserving
+      action: apply
+      manifest: test/integration/modelserving/fixtures/basic_modelserving.yaml
+      patches:
+        - path: metadata.name
+          value: test-scale-sg-{{.TestID}}
+        - path: metadata.namespace
+          value: "{{.Namespace}}"
+        - path: spec.replicas
+          value: 1
+
+    - name: wait-for-ready
+      action: wait
+      resource: modelserving/test-scale-sg-{{.TestID}}
+      condition: ready
+      timeout: 5m
+
+  steps:
+    - name: verify-initial-state
+      action: assert
+      assertions:
+        - type: statusField
+          resource: modelserving/test-scale-sg-{{.TestID}}
+          field: status.availableReplicas
+          operator: equals
+          value: 1
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-sg-{{.TestID}}
+          operator: equals
+          value: 1
+
+    - name: scale-up-to-3
+      action: patch
+      resource: modelserving/test-scale-sg-{{.TestID}}
+      patch:
+        spec:
+          replicas: 3
+
+    - name: wait-after-scale-up
+      action: sleep
+      timeout: 5s
+
+    - name: verify-scale-up
+      action: assert
+      assertions:
+        - type: statusField
+          resource: modelserving/test-scale-sg-{{.TestID}}
+          field: status.availableReplicas
+          operator: equals
+          value: 3
+          timeout: 3m
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-sg-{{.TestID}}
+          operator: equals
+          value: 3
+          timeout: 3m
+
+    - name: scale-down-to-1
+      action: patch
+      resource: modelserving/test-scale-sg-{{.TestID}}
+      patch:
+        spec:
+          replicas: 1
+
+    - name: wait-after-scale-down
+      action: sleep
+      timeout: 5s
+
+    - name: verify-scale-down
+      action: assert
+      assertions:
+        - type: statusField
+          resource: modelserving/test-scale-sg-{{.TestID}}
+          field: status.availableReplicas
+          operator: equals
+          value: 1
+          timeout: 3m
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-sg-{{.TestID}}
+          operator: equals
+          value: 1
+          timeout: 3m
+
+  cleanup:
+    - name: delete-modelserving
+      action: delete
+      resource: modelserving/test-scale-sg-{{.TestID}}

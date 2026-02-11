@@ -1,0 +1,60 @@
+apiVersion: test.kthena.io/v1
+kind: TestCase
+metadata:
+  name: create-and-delete
+  description: Test basic ModelServing creation and deletion lifecycle
+  tags: [lifecycle, smoke]
+spec:
+  timeout: 10m
+
+  setup:
+    - name: create-modelserving
+      action: apply
+      manifest: test/integration/modelserving/fixtures/basic_modelserving.yaml
+      patches:
+        - path: metadata.name
+          value: test-lifecycle-{{.TestID}}
+        - path: metadata.namespace
+          value: "{{.Namespace}}"
+        - path: spec.replicas
+          value: 1
+
+    - name: wait-for-ready
+      action: wait
+      resource: modelserving/test-lifecycle-{{.TestID}}
+      condition: ready
+      timeout: 5m
+
+  steps:
+    - name: verify-creation
+      action: assert
+      assertions:
+        - type: statusField
+          resource: modelserving/test-lifecycle-{{.TestID}}
+          field: status.availableReplicas
+          operator: equals
+          value: 1
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-lifecycle-{{.TestID}}
+          operator: equals
+          value: 1
+
+    - name: delete-modelserving
+      action: delete
+      resource: modelserving/test-lifecycle-{{.TestID}}
+
+    - name: wait-for-deletion
+      action: wait
+      resource: modelserving/test-lifecycle-{{.TestID}}
+      condition: deleted
+      timeout: 3m
+
+    - name: verify-pods-deleted
+      action: assert
+      assertions:
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-lifecycle-{{.TestID}}
+          operator: equals
+          value: 0
+
+  cleanup: []

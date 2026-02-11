@@ -1,0 +1,66 @@
+apiVersion: test.kthena.io/v1
+kind: TestCase
+metadata:
+  name: worker-scale-replicas
+  description: Test Worker replica scaling by modifying workerReplicas field
+  tags: [scaling, worker]
+spec:
+  timeout: 10m
+
+  setup:
+    - name: create-modelserving
+      action: apply
+      manifest: test/integration/modelserving/fixtures/basic_modelserving.yaml
+      patches:
+        - path: metadata.name
+          value: test-scale-worker-{{.TestID}}
+        - path: metadata.namespace
+          value: "{{.Namespace}}"
+        - path: spec.replicas
+          value: 1
+        - path: spec.template.roles[0].workerReplicas
+          value: 0
+
+    - name: wait-for-ready
+      action: wait
+      resource: modelserving/test-scale-worker-{{.TestID}}
+      condition: ready
+      timeout: 5m
+
+  steps:
+    - name: verify-initial-state
+      action: assert
+      assertions:
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-worker-{{.TestID}}
+          operator: equals
+          value: 1
+          timeout: 2m
+
+    - name: scale-workers-to-2
+      action: patch
+      resource: modelserving/test-scale-worker-{{.TestID}}
+      patch:
+        spec:
+          template:
+            roles:
+              - name: worker
+                workerReplicas: 2
+
+    - name: wait-after-worker-scale
+      action: sleep
+      timeout: 5s
+
+    - name: verify-workers-scaled
+      action: assert
+      assertions:
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-worker-{{.TestID}}
+          operator: equals
+          value: 3
+          timeout: 3m
+
+  cleanup:
+    - name: delete-modelserving
+      action: delete
+      resource: modelserving/test-scale-worker-{{.TestID}}

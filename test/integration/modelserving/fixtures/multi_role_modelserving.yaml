@@ -1,0 +1,46 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: multi-role-ms
+  namespace: default
+spec:
+  replicas: 1
+  schedulerName: volcano
+  template:
+    roles:
+      - name: entry
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+            - name: entry-container
+              image: nginx:latest
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+            restartPolicy: Never
+        workerReplicas: 2
+        workerTemplate:
+          spec:
+            containers:
+            - name: worker-container
+              image: nginx:latest
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+            restartPolicy: Never
+      - name: storage
+        replicas: 1
+        entryTemplate:
+          spec:
+            containers:
+            - name: storage-container
+              image: redis:latest
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+            restartPolicy: Never
+        workerReplicas: 0

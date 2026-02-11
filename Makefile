@@ -105,6 +105,34 @@ test-e2e: ## Run the e2e tests. Expected an isolated environment using Kind.
 test-e2e-cleanup: ## Clean up the Kind cluster used for E2E tests.
 	@./test/e2e/cleanup.sh
 
+.PHONY: test-integration-modelserving
+test-integration-modelserving: ## Run ModelServing integration tests. Requires deployed controller.
+	@echo "Running ModelServing integration tests..."
+	@go test ./test/integration/modelserving/... -v -timeout=30m
+	@echo "Integration tests completed"
+
+.PHONY: test-integration-modelserving-smoke
+test-integration-modelserving-smoke: ## Run smoke tests only from ModelServing integration suite.
+	@echo "Running smoke tests..."
+	@go test ./test/integration/modelserving/... -v -timeout=10m -run "TestLifecycleCreateDelete|TestServingGroupScale"
+	@echo "Smoke tests completed"
+
+.PHONY: test-integration-modelserving-k8s
+test-integration-modelserving-k8s: ## Build and run integration tests as Kubernetes Job.
+	@./test/integration/modelserving/deploy.sh deploy
+
+.PHONY: test-integration-modelserving-k8s-smoke
+test-integration-modelserving-k8s-smoke: ## Run smoke tests as Kubernetes Job.
+	@./test/integration/modelserving/deploy.sh smoke
+
+.PHONY: test-integration-modelserving-k8s-logs
+test-integration-modelserving-k8s-logs: ## View logs from Kubernetes test job.
+	@./test/integration/modelserving/deploy.sh logs
+
+.PHONY: test-integration-modelserving-k8s-clean
+test-integration-modelserving-k8s-clean: ## Clean up Kubernetes test job and resources.
+	@./test/integration/modelserving/deploy.sh clean
+
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
 	$(GOLANGCI_LINT) run

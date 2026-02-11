@@ -1,0 +1,65 @@
+apiVersion: test.kthena.io/v1
+kind: TestCase
+metadata:
+  name: role-scale-replicas
+  description: Test Role replica scaling by modifying role.replicas field
+  tags: [scaling, role]
+spec:
+  timeout: 10m
+
+  setup:
+    - name: create-modelserving
+      action: apply
+      manifest: test/integration/modelserving/fixtures/multi_role_modelserving.yaml
+      patches:
+        - path: metadata.name
+          value: test-scale-role-{{.TestID}}
+        - path: metadata.namespace
+          value: "{{.Namespace}}"
+        - path: spec.replicas
+          value: 1
+
+    - name: wait-for-ready
+      action: wait
+      resource: modelserving/test-scale-role-{{.TestID}}
+      condition: ready
+      timeout: 5m
+
+  steps:
+    - name: verify-initial-state
+      action: assert
+      assertions:
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-role-{{.TestID}},modelserving.volcano.sh/role=entry
+          operator: equals
+          value: 3
+          timeout: 2m
+
+    - name: scale-role-to-2
+      action: patch
+      resource: modelserving/test-scale-role-{{.TestID}}
+      patch:
+        spec:
+          template:
+            roles:
+              - name: entry
+                replicas: 2
+                workerReplicas: 2
+
+    - name: wait-after-role-scale
+      action: sleep
+      timeout: 5s
+
+    - name: verify-role-scaled
+      action: assert
+      assertions:
+        - type: podCount
+          selector: modelserving.volcano.sh/name=test-scale-role-{{.TestID}},modelserving.volcano.sh/role=entry
+          operator: equals
+          value: 4
+          timeout: 3m
+
+  cleanup:
+    - name: delete-modelserving
+      action: delete
+      resource: modelserving/test-scale-role-{{.TestID}}

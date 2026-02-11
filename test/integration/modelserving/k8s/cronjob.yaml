@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: modelserving-integration-test
+  namespace: default
+  labels:
+    app: modelserving-test
+    test-type: integration
+spec:
+  # Run every day at 2 AM (adjust as needed)
+  schedule: "0 2 * * *"
+  # Keep last 3 successful and 1 failed jobs
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  concurrencyPolicy: Forbid  # Don't run multiple tests concurrently
+  jobTemplate:
+    metadata:
+      labels:
+        app: modelserving-test
+        test-type: integration
+    spec:
+      # Keep completed job for 24 hours for log inspection
+      ttlSecondsAfterFinished: 86400
+      backoffLimit: 0  # Don't retry on failure
+      template:
+        metadata:
+          labels:
+            app: modelserving-test
+            test-type: integration
+        spec:
+          serviceAccountName: modelserving-test-runner
+          restartPolicy: Never
+          containers:
+            - name: test-runner
+              image: modelserving-test:latest
+              imagePullPolicy: IfNotPresent
+              env:
+                # Test configuration
+                - name: TEST_TIMEOUT
+                  value: "30m"
+                # Run all tests by default
+                - name: TEST_FILTER
+                  value: ".*"
+                # Kubeconfig is provided by service account
+                - name: KUBECONFIG
+                  value: ""
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 256Mi
+                limits:
+                  cpu: 1000m
+                  memory: 1Gi

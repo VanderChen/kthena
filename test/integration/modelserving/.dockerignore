@@ -1,0 +1,52 @@
+# Git files
+.git
+.gitignore
+.gitattributes
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Build artifacts
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+cover.out
+
+# Documentation (not needed in image)
+docs/
+*.md
+!test/integration/modelserving/testcases/**/*.yaml
+!test/integration/modelserving/fixtures/**/*.yaml
+
+# CI/CD files
+.github/
+.gitlab-ci.yml
+
+# Dependencies (will be downloaded in build)
+vendor/
+
+# Local dev files
+.env
+.env.local
+tmp/
+temp/
+
+# Charts and configs not needed for tests
+charts/
+config/
+hack/
+
+# Examples not used by tests
+examples/
