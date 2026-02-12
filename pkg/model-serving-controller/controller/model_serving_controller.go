@@ -1457,6 +1457,7 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 						RoleID:          roleID,
 						KubeClient:      c.kubeClientSet,
 						ConfigMapLister: c.configMapsLister,
+						PodLister:       c.podsLister,
 					}); err != nil {
 						klog.Errorf("failed to execute OnRoleDelete hook: %v", err)
 					}

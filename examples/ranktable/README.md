@@ -51,45 +51,71 @@ Uses the **Pod IP address** as the `server_id`, ignoring any `server_id` from an
 ## Components
 
 ### 1. Pod Ranktable Parser Template
-invo
-**File**: `pod-ranktable-parser-standard.yaml`
 
-This ConfigMap defines how to parse the pod ranktable annotation (`ascend.com/ranktable`) into structured data.
+**File**: `pod-ranktable-parser-cce.yaml`
+
+This ConfigMap defines how to parse the pod ranktable annotation (`cce.kubectl.kubernetes.io/ascend-1980-configuration`) into structured data.
 
 ```bash
-kubectl apply -f pod-ranktable-parser-standard.yaml
+kubectl apply -f pod-ranktable-parser-cce.yaml
 ```
 
 ### 2. Ranktable Templates
 
-#### MindIE Role-Level Template
+Templates are available for both role-level and group-level ranktable generation:
 
-**File**: `ranktable-template-mindie-role.yaml`
+#### Role-Level Templates
 
-Generates ranktable at the role level for MindIE inference engine.
+**Files**:
+- `ranktable-template-mindie-role-cce.yaml` - Uses server_id from annotation
+- `pod-ranktable-template-mindie-role-cce.yaml` - Uses Pod IP as server_id
+
+Generates one ranktable ConfigMap per role instance. Each role has its own isolated ranktable.
 
 ```bash
-kubectl apply -f ranktable-template-mindie-role.yaml
+# For ranktable plugin (server_id from annotation)
+kubectl apply -f ranktable-template-mindie-role-cce.yaml
+
+# OR for pod-ranktable plugin (server_id from Pod IP)
+kubectl apply -f pod-ranktable-template-mindie-role-cce.yaml
 ```
 
-#### vLLM-Ascend Group-Level Template
+#### Group-Level Templates
 
-**File**: `ranktable-template-vllm-group.yaml`
+**Files**:
+- `ranktable-template-mindie-group-cce.yaml` - Uses server_id from annotation
+- `pod-ranktable-template-mindie-group-cce.yaml` - Uses Pod IP as server_id
 
-Generates ranktable at the group level for vLLM-Ascend inference engine.
+Generates one ranktable ConfigMap per serving group. All roles within the group share the same ranktable.
 
 ```bash
-kubectl apply -f ranktable-template-vllm-group.yaml
+# For ranktable plugin (server_id from annotation)
+kubectl apply -f ranktable-template-mindie-group-cce.yaml
+
+# OR for pod-ranktable plugin (server_id from Pod IP)
+kubectl apply -f pod-ranktable-template-mindie-group-cce.yaml
 ```
 
-### 3. ModelServing Example
+### 3. ModelServing Examples
 
-**File**: `modelserving-with-ranktable.yaml`
+Multiple example files demonstrate different configurations:
 
-Example ModelServing CR that uses ranktable generation.
+**Role-Level Examples**:
+- `modelserving-test-cce.yaml` - Basic role-level ranktable example
+
+**Group-Level Examples**:
+- `modelserving-ranktable-group-cce.yaml` - Group-level with ranktable plugin (server_id from annotation)
+- `modelserving-pod-ranktable-group-cce.yaml` - Group-level with pod-ranktable plugin (server_id from Pod IP)
 
 ```bash
-kubectl apply -f modelserving-with-ranktable.yaml
+# Apply role-level example
+kubectl apply -f modelserving-test-cce.yaml
+
+# OR apply group-level example
+kubectl apply -f modelserving-ranktable-group-cce.yaml
+
+# OR apply group-level pod-ranktable example
+kubectl apply -f modelserving-pod-ranktable-group-cce.yaml
 ```
 
 ## How It Works
@@ -119,19 +145,32 @@ kubectl apply -f modelserving-with-ranktable.yaml
 # Create kthena-system namespace if not exists
 kubectl create namespace kthena-system
 
-# Deploy pod parser template
-kubectl apply -f pod-ranktable-parser-standard.yaml
+# Deploy pod parser template (required for both plugins)
+kubectl apply -f pod-ranktable-parser-cce.yaml
 
-# Deploy ranktable template (choose one based on your inference engine)
-kubectl apply -f ranktable-template-mindie-role.yaml
-# OR
-kubectl apply -f ranktable-template-vllm-group.yaml
+# Deploy ranktable template (choose one based on your needs)
+# For role-level with ranktable plugin:
+kubectl apply -f ranktable-template-mindie-role-cce.yaml
+# OR for role-level with pod-ranktable plugin:
+kubectl apply -f pod-ranktable-template-mindie-role-cce.yaml
+
+# OR for group-level with ranktable plugin:
+kubectl apply -f ranktable-template-mindie-group-cce.yaml
+# OR for group-level with pod-ranktable plugin:
+kubectl apply -f pod-ranktable-template-mindie-group-cce.yaml
 ```
 
 ### Step 2: Create ModelServing
 
 ```bash
-kubectl apply -f modelserving-with-ranktable.yaml
+# For role-level example:
+kubectl apply -f modelserving-test-cce.yaml
+
+# OR for group-level with ranktable plugin:
+kubectl apply -f modelserving-ranktable-group-cce.yaml
+
+# OR for group-level with pod-ranktable plugin:
+kubectl apply -f modelserving-pod-ranktable-group-cce.yaml
 ```
 
 ### Step 3: Verify
@@ -140,14 +179,41 @@ kubectl apply -f modelserving-with-ranktable.yaml
 # Check if ranktable ConfigMaps are created
 kubectl get configmap -l app.kubernetes.io/component=ranktable
 
-# Check pod status
-kubectl get pods -l workload.kthena.io/group-name=qwen-inference
+# Check pod status (replace <group-name> with your serving group name)
+kubectl get pods -l workload.kthena.io/group-name=<group-name>
 
-# View ranktable content
-kubectl get configmap qwen-inference-worker-ranktable -o jsonpath='{.data.ranktable\.json}' | jq .
+# View ranktable content (for role-level)
+kubectl get configmap <modelserving-name>-ranktable-<group-name>-<role-id> -o jsonpath='{.data.ranktable\.json}' | jq .
+
+# View ranktable content (for group-level)
+kubectl get configmap <modelserving-name>-ranktable-<group-name> -o jsonpath='{.data.ranktable\.json}' | jq .
+
+# Example for role-level:
+kubectl get configmap test-ranktable-cce-ranktable-default-inference-0 -o jsonpath='{.data.ranktable\.json}' | jq .
+
+# Example for group-level:
+kubectl get configmap test-ranktable-group-cce-ranktable-default -o jsonpath='{.data.ranktable\.json}' | jq .
 ```
 
 ## Configuration
+
+### Choosing Between Role-Level and Group-Level
+
+**Role-Level Ranktables**:
+- ✅ Use when each role operates independently
+- ✅ Use when roles have different communication patterns
+- ✅ Simpler for single-role deployments
+- ✅ Each role has isolated ranktable configuration
+
+**Group-Level Ranktables**:
+- ✅ Use when multiple roles need to communicate with each other
+- ✅ Use for distributed training/inference across roles
+- ✅ Automatic updates when roles are scaled or deleted
+- ✅ Single unified ranktable for all pods in the serving group
+
+**Example Use Cases**:
+- **Role-Level**: Each inference role processes requests independently
+- **Group-Level**: Master-worker pattern where master coordinates with multiple worker roles
 
 ### ModelServing Plugins
 
@@ -179,12 +245,16 @@ spec:
 
 ### Pod Annotations
 
-- `ascend.com/ranktable`: **(Injected by external component)** Pod ranktable data in JSON format
+The annotation name is defined in the pod parser template. For CCE environments:
+
+- **Annotation Name**: `cce.kubectl.kubernetes.io/ascend-1980-configuration`
+- **Injected by**: External component (e.g., CCE device plugin)
+- **Format**: JSON containing pod ranktable data
 
 Example pod annotation:
 ```json
 {
-  "pod_name": "qwen-inference-worker-0",
+  "pod_name": "test-ranktable-cce-inference-worker-0",
   "server_id": "192.168.1.10",
   "devices": [
     {"device_id": "0", "device_ip": "10.20.0.2"},
@@ -192,6 +262,8 @@ Example pod annotation:
   ]
 }
 ```
+
+**Note**: When using the `pod-ranktable` plugin, the `server_id` field from the annotation is ignored and replaced with the Pod IP address.
 
 ## Template Customization
 
@@ -210,10 +282,12 @@ kind: ConfigMap
 metadata:
   name: my-custom-ranktable-template
   namespace: kthena-system
+  labels:
+    app.kubernetes.io/component: pod-ranktable-template
 data:
   inference-engine: "my-engine"
   ranktable-level: "role"
-  pod-parser-template: "ascend-pod-ranktable-parser-standard"
+  pod-parser-template: "ascend-pod-ranktable-parser-cce"
   ranktable-template: |
     {
       "custom_field": "value",
@@ -257,6 +331,22 @@ When an entire serving group is restarted (for group-level ranktables):
 3. **New pods are created**: Controller creates new pods for all roles in the group
 4. **Ranktable is regenerated**: After all new pods get annotations, ranktable is regenerated
 
+### Role Scale Down (Group-Level Ranktables)
+
+When using group-level ranktables and a role is scaled down or deleted:
+
+1. **Pod deletion triggers update**: When pods are deleted, the controller detects the change
+2. **Group ranktable is updated**: The group-level ranktable ConfigMap is regenerated to reflect remaining pods
+3. **OnRoleDelete hook**: When a role is completely deleted, the OnRoleDelete hook updates the group ranktable
+4. **Automatic synchronization**: The ranktable stays in sync with the actual pod count across all roles in the group
+
+**Example scenario**:
+- Serving group has 2 roles: `inference-master` (2 pods) and `inference-worker` (2 pods)
+- Scale down `inference-worker` from 2 to 1 replica
+- Group ranktable is automatically updated to include only 3 pods instead of 4
+- Delete `inference-worker` role completely
+- Group ranktable is automatically updated to include only 2 pods from `inference-master`
+
 ### Key Features
 
 - **Automatic detection**: Controller automatically detects pod/role/group restarts
@@ -278,8 +368,8 @@ When an entire serving group is restarted (for group-level ranktables):
 
 **Solutions**:
 ```bash
-# Check pod annotations
-kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations.ascend\.com/ranktable}'
+# Check pod annotations (for CCE)
+kubectl get pod <pod-name> -o jsonpath='{.metadata.annotations.cce\.kubectl\.kubernetes\.io/ascend-1980-configuration}'
 
 # Check controller logs
 kubectl logs -n kthena-system deployment/kthena-controller-manager
