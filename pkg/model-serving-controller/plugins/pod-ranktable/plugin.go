@@ -301,6 +301,11 @@ func (p *PodRanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.Hook
 			}
 		}
 		klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
+	} else if template.Level == GroupLevelRanktable {
+		// When level is group and a role is deleted, update the group-level ranktable
+		// to reflect the removal of pods from that role
+		klog.V(4).Infof("OnRoleDelete: Updating group-level ranktable after role %s/%s deletion", req.RoleName, req.RoleID)
+		return p.updateRanktableFromPods(ctx, req, "OnRoleDelete")
 	}
 
 	return nil
