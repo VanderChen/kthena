@@ -146,11 +146,17 @@ func addPodLabelAndAnnotation(pod *corev1.Pod, metadata *workloadv1alpha1.Metada
 		return
 	}
 	if metadata.Labels != nil {
+		if pod.Labels == nil {
+			pod.Labels = make(map[string]string)
+		}
 		for k, v := range metadata.Labels {
 			pod.Labels[k] = v
 		}
 	}
 	if metadata.Annotations != nil {
+		if pod.Annotations == nil {
+			pod.Annotations = make(map[string]string)
+		}
 		for k, v := range metadata.Annotations {
 			pod.Annotations[k] = v
 		}

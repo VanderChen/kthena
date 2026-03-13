@@ -20,12 +20,65 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
+
+func TestGenerateEntryPod_WithAnnotations(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+	}
+	role := workloadv1alpha1.Role{
+		Name: "test-role",
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Annotations: map[string]string{
+					"test-annotation": "test-value",
+				},
+			},
+		},
+	}
+
+	assert.NotPanics(t, func() {
+		GenerateEntryPod(role, ms, "test-group", 0, "test-revision")
+	})
+}
+
+func TestGenerateWorkerPod_WithAnnotations(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+	}
+	role := workloadv1alpha1.Role{
+		Name: "test-role",
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+			Metadata: &workloadv1alpha1.Metadata{
+				Annotations: map[string]string{
+					"test-annotation": "test-value",
+				},
+			},
+		},
+	}
+
+	entryPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-entry",
+			Namespace: "default",
+		},
+	}
+	assert.NotPanics(t, func() {
+		GenerateWorkerPod(role, ms, entryPod, "test-group", 0, 1, "test-revision")
+	})
+}
 
 func TestSetCondition(t *testing.T) {
 	t.Run("All groups ready", func(t *testing.T) {
