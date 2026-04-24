@@ -957,8 +957,12 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
+				ownerUID := "none"
+				if len(pod.OwnerReferences) > 0 {
+					ownerUID = string(pod.OwnerReferences[0].UID)
+				}
 				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, ownerUID)
 				c.enqueueModelServingAfter(ms, 1*time.Second)
 				break
 			}
@@ -2008,7 +2012,6 @@ func (c *ModelServingController) manageHeadlessService(ctx context.Context, ms *
 					workloadv1alpha1.GroupNameLabelKey: sg.Name,
 					workloadv1alpha1.RoleLabelKey:      role.Name,
 					workloadv1alpha1.RoleIDKey:         roleObj.Name,
-					workloadv1alpha1.EntryLabelKey:     "true",
 				}
 
 				services, err := c.getServicesByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, sg.Name, role.Name, roleObj.Name))

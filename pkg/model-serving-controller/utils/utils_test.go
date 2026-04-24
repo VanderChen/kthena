@@ -303,3 +303,47 @@ func TestGetMaxUnavailable(t *testing.T) {
 		})
 	}
 }
+
+func TestGeneratePod_HostnameSubdomain(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+	}
+	role := workloadv1alpha1.Role{
+		Name:           "test-role",
+		WorkerReplicas: 3,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{},
+		},
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{},
+		},
+	}
+
+	// Test Entry Pod
+	entryPod := GenerateEntryPod(role, ms, "test-group", 0, "test-revision", "role-revision")
+	assert.NotNil(t, entryPod)
+	assert.Equal(t, entryPod.Name, entryPod.Spec.Hostname)
+	assert.Equal(t, entryPod.Name, entryPod.Spec.Subdomain)
+
+	// Test Worker Pod
+	workerPod := GenerateWorkerPod(role, ms, entryPod, "test-group", 0, 1, "test-revision", "role-revision")
+	assert.NotNil(t, workerPod)
+	assert.Equal(t, workerPod.Name, workerPod.Spec.Hostname)
+	assert.Equal(t, entryPod.Name, workerPod.Spec.Subdomain)
+
+	// Test Entry Pod without workers
+	roleNoWorkers := workloadv1alpha1.Role{
+		Name:           "test-role",
+		WorkerReplicas: 0,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+			Spec: corev1.PodSpec{},
+		},
+	}
+	entryPodNoWorkers := GenerateEntryPod(roleNoWorkers, ms, "test-group", 0, "test-revision", "role-revision")
+	assert.NotNil(t, entryPodNoWorkers)
+	assert.Equal(t, entryPodNoWorkers.Name, entryPodNoWorkers.Spec.Hostname)
+	assert.Empty(t, entryPodNoWorkers.Spec.Subdomain)
+}
