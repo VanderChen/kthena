@@ -37,48 +37,50 @@ Traditional Kubernetes Horizontal Pod Autoscaler (HPA) or KEDA, while powerful, 
 
 ## 2. Architecture Overview
 
-Kthena Autoscaler follows a controller pattern consistent with Kubernetes design principles. The high-level architecture is shown below:
+Kthena Autoscaler follows a controller pattern consistent with Kubernetes design principles. The logical flow from metric collection to replica modification is illustrated below:
 
-```
-┌─────────────────────────────────────────┐
-│         Kthena Autoscaler               │
-├─────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │   Metrics   │  │   Scaling       │   │
-│  │   Collector │  │   Controller    │   │
-│  └──────┬──────┘  └────────┬────────┘   │
-│         │                  │             │
-│         ▼                  ▼             │
-│  ┌─────────────┐  ┌─────────────────┐   │
-│  │ Inference   │  │ ModelServing    │   │
-│  │ Pods        │  │ CR / Deployment │   │
-│  └─────────────┘  └─────────────────┘   │
-└─────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph "Metrics Collection"
+        A[Inference Pods] -- "Scrape /metrics" --> B[Metrics Collector]
+    end
+
+    subgraph "Decision Making"
+        B -- "Observed Values" --> C[Scaling Controller]
+        D[AutoscalingPolicy] -- "Logic & Thresholds" --> C
+        E[AutoscalingPolicyBinding] -- "Target & Constraints" --> C
+        C -- "Compute desired replicas" --> F[Algorithm Engine]
+    end
+
+    subgraph "Execution"
+        F -- "Update spec.replicas" --> G[ModelServing CR]
+        G -- "Scale Up/Down" --> A
+    end
 ```
 
 ### Core Components
 
-1. **Metrics Collector**: Periodically scrapes runtime metrics from inference engine endpoints (`/metrics`), including:
-   - `kthena:num_requests_waiting`: Queue length
+1. **Metrics Collector**: The Autoscaler relies on **business-level metrics** exposed by the inference pods themselves. It periodically scrapes runtime metrics from the engine's `/metrics` endpoint. For autoscaling to work, the pods **must** expose these metrics in a Prometheus-compatible format (e.g., vLLM's built-in metrics). Key metrics typically include:
+   - `kthena:num_requests_waiting` (or `vllm:num_requests_waiting`): Queue length
    - `kthena:kv_cache_usage_perc`: KV cache utilization
    - `kthena:time_to_first_token`: TTFT latency
-   - `kthena:time_per_output_token`: TPOT latency
 
-2. **Scaling Controller**: Implements the core autoscaling logic:
-   - Compares observed metrics against configured `targetValue`
-   - Applies tolerance thresholds to prevent thrashing
-   - Calculates desired replica count using stabilization windows
-   - Updates target resources via Kubernetes API
+2. **Scaling Controller**: Implements the core autoscaling logic by comparing observed metrics against targets and updating the `ModelServing` replicas.
 
-3. **Algorithm Engine**: Supports two scaling modes:
-   - **Homogeneous Instances Autoscale**: Single instance type, similar to KPA behavior with Stable/Panic modes
-   - **Heterogeneous Instances Autoscale**: Multi-instance optimization using greedy algorithm with cost-aware scheduling
+3. **Algorithm Engine**: Supports both **Homogeneous** (single instance type) and **Heterogeneous** (cost-aware multi-instance) scaling modes.
+
+### Policy vs. Binding: The Core Abstractions
+
+Kthena separates "how to scale" from "what to scale" using two primary Custom Resources:
+
+- **AutoscalingPolicy**: A reusable template defining the **scaling logic**. It specifies which metrics to watch, the `targetValue` for those metrics, and the `behavior` (stable/panic modes, stabilization windows).
+- **AutoscalingPolicyBinding**: The "glue" that specifies the **scaling target**. It links an `AutoscalingPolicy` to a specific `ModelServing` (or a `Role`). It also defines operational constraints like `minReplicas`, `maxReplicas`, and the `metricEndpoint` for scraping.
 
 ---
 
 ## 3. Homogeneous Scaling: Stable and Panic Modes
 
-For deployments with a single instance type (e.g., all vLLM pods on A100 GPUs), Kthena Autoscaler implements a dual-mode strategy inspired by Kubernetes Pod Autoscaler (KPA):
+For deployments with a single instance type (e.g., all vLLM pods on A100 GPUs), Kthena Autoscaler implements a dual-mode strategy:
 
 ### Stable Mode
 - Uses a **stabilization window** (e.g., 1 minute) to observe sustained load before scaling
@@ -114,6 +116,22 @@ spec:
       period: 1m
 ```
 
+#### Field Explanations
+
+| Field | Description |
+|-------|-------------|
+| `metricName` | The name of the metric to monitor, scraped from the inference pod's `/metrics` endpoint. |
+| `targetValue` | The desired average value for the metric per instance. If average value > `targetValue`, it scales up. |
+| `tolerancePercent` | The allowed fluctuation range around `targetValue` (e.g., 10% means no scaling if the metric is between 9.0 and 11.0). |
+| `behavior` | Root field for defining specific scaling behaviors for scale-up and scale-down. |
+| `scaleUp.panicPolicy` | Configures "Panic Mode" to bypass stabilization windows during extreme traffic spikes. |
+| `panicThresholdPercent` | Threshold to trigger Panic Mode. 150% means if the metric reaches 15.0 (10.0 * 1.5), the stabilization window is ignored. |
+| `panicModeHold` | The minimum duration to remain in Panic Mode to prevent premature scale-down during oscillating spikes. |
+| `scaleUp.stablePolicy` | Configuration for standard, "cautious" scaling based on sustained trends. |
+| `stabilizationWindow` | The look-back duration. For `scaleUp`, it ensures the load is consistently high for 1m before adding replicas. |
+| `period` | The frequency at which the Autoscaler evaluates the metric and makes a decision. |
+| `scaleDown` | Configuration for scale-down events, typically using a longer `stabilizationWindow` to avoid frequent pod restarts. |
+
 ### Role-Level Scaling for PD-Disaggregation
 
 A key differentiator is support for **role-level scaling** within a single `ModelServing` CRD. In PD-disaggregated deployments, prefill and decode roles have different resource profiles and scaling requirements [[34]]:
@@ -137,6 +155,19 @@ spec:
     minReplicas: 2
     maxReplicas: 8
 ```
+
+#### Field Explanations
+
+| Field | Description |
+|-------|-------------|
+| `policyRef` | Reference to the `AutoscalingPolicy` that contains the scaling logic (metrics, thresholds, etc.). |
+| `homogeneousTarget` | Used when scaling a single instance type. Contains the target identification and scaling constraints. |
+| `targetRef` | Identifies the top-level resource to be scaled (e.g., a `ModelServing` CR). |
+| `subTargets` | Optional. Allows fine-grained scaling of a specific component within the target. |
+| `subTargets.kind` | The type of sub-target. In Kthena, `Role` is used to target specific PD-disaggregated roles. |
+| `subTargets.name` | The name of the specific role (e.g., `decode`) defined in the `ModelServing` spec. |
+| `minReplicas` | The minimum number of replicas allowed for this specific target/role. |
+| `maxReplicas` | The maximum number of replicas allowed for this specific target/role. |
 
 This enables fine-grained optimization: scale up decode replicas for long-output scenarios while keeping prefill replicas stable.
 
@@ -273,103 +304,77 @@ metricEndpoint:
 
 ---
 
-## 6. Practical Usage: End-to-End Example
+## 6. Practical Usage: Scaling a vLLM Service
 
-Let's walk through deploying autoscaling for a PD-disaggregated LLM service:
+Let's walk through a concrete example of autoscaling a vLLM `ModelServing` deployment based on the request queue length.
 
-### Step 1: Define the ModelServing
-```yaml
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: llm-pd-serving
-spec:
-  replicas: 2
-  template:
-    roles:
-    - name: prefill
-      replicas: 3
-      # ... pod template
-    - name: decode
-      replicas: 4
-      # ... pod template
-```
+### Step 1: Create the AutoscalingPolicy
 
-### Step 2: Create AutoscalingPolicy
+This policy defines **how** to scale. We use vLLM's `vllm:num_requests_waiting` metric.
+
 ```yaml
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: AutoscalingPolicy
 metadata:
-  name: pd-scaling-policy
+  name: vllm-queue-policy
 spec:
   metrics:
-  - metricName: kthena:num_requests_waiting
+  - metricName: vllm:num_requests_waiting
     targetValue: 5.0
-  tolerancePercent: 15
+  tolerancePercent: 10
   behavior:
     scaleUp:
-      panicPolicy:
-        panicThresholdPercent: 200
-        panicModeHold: 3m
       stablePolicy:
-        stabilizationWindow: 45s
-        period: 15s
+        stabilizationWindow: 30s
+        period: 10s
     scaleDown:
-      stabilizationWindow: 3m
+      stabilizationWindow: 5m
       period: 30s
 ```
 
-### Step 3: Bind Policy to Roles
+**Field Explanations:**
+- `metricName`: The specific business metric to monitor. This must match the name exposed by your vLLM pods' `/metrics` endpoint.
+- `targetValue`: The desired average value per replica. Here, we aim to have no more than 5 waiting requests per instance. If the average exceeds this (accounting for tolerance), the Autoscaler will scale up.
+- `tolerancePercent`: A "dead band" around the target to prevent constant small adjustments. With 10% tolerance, scaling only triggers if the metric is > 5.5 or < 4.5.
+- `stabilizationWindow`: The duration to look back at metrics to ensure the load change is sustained. `5m` for `scaleDown` ensures we don't terminate instances too quickly after a brief lull.
+
+### Step 2: Bind Policy to vLLM ModelServing
+
+The binding defines **what** to scale and its constraints.
+
 ```yaml
-# Prefill role: conservative scaling (compute-intensive)
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: AutoscalingPolicyBinding
 metadata:
-  name: prefill-binding
+  name: vllm-binding
 spec:
   policyRef:
-    name: pd-scaling-policy
+    name: vllm-queue-policy
   homogeneousTarget:
     target:
       targetRef:
         kind: ModelServing
-        name: llm-pd-serving
-      subTargets:
-        kind: Role
-        name: prefill
-    minReplicas: 2
-    maxReplicas: 6
----
-# Decode role: aggressive scaling (latency-sensitive)
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: AutoscalingPolicyBinding
-metadata:
-  name: decode-binding
-spec:
-  policyRef:
-    name: pd-scaling-policy
-  homogeneousTarget:
-    target:
-      targetRef:
-        kind: ModelServing
-        name: llm-pd-serving
-      subTargets:
-        kind: Role
-        name: decode
-    minReplicas: 3
-    maxReplicas: 12
+        name: vllm-llama3
+    minReplicas: 1
+    maxReplicas: 10
+  metricEndpoint:
+    uri: "/metrics"
+    port: 8000
 ```
 
-### Step 4: Monitor and Verify
+**Field Explanations:**
+- `policyRef`: Reference to the `AutoscalingPolicy` created in Step 1.
+- `targetRef`: Specifies the `ModelServing` resource to be scaled.
+- `minReplicas` / `maxReplicas`: The absolute floor and ceiling for the number of instances.
+- `metricEndpoint`: Instructs the Autoscaler where to find the metrics on the pods. vLLM typically serves metrics on port 8000 at `/metrics`.
+
+### Step 3: Verify Scaling
+
+You can monitor the scaling activity via the binding status:
+
 ```bash
-# Check binding status
-kubectl describe autoscalingpolicybindings pd-scaling-binding
-
-# Watch replica changes
-watch -n 5 'kubectl get modelserving llm-pd-serving -o jsonpath="{.spec.template.roles[*].replicas}"'
-
-# Inspect autoscaler logs
-kubectl logs -n kthena-system -l app=kthena-autoscaler -f
+# Check the current status and decisions
+kubectl get autoscalingpolicybinding vllm-binding -o yaml
 ```
 
 ---
