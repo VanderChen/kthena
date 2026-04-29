@@ -138,7 +138,7 @@ func (collector *MetricCollector) fetchMetricsFromPods(ctx context.Context, pods
 	for _, pod := range pods {
 		func() {
 			instanceInfo.IsReady = instanceInfo.IsReady && inferControllerUtils.IsPodRunningAndReady(pod)
-			instanceInfo.IsFailed = instanceInfo.IsFailed || util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod)
+			instanceInfo.IsFailed = instanceInfo.IsFailed || util.IsPodFailed(pod)
 
 			pastValue, ok := pastHistograms[pod.Name]
 			var pastHistogramMap map[string]*histogram.Snapshot
