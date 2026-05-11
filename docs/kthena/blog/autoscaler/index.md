@@ -92,12 +92,45 @@ This is the most common form. The Policy is bound to a `ModelServing` or a speci
 - **Logic**: The Autoscaler treats the entire group as a single unit.
 - **Effect**: The system strictly maintains the defined Role ratios (e.g., prefill:decode = 1:2) during scaling. This is ideal for standard deployments with fixed PD topologies.
 
+```yaml
+# Binding to ModelServing (Whole group synchronous scaling)
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: vllm-group-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  homogeneousTarget:
+    target:
+      targetRef:
+        kind: ModelServing
+        name: vllm-llama3
+    minReplicas: 1
+    maxReplicas: 10
+```
+
 ### 4.2 Role Binding: Heterogeneous PD Scaling
 The Policy is bound to a specific `Role` (e.g., `decode` only) within a `ModelServing`.
 - **Logic**: The Autoscaler calculates and modifies replicas only for that specific role.
 - **Effect**: Prefill replicas can remain stable while decode replicas increase independently based on output load. This **Heterogeneous PD Scaling** significantly improves resource utilization.
 
 ```yaml
+# Example of ModelServing with Role definitions
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-serving
+spec:
+  template:
+    roles:
+    - name: prefill
+      replicas: 1
+      # ... container config ...
+    - name: decode
+      replicas: 2
+      # ... container config ...
+---
 # Example of independent Role binding
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: AutoscalingPolicyBinding
@@ -122,6 +155,29 @@ spec:
 When the binding includes the `heterogeneousTarget` field, multiple `ModelServing` targets with different costs can be defined.
 - **Logic**: The algorithm engine considers the replica counts and costs of all targets to compute the optimal combination.
 - **Effect**: In hybrid clusters, the Autoscaler automatically distributes inference instances across A100, H100, or NPUs based on cost priority.
+
+```yaml
+# Cross-hardware heterogeneous target binding example
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: heterogeneous-cost-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  heterogeneousTarget:
+    params:
+    - target:
+        targetRef: { kind: ModelServing, name: deepseek-h100 }
+      cost: 100
+      minReplicas: 1
+      maxReplicas: 10
+    - target:
+        targetRef: { kind: ModelServing, name: deepseek-a100 }
+      cost: 50
+      minReplicas: 1
+      maxReplicas: 20
+```
 
 ---
 
@@ -178,6 +234,43 @@ Kthena Autoscaler exposes metrics at `/metrics`:
 - `kthena_autoscaler_desired_replicas`: Target replicas after decision.
 - `kthena_autoscaler_current_replicas`: Actual observed replicas.
 - `kthena_autoscaler_scaling_events_total`: Scaling action counter.
+
+---
+
+## 7. Advanced: Cost-Aware Optimization and Heterogeneous Scaling Example
+
+In production, we often have different GPU SKUs. The `heterogeneousTarget` in Kthena Autoscaler allows for cost-prioritized scaling across multiple targets.
+
+```yaml
+# Cross-hardware cost optimization binding example
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: heterogeneous-cost-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  heterogeneousTarget:
+    params:
+    - target:
+        targetRef:
+          kind: ModelServing
+          name: deepseek-h100  # High performance, high cost
+      cost: 100
+      minReplicas: 1
+      maxReplicas: 10
+    - target:
+        targetRef:
+          kind: ModelServing
+          name: deepseek-a100  # Lower cost, preferred for scaling
+      cost: 50
+      minReplicas: 1
+      maxReplicas: 20
+    # Defines the expansion rate for cost-based greedy allocation
+    costExpansionRatePercent: 200
+```
+
+By configuring different `cost` values, the Autoscaler's algorithm engine prioritizes scaling on lower-cost resources while maintaining high-efficiency instances when scaling down, achieving the best TCO while meeting performance requirements.
 
 ---
 

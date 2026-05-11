@@ -89,12 +89,45 @@ Autoscaler 允许直接从 Pod 的 `/metrics` 端点抓取**推理专属指标**
 - **逻辑**：Autoscaler 将整组作为一个整体进行扩缩。
 - **效果**：系统会严格保持定义的 Role 比例（如 prefill:decode = 1:2）同步增减。这适用于 PD 拓扑固定的标准部署场景。
 
+```yaml
+# 绑定到 ModelServing (整组同步伸缩)
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: vllm-group-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  homogeneousTarget:
+    target:
+      targetRef:
+        kind: ModelServing
+        name: vllm-llama3
+    minReplicas: 1
+    maxReplicas: 10
+```
+
 ### 4.2 作用于 Role：实现独立 PD 异构伸缩
 将 Policy 绑定到 `ModelServing` 内特定的 `Role`（如仅绑定 `decode` 角色）。
 - **逻辑**：Autoscaler 仅针对该特定角色计算并修改副本数。
 - **效果**：可以实现 prefill 副本保持稳定，而 decode 副本根据长输出负载独立增加。这种**PD 异构伸缩**能极大提高资源利用率。
 
 ```yaml
+# 包含 Role 定义的 ModelServing 示例
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek-serving
+spec:
+  template:
+    roles:
+    - name: prefill
+      replicas: 1
+      # ... 容器配置 ...
+    - name: decode
+      replicas: 2
+      # ... 容器配置 ...
+---
 # 独立绑定到 Role 的示例
 apiVersion: workload.serving.volcano.sh/v1alpha1
 kind: AutoscalingPolicyBinding
@@ -119,6 +152,29 @@ spec:
 当 Binding 包含 `heterogeneousTarget` 字段时，可以定义多个具有不同成本的 `ModelServing` 目标。
 - **逻辑**：算法引擎会综合考虑所有目标的副本数和成本，计算最优组合。
 - **效果**：在混合集群中，Autoscaler 会根据成本优先级，在 A100、H100 或 NPU 之间自动分配推理实例。
+
+```yaml
+# 跨硬件异构目标绑定示例
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: heterogeneous-cost-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  heterogeneousTarget:
+    params:
+    - target:
+        targetRef: { kind: ModelServing, name: deepseek-h100 }
+      cost: 100
+      minReplicas: 1
+      maxReplicas: 10
+    - target:
+        targetRef: { kind: ModelServing, name: deepseek-a100 }
+      cost: 50
+      minReplicas: 1
+      maxReplicas: 20
+```
 
 ---
 
@@ -175,6 +231,43 @@ Kthena Autoscaler 在 `/metrics` 暴露以下指标：
 - `kthena_autoscaler_desired_replicas`：决策后的目标副本数。
 - `kthena_autoscaler_current_replicas`：实际观测到的副本数。
 - `kthena_autoscaler_scaling_events_total`：伸缩动作计数器。
+
+---
+
+## 7. 进阶：成本感知优化与异构伸缩示例
+
+在实际生产中，我们往往拥有不同规格的 GPU 资源。Kthena Autoscaler 的 `heterogeneousTarget` 允许在多个目标之间进行成本优先的伸缩分配。
+
+```yaml
+# 跨硬件成本优化绑定示例
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: AutoscalingPolicyBinding
+metadata:
+  name: heterogeneous-cost-binding
+spec:
+  policyRef:
+    name: vllm-queue-policy
+  heterogeneousTarget:
+    params:
+    - target:
+        targetRef:
+          kind: ModelServing
+          name: deepseek-h100  # 性能高，成本高
+      cost: 100
+      minReplicas: 1
+      maxReplicas: 10
+    - target:
+        targetRef:
+          kind: ModelServing
+          name: deepseek-a100  # 成本低，优先扩容
+      cost: 50
+      minReplicas: 1
+      maxReplicas: 20
+    # 定义成本扩张率，影响算法对成本与容量的权衡
+    costExpansionRatePercent: 200
+```
+
+通过配置不同的 `cost` 值，Autoscaler 的算法引擎会优先尝试在低成本资源上扩容，而在缩容时则优先保留高效率或特定成本的实例，从而在满足性能需求的同时实现最优 TCO。
 
 ---
 
