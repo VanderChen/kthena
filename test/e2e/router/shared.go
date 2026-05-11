@@ -478,8 +478,8 @@ func testModelRoutePrefillDecodeDisaggregationSharedWithFixtures(
 		}
 	})
 
-	// Wait for ModelServing to be ready
-	utils.WaitForModelServingReady(t, ctx, testCtx.KthenaClient, testNamespace, createdModelServing.Name)
+	// Wait for ModelServing to be ready for routing
+	utils.WaitForModelServingReadyForRouting(t, ctx, testCtx.KubeClient, testCtx.KthenaClient, testNamespace, createdModelServing.Name)
 
 	// Deploy ModelServer
 	t.Log("Deploying ModelServer for PD disaggregation...")

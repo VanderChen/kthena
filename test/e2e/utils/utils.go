@@ -24,6 +24,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,6 +66,108 @@ func WaitForModelServingSpecReplicas(t *testing.T, ctx context.Context, kthenaCl
 		}
 		return *ms.Spec.Replicas == want
 	}, timeout, 10*time.Second, "ModelServing %s/%s spec.replicas should converge to %d", namespace, name, want)
+}
+
+// WaitForModelServingReadyForRouting waits until a ModelServing is routable for router e2e tests.
+// It treats either ModelServing status readiness or all expected pods becoming ready as success.
+func WaitForModelServingReadyForRouting(t *testing.T, ctx context.Context, kubeClient kubernetes.Interface, kthenaClient *clientset.Clientset, namespace, name string) {
+	t.Helper()
+	t.Log("Waiting for ModelServing to be ready for routing...")
+
+	var lastMS *workloadv1alpha1.ModelServing
+	var lastPods []corev1.Pod
+
+	err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+		ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			t.Logf("Error getting ModelServing %s, retrying: %v", name, err)
+			return false, nil
+		}
+		lastMS = ms.DeepCopy()
+
+		expectedReplicas := int32(1)
+		if ms.Spec.Replicas != nil {
+			expectedReplicas = *ms.Spec.Replicas
+		}
+		if ms.Status.AvailableReplicas >= expectedReplicas {
+			return true, nil
+		}
+
+		pods, err := kubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+			LabelSelector: fmt.Sprintf("%s=%s", workloadv1alpha1.ModelServingNameLabelKey, name),
+		})
+		if err != nil {
+			t.Logf("Error listing pods for ModelServing %s, retrying: %v", name, err)
+			return false, nil
+		}
+		lastPods = append(lastPods[:0], pods.Items...)
+
+		expectedPods := expectedModelServingPodCount(ms)
+		readyPods := 0
+		for _, pod := range pods.Items {
+			if IsPodReady(pod) {
+				readyPods++
+			}
+		}
+
+		if expectedPods > 0 && readyPods >= expectedPods {
+			t.Logf("ModelServing %s status is %d/%d, but pods are ready %d/%d; continuing",
+				name, ms.Status.AvailableReplicas, expectedReplicas, readyPods, expectedPods)
+			return true, nil
+		}
+		return false, nil
+	})
+
+	if err != nil {
+		if lastMS != nil {
+			t.Logf("Final ModelServing status %s/%s: replicas=%d available=%d updated=%d current=%d observedGeneration=%d",
+				lastMS.Namespace, lastMS.Name, lastMS.Status.Replicas, lastMS.Status.AvailableReplicas,
+				lastMS.Status.UpdatedReplicas, lastMS.Status.CurrentReplicas, lastMS.Status.ObservedGeneration)
+			for _, cond := range lastMS.Status.Conditions {
+				t.Logf("Condition %s=%s reason=%s message=%s", cond.Type, cond.Status, cond.Reason, cond.Message)
+			}
+		}
+
+		for _, pod := range lastPods {
+			t.Logf("Pod %s phase=%s ready=%t restarts=%d reason=%s message=%s",
+				pod.Name, pod.Status.Phase, IsPodReady(pod), podRestartCount(pod), pod.Status.Reason, pod.Status.Message)
+			for _, c := range pod.Status.ContainerStatuses {
+				if c.State.Waiting != nil {
+					t.Logf("Pod %s container %s waiting: reason=%s message=%s", pod.Name, c.Name, c.State.Waiting.Reason, c.State.Waiting.Message)
+				}
+				if c.State.Terminated != nil {
+					t.Logf("Pod %s container %s terminated: reason=%s exitCode=%d message=%s", pod.Name, c.Name, c.State.Terminated.Reason, c.State.Terminated.ExitCode, c.State.Terminated.Message)
+				}
+			}
+		}
+	}
+
+	require.NoError(t, err, "ModelServing did not become ready for routing")
+}
+
+func expectedModelServingPodCount(ms *workloadv1alpha1.ModelServing) int {
+	groups := int32(1)
+	if ms.Spec.Replicas != nil {
+		groups = *ms.Spec.Replicas
+	}
+
+	total := int32(0)
+	for _, role := range ms.Spec.Template.Roles {
+		roleReplicas := int32(1)
+		if role.Replicas != nil {
+			roleReplicas = *role.Replicas
+		}
+		total += groups * roleReplicas * (1 + role.WorkerReplicas)
+	}
+	return int(total)
+}
+
+func podRestartCount(pod corev1.Pod) int32 {
+	var total int32
+	for _, c := range pod.Status.ContainerStatuses {
+		total += c.RestartCount
+	}
+	return total
 }
 
 // IsPodReady checks if a pod is in Running phase and has PodReady condition set to True.
