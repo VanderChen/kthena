@@ -51,11 +51,15 @@ func GetMetricPods(lister listerv1.PodLister, namespace string, target *workload
 	if err != nil {
 		return nil, err
 	}
-	if podList, err := lister.Pods(namespace).List(selector); err != nil {
-		return nil, err
-	} else {
-		return podList, nil
+	if selector == nil {
+		return nil, nil
 	}
+
+	podList, err := lister.Pods(namespace).List(*selector)
+	if err != nil {
+		return nil, err
+	}
+	return podList, nil
 }
 
 func UpdateModelServing(ctx context.Context, client clientset.Interface, modelInfer *workload.ModelServing) error {
@@ -86,7 +90,7 @@ func GetRoleName(targetRef *corev1.ObjectReference) (string, string, error) {
 	return strs[0], strs[1], nil
 }
 
-func GetTargetLabels(target *workload.Target) (labels.Selector, error) {
+func GetTargetLabels(target *workload.Target) (*labels.Selector, error) {
 	if target == nil || target.TargetRef.Name == "" {
 		return nil, nil
 	}
@@ -116,5 +120,5 @@ func GetTargetLabels(target *workload.Target) (labels.Selector, error) {
 		return nil, err
 	}
 
-	return labelSelector, nil
+	return &labelSelector, nil
 }

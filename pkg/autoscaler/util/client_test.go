@@ -237,7 +237,7 @@ func TestGetTargetLabels(t *testing.T) {
 				return
 			}
 			for key, wantValue := range tt.wantMatchLabel {
-				gotValue, ok := selector.RequiresExactMatch(key)
+				gotValue, ok := (*selector).RequiresExactMatch(key)
 				if !ok {
 					t.Errorf("GetTargetLabels() selector missing exact label %q", key)
 					continue
@@ -286,7 +286,7 @@ func TestGetMetricPods(t *testing.T) {
 	tests := []struct {
 		name         string
 		namespace    string
-		targetName   string
+		target       *workload.Target
 		wantPodCount int
 		wantPodNames []string
 		wantErr      bool
@@ -294,7 +294,12 @@ func TestGetMetricPods(t *testing.T) {
 		{
 			name:         "pods in default namespace",
 			namespace:    "default",
-			targetName:   "model1",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 1,
 			wantPodNames: []string{"pod1"},
 			wantErr:      false,
@@ -302,7 +307,12 @@ func TestGetMetricPods(t *testing.T) {
 		{
 			name:         "pods in other-namespace",
 			namespace:    "other-namespace",
-			targetName:   "model1",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 1,
 			wantPodNames: []string{"pod2"},
 			wantErr:      false,
@@ -310,7 +320,32 @@ func TestGetMetricPods(t *testing.T) {
 		{
 			name:         "pods in non-existent namespace",
 			namespace:    "non-existent",
-			targetName:   "model1",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Name: "model1",
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
+			wantPodCount: 0,
+			wantPodNames: []string{},
+			wantErr:      false,
+		},
+		{
+			name:         "nil target returns no pods",
+			namespace:    "default",
+			target:       nil,
+			wantPodCount: 0,
+			wantPodNames: []string{},
+			wantErr:      false,
+		},
+		{
+			name:      "empty target name returns no pods",
+			namespace: "default",
+			target: &workload.Target{
+				TargetRef: corev1.ObjectReference{
+					Kind: workload.ModelServingKind.Kind,
+				},
+			},
 			wantPodCount: 0,
 			wantPodNames: []string{},
 			wantErr:      false,
@@ -319,11 +354,7 @@ func TestGetMetricPods(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			target := &workload.Target{}
-			target.TargetRef.Name = tt.targetName
-			target.TargetRef.Kind = workload.ModelServingKind.Kind
-
-			pods, err := GetMetricPods(podLister, tt.namespace, target)
+			pods, err := GetMetricPods(podLister, tt.namespace, tt.target)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GetMetricPods() error = %v, wantErr %v", err, tt.wantErr)
