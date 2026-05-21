@@ -143,6 +143,18 @@ func TestRouter_HandleHTTPRoute_PathPrefix(t *testing.T) {
 			expectedMatch: false,
 		},
 		{
+			name:          "prefix with more path elements does not match shorter path",
+			prefix:        "/a/b/c",
+			path:          "/abc",
+			expectedMatch: false,
+		},
+		{
+			name:          "prefix with one path element does not match nested path text",
+			prefix:        "/abc",
+			path:          "/a/b/c",
+			expectedMatch: false,
+		},
+		{
 			name:          "prefix matching is case sensitive",
 			prefix:        "/foo",
 			path:          "/Foo",
