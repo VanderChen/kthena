@@ -58,6 +58,7 @@ import (
 const (
 	// Context keys for gin context
 	GatewayKey = "gatewayKey"
+	PromptKey  = "promptKey" // store parsed ChatMessage, which will be reused
 )
 
 func getEnvBool(key string, fallback bool) bool {
@@ -253,6 +254,8 @@ func (r *Router) HandlerFunc() gin.HandlerFunc {
 			c.Set("finishReason", "prompt_parsing")
 			return
 		}
+		// Store parsed prompt to avoid re-parsing in doLoadbalance.
+		c.Set(PromptKey, prompt)
 		promptStr := utils.GetPromptString(prompt)
 
 		// Calculate input tokens for metrics using tokenizer
@@ -410,8 +413,15 @@ func (r *Router) doLoadbalance(c *gin.Context, modelRequest ModelRequest) {
 	}
 
 	// Common scheduling logic for both ModelServer and InferencePool
-	prompt, err := utils.ParsePrompt(modelRequest)
-	if err != nil {
+	var prompt *common.ChatMessage
+	if cached, exists := c.Get(PromptKey); exists {
+		var ok bool
+		if prompt, ok = cached.(*common.ChatMessage); !ok {
+			accesslog.SetError(c, "prompt_parsing", "internal error: invalid prompt type")
+			c.AbortWithStatusJSON(http.StatusInternalServerError, "internal error")
+			return
+		}
+	} else {
 		accesslog.SetError(c, "prompt_parsing", "prompt not found")
 		c.AbortWithStatusJSON(http.StatusNotFound, "prompt not found")
 		return
