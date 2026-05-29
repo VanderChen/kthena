@@ -90,6 +90,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -422,6 +423,22 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 				workloadv1alpha1.RoleRollingUpdate,
 			),
 		))
+	}
+
+	return allErrs
+}
+
+func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.EvictionStrategy == nil {
+		return allErrs
+	}
+
+	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
+	fldPath := field.NewPath("spec").Child("rolloutStrategy").Child("evictionStrategy")
+
+	if strategy.MinAvailable != nil {
+		allErrs = append(allErrs, validateIntOrPercent(strategy.MinAvailable, fldPath.Child("minAvailable"))...)
 	}
 
 	return allErrs

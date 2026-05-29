@@ -31,10 +31,12 @@ import (
 
 	"github.com/spf13/pflag"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	informers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
 	modelservingwebhook "github.com/volcano-sh/kthena/pkg/model-serving-controller/webhook"
 	webhookcert "github.com/volcano-sh/kthena/pkg/webhook/cert"
+	kubeinformers "k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
@@ -184,10 +186,22 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		}
 	}
 
+	kubeInformerFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
+	kthenaInformerFactory := informers.NewSharedInformerFactory(kthenaClient, 0)
+
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
+
+	go kubeInformerFactory.Start(ctx.Done())
+	go kthenaInformerFactory.Start(ctx.Done())
+
 	mux := http.NewServeMux()
 
 	modelServingValidator := modelservingwebhook.NewModelServingValidator()
 	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
+
+	evictionHandler := modelservingwebhook.NewEvictionHandler(kubeClient, kthenaClient, podInformer.Lister(), msInformer.Lister())
+	mux.HandleFunc("/validate-eviction", evictionHandler.Handle)
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()
