@@ -90,6 +90,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
+	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
 
 	if len(allErrs) > 0 {
 		var messages []string
@@ -422,6 +423,39 @@ func validateRecoveryPolicyAndRolloutStrategy(ms *workloadv1alpha1.ModelServing)
 				workloadv1alpha1.RoleRollingUpdate,
 			),
 		))
+	}
+
+	return allErrs
+}
+
+func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.EvictionStrategy == nil {
+		return allErrs
+	}
+
+	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
+	fldPath := field.NewPath("spec").Child("rolloutStrategy").Child("evictionStrategy")
+
+	if strategy.MinAvailable != nil {
+		allErrs = append(allErrs, validateIntOrPercent(strategy.MinAvailable, fldPath.Child("minAvailable"))...)
+	}
+	if strategy.RoleMinAvailable != nil {
+		roleNames := make(map[string]struct{}, len(ms.Spec.Template.Roles))
+		for _, role := range ms.Spec.Template.Roles {
+			roleNames[role.Name] = struct{}{}
+		}
+		roleMinAvailablePath := fldPath.Child("roleMinAvailable")
+		for roleName, minAvailable := range strategy.RoleMinAvailable {
+			if _, ok := roleNames[roleName]; !ok {
+				allErrs = append(allErrs, field.Invalid(
+					roleMinAvailablePath.Key(roleName),
+					roleName,
+					fmt.Sprintf("role %s does not exist in template.roles", roleName),
+				))
+			}
+			allErrs = append(allErrs, validateIntOrPercent(&minAvailable, roleMinAvailablePath.Key(roleName))...)
+		}
 	}
 
 	return allErrs

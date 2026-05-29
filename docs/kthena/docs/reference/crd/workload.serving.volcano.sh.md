@@ -245,6 +245,24 @@ _Appears in:_
 
 
 
+#### EvictionStrategySpec
+
+
+
+EvictionStrategySpec defines the protection policy during node eviction.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `protectionLevel` _[ProtectionLevelType](#protectionleveltype)_ | ProtectionLevel defines the protection level: ServingGroup or Role.<br />- ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.<br />- Role: guarantees that the number of ready instances for each role is not below the threshold. | ServingGroup | Enum: [ServingGroup Role] <br /> |
+| `minAvailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MinAvailable defines the minimum number of available instances.<br />It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%). | 1 |  |
+| `roleMinAvailable` _object (keys:string, values:[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util))_ | RoleMinAvailable defines role-specific minimum available role instances.<br />It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.<br />If a role is absent from this map, MinAvailable is used as the fallback threshold.<br />Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%). |  |  |
+
+
 #### GangPolicy
 
 
@@ -702,6 +720,23 @@ _Appears in:_
 | `spec` _[PodSpec](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#podspec-v1-core)_ | Specification of the desired behavior of the pod. |  |  |
 
 
+#### ProtectionLevelType
+
+_Underlying type:_ _string_
+
+ProtectionLevelType defines the level of protection during eviction.
+
+
+
+_Appears in:_
+- [EvictionStrategySpec](#evictionstrategyspec)
+
+| Field | Description |
+| --- | --- |
+| `ServingGroup` | ProtectionLevelServingGroup guarantees that the number of ready ServingGroups is not below the threshold.<br /> |
+| `Role` | ProtectionLevelRole guarantees that the number of ready instances for each role is not below the threshold.<br /> |
+
+
 #### RecoveryPolicy
 
 _Underlying type:_ _string_
@@ -773,6 +808,7 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type defines the rollout strategy. Supported values are<br />"ServingGroupRollingUpdate" and "RoleRollingUpdate". If not specified,<br />it defaults to "ServingGroupRollingUpdate". | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
 | `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration defines the parameters to be used when type is RollingUpdateStrategyType.<br />optional |  |  |
+| `evictionStrategy` _[EvictionStrategySpec](#evictionstrategyspec)_ | EvictionStrategy defines the protection policy during node eviction. |  |  |
 
 
 #### RolloutStrategyType

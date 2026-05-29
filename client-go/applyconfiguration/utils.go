@@ -90,6 +90,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicySpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("AutoscalingPolicyStablePolicy"):
 		return &applyconfigurationworkloadv1alpha1.AutoscalingPolicyStablePolicyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("EvictionStrategySpec"):
+		return &applyconfigurationworkloadv1alpha1.EvictionStrategySpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("GangPolicy"):
 		return &applyconfigurationworkloadv1alpha1.GangPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("HeterogeneousTarget"):

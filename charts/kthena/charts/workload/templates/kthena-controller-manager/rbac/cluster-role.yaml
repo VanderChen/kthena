@@ -89,8 +89,11 @@ rules:
     resources:
       - configmaps
     verbs:
+      - create
       - get
       - list
+      - update
+      - patch
       - watch
   - apiGroups:
       - workload.serving.volcano.sh

@@ -1352,6 +1352,70 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 	}
 }
 
+func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
+	replicas := int32(2)
+	tests := []struct {
+		name         string
+		roleMinAvail map[string]intstr.IntOrString
+		wantAllowed  bool
+		wantMessage  string
+	}{
+		{
+			name: "valid role minAvailable",
+			roleMinAvail: map[string]intstr.IntOrString{
+				"decode": intstr.FromInt(1),
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "reject unknown role key",
+			roleMinAvail: map[string]intstr.IntOrString{
+				"unknown": intstr.FromInt(1),
+			},
+			wantAllowed: false,
+			wantMessage: "role unknown does not exist in template.roles",
+		},
+		{
+			name: "reject invalid percent",
+			roleMinAvail: map[string]intstr.IntOrString{
+				"decode": intstr.FromString("150%"),
+			},
+			wantAllowed: false,
+			wantMessage: "must be a valid percent value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: &replicas,
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+							ProtectionLevel:  workloadv1alpha1.ProtectionLevelRole,
+							MinAvailable:     intstrPtr(intstr.FromInt(1)),
+							RoleMinAvailable: tt.roleMinAvail,
+						},
+					},
+					Template: workloadv1alpha1.ServingGroup{
+						Roles: []workloadv1alpha1.Role{
+							{Name: "decode", Replicas: &replicas},
+						},
+					},
+				},
+			}
+
+			errs := validateEvictionStrategy(ms)
+			if tt.wantAllowed {
+				assert.Empty(t, errs)
+				return
+			}
+			assert.NotEmpty(t, errs)
+			assert.Contains(t, errs.ToAggregate().Error(), tt.wantMessage)
+		})
+	}
+}
+
 func int32Ptr(i int32) *int32 {
 	return &i
 }
