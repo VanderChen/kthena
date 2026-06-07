@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,6 +30,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
@@ -114,6 +116,212 @@ func TestEvictionHandler(t *testing.T) {
 		assert.False(t, resp2.Allowed)
 		assert.Contains(t, resp2.Result.Message, "Current ready groups (2) <= minAvailable (2)")
 	})
+}
+
+func TestEvictionHandlerAllowsSameTrackedServingGroup(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("pod-g1-prefill", "ms-0", "prefill", "prefill-0", true),
+		createRolePod("pod-g1-decode", "ms-0", "decode", "decode-0", true),
+		createRolePod("pod-g2-prefill", "ms-1", "prefill", "prefill-0", true),
+		createRolePod("pod-g2-decode", "ms-1", "decode", "decode-0", true),
+		createRolePod("pod-g3-prefill", "ms-2", "prefill", "prefill-0", true),
+		createRolePod("pod-g3-decode", "ms-2", "decode", "decode-0", true),
+	}
+
+	handler := newTestEvictionHandler(ms, pods)
+
+	resp1 := handleEvictionRequest(handler, "pod-g1-prefill")
+	assert.True(t, resp1.Allowed)
+
+	resp2 := handleEvictionRequest(handler, "pod-g1-decode")
+	assert.True(t, resp2.Allowed)
+
+	resp3 := handleEvictionRequest(handler, "pod-g2-prefill")
+	assert.False(t, resp3.Allowed)
+	assert.Contains(t, resp3.Result.Message, "Current ready groups (2) <= minAvailable (2)")
+}
+
+func TestEvictionHandlerDeniesUntrackedNotReadyServingGroupAtMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createPod("pod-g1", "ms-0", false),
+		createPod("pod-g2", "ms-1", true),
+		createPod("pod-g3", "ms-2", true),
+	}
+
+	handler := newTestEvictionHandler(ms, pods)
+
+	resp := handleEvictionRequest(handler, "pod-g1")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Target group ms-0 is not ready and not tracked")
+}
+
+func TestEvictionHandlerDeniesWhenTargetPodMissingFromLister(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(3)),
+				},
+			},
+		},
+	}
+	targetPod := createPod("pod-g1", "ms-0", true)
+	podsInCache := []*corev1.Pod{
+		createPod("pod-g2", "ms-1", true),
+		createPod("pod-g3", "ms-2", true),
+	}
+
+	fakeKubeClient := fake.NewSimpleClientset(targetPod)
+	fakeKthenaClient := kthenafake.NewSimpleClientset(ms)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	for _, p := range podsInCache {
+		podInformer.Informer().GetStore().Add(p)
+	}
+
+	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
+	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
+	msInformer.Informer().GetStore().Add(ms)
+
+	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+
+	resp := handleEvictionRequest(handler, "pod-g1")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Current ready groups (3) <= minAvailable (3)")
+}
+
+func TestEvictionHandlerConcurrentServingGroupBurstAllowsOneGroup(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("pod-g1-prefill", "ms-0", "prefill", "prefill-0", true),
+		createRolePod("pod-g1-decode", "ms-0", "decode", "decode-0", true),
+		createRolePod("pod-g2-prefill", "ms-1", "prefill", "prefill-0", true),
+		createRolePod("pod-g2-decode", "ms-1", "decode", "decode-0", true),
+		createRolePod("pod-g3-prefill", "ms-2", "prefill", "prefill-0", true),
+		createRolePod("pod-g3-decode", "ms-2", "decode", "decode-0", true),
+	}
+	handler := newTestEvictionHandler(ms, pods)
+
+	var wg sync.WaitGroup
+	responses := make(chan *admissionv1.AdmissionResponse, len(pods))
+	for _, pod := range pods {
+		wg.Add(1)
+		go func(podName string) {
+			defer wg.Done()
+			responses <- handleEvictionRequest(handler, podName)
+		}(pod.Name)
+	}
+	wg.Wait()
+	close(responses)
+
+	allowed := 0
+	denied := 0
+	for resp := range responses {
+		if resp.Allowed {
+			allowed++
+		} else {
+			denied++
+			assert.Contains(t, resp.Result.Message, "Current ready groups (2) <= minAvailable (2)")
+		}
+	}
+
+	assert.Equal(t, 2, allowed)
+	assert.Equal(t, 4, denied)
+}
+
+func TestEvictionHandlerClearsRecoveredServingGroupTracker(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "new-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "new-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	}
+	handler := newTestEvictionHandler(ms, pods)
+	unitKey := servingGroupUnit(ms, "ms-0").key()
+	entries := disruptionEntries{
+		unitKey: {
+			expiresAt:      time.Now().Add(time.Minute),
+			triggerPodUID:  "old-prefill-uid",
+			triggerPodName: "pod-g1-prefill",
+		},
+	}
+	cleanupRecoveredDisruptionEntries(entries, pods)
+
+	allowed, reason, unit := handler.checkServingGroupProtection(ms, pods[2], ms.Spec.RolloutStrategy.EvictionStrategy, pods, entries)
+
+	assert.True(t, allowed)
+	assert.Empty(t, reason)
+	assert.NotNil(t, unit)
+	assert.Equal(t, servingGroupUnit(ms, "ms-1").key(), unit.key())
+	assert.NotContains(t, entries, unitKey)
 }
 
 func TestEvictionHandlerRoleProtection(t *testing.T) {
@@ -312,6 +520,10 @@ func createPod(name, groupName string, ready bool) *corev1.Pod {
 }
 
 func createRolePod(name, groupName, role, roleID string, ready bool) *corev1.Pod {
+	return createRolePodWithUID(name, groupName, role, roleID, "", ready)
+}
+
+func createRolePodWithUID(name, groupName, role, roleID, uid string, ready bool) *corev1.Pod {
 	status := corev1.ConditionFalse
 	if ready {
 		status = corev1.ConditionTrue
@@ -320,6 +532,7 @@ func createRolePod(name, groupName, role, roleID string, ready bool) *corev1.Pod
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
 			Namespace: "default",
+			UID:       types.UID(uid),
 			Labels: map[string]string{
 				workloadv1alpha1.ModelServingNameLabelKey: "test-ms",
 				workloadv1alpha1.GroupNameLabelKey:        groupName,

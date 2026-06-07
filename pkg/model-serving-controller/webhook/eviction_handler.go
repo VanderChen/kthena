@@ -22,6 +22,8 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -57,7 +59,15 @@ type disruptionUnit struct {
 	roleID       string
 }
 
-type disruptionEntries map[string]time.Time
+type disruptionEntry struct {
+	expiresAt      time.Time
+	triggerPodUID  string
+	triggerPodName string
+}
+
+type disruptionEntries map[string]disruptionEntry
+
+var evictionTrackerLocks sync.Map
 
 // EvictionHandler handles pods/eviction admission requests with concurrency safety.
 type EvictionHandler struct {
@@ -189,6 +199,11 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 
 func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod) (bool, string) {
 	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
+	lockKey := fmt.Sprintf("%s/%s", ms.Namespace, ms.Name)
+	lockValue, _ := evictionTrackerLocks.LoadOrStore(lockKey, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
 
 	selector := labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name})
 	allPods, err := h.podLister.Pods(ms.Namespace).List(selector)
@@ -196,6 +211,7 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		klog.Errorf("Failed to list pods for ModelServing %s: %v", ms.Name, err)
 		return true, ""
 	}
+	allPods = includeTargetPod(allPods, targetPod)
 
 	var allowed bool
 	var reason string
@@ -213,8 +229,9 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		}
 		entriesBeforeCleanup := len(entries)
 		cleanupDisruptionEntries(entries)
+		cleanupRecoveredDisruptionEntries(entries, allPods)
 		if entriesBeforeCleanup != len(entries) {
-			klog.Infof("Cleaned expired eviction tracker entries for ModelServing %s/%s tracker=%s entriesBefore=%d entriesAfter=%d",
+			klog.Infof("Cleaned eviction tracker entries for ModelServing %s/%s tracker=%s entriesBefore=%d entriesAfter=%d",
 				ms.Namespace, ms.Name, cm.Name, entriesBeforeCleanup, len(entries))
 		}
 
@@ -237,7 +254,11 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		}
 
 		expiry := time.Now().Add(h.disruptionTTL)
-		entries[unitKey] = expiry
+		entries[unitKey] = disruptionEntry{
+			expiresAt:      expiry,
+			triggerPodUID:  string(targetPod.UID),
+			triggerPodName: targetPod.Name,
+		}
 		klog.Infof("Recording eviction disruption unit modelServing=%s/%s pod=%s/%s tracker=%s resourceVersion=%s unit=%q expiresAt=%s ttl=%s",
 			ms.Namespace, ms.Name, targetPod.Namespace, targetPod.Name, cm.Name, cm.ResourceVersion, unitKey, expiry.Format(time.RFC3339Nano), h.disruptionTTL)
 		updated := cm.DeepCopy()
@@ -274,6 +295,8 @@ func (h *EvictionHandler) checkServingGroupProtection(ms *workloadv1alpha1.Model
 			targetPod.Namespace, targetPod.Name, ms.Namespace, ms.Name)
 		return true, "", nil
 	}
+	targetUnit := servingGroupUnit(ms, targetGroupName)
+	targetGroupDisrupted := isUnitDisrupted(entries, targetUnit)
 
 	groups := make(map[string][]*corev1.Pod)
 	for _, p := range allPods {
@@ -306,26 +329,34 @@ func (h *EvictionHandler) checkServingGroupProtection(ms *workloadv1alpha1.Model
 	if totalReplicas > 0 {
 		minAvailable, _ = intstr.GetScaledValueFromIntOrPercent(minAvailableOrDefault(strategy.MinAvailable), totalReplicas, true)
 	}
-	if !targetGroupFound {
-		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target group not observed")
-		return true, "", nil
-	}
-
-	// If target group is already not ready, allow eviction.
-	if !targetGroupReady {
-		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target group is already not ready")
-		return true, "", nil
-	}
-
 	if totalReplicas == 0 {
 		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "ModelServing replicas is zero")
 		return true, "", nil
 	}
 
+	if !targetGroupFound {
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target group %s was not observed while current ready groups (%d) <= minAvailable (%d).", ms.Name, targetGroupName, readyGroups, minAvailable)
+		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, false, reason)
+		return false, reason, nil
+	}
+
+	if !targetGroupReady {
+		if targetGroupDisrupted {
+			logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target group is already tracked as disrupted")
+			return true, "", nil
+		}
+		if readyGroups > minAvailable {
+			logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target group is already not ready but ready groups exceed minAvailable")
+			return true, "", nil
+		}
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target group %s is not ready and not tracked; current ready groups (%d) <= minAvailable (%d).", ms.Name, targetGroupName, readyGroups, minAvailable)
+		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, false, reason)
+		return false, reason, nil
+	}
+
 	if readyGroups > minAvailable {
-		unit := servingGroupUnit(ms, targetGroupName)
 		logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "ready groups exceed minAvailable")
-		return true, "", &unit
+		return true, "", &targetUnit
 	}
 
 	reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Current ready groups (%d) <= minAvailable (%d).", ms.Name, readyGroups, minAvailable)
@@ -341,6 +372,8 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 			targetPod.Namespace, targetPod.Name, ms.Namespace, ms.Name, targetRole, targetRoleID)
 		return true, "", nil
 	}
+	targetUnit := roleUnit(ms, targetRole, targetRoleID)
+	targetInstanceDisrupted := isUnitDisrupted(entries, targetUnit)
 
 	roleInstances := make(map[string][]*corev1.Pod)
 	for _, p := range allPods {
@@ -376,25 +409,34 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 		minAvailableValue := roleMinAvailableOrDefault(strategy, targetRole)
 		minAvailable, _ = intstr.GetScaledValueFromIntOrPercent(minAvailableValue, totalInstances, true)
 	}
-	if !targetInstanceFound {
-		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance not observed")
-		return true, "", nil
-	}
-
-	if !targetInstanceReady {
-		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance is already not ready")
-		return true, "", nil
-	}
-
 	if totalInstances == 0 {
 		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "role instance count is zero")
 		return true, "", nil
 	}
 
+	if !targetInstanceFound {
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s was not observed while ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, targetRoleID, readyInstances, minAvailable)
+		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, false, reason)
+		return false, reason, nil
+	}
+
+	if !targetInstanceReady {
+		if targetInstanceDisrupted {
+			logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance is already tracked as disrupted")
+			return true, "", nil
+		}
+		if readyInstances > minAvailable {
+			logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance is already not ready but ready instances exceed minAvailable")
+			return true, "", nil
+		}
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s is not ready and not tracked; ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, targetRoleID, readyInstances, minAvailable)
+		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, false, reason)
+		return false, reason, nil
+	}
+
 	if readyInstances > minAvailable {
-		unit := roleUnit(ms, targetRole, targetRoleID)
 		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "ready role instances exceed minAvailable")
-		return true, "", &unit
+		return true, "", &targetUnit
 	}
 
 	reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Role %s ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, readyInstances, minAvailable)
@@ -440,6 +482,15 @@ func arePodsReady(pods []*corev1.Pod) bool {
 	return true
 }
 
+func includeTargetPod(pods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
+	for _, pod := range pods {
+		if pod.Namespace == targetPod.Namespace && pod.Name == targetPod.Name {
+			return pods
+		}
+	}
+	return append(pods, targetPod)
+}
+
 func isPodReady(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil {
 		return false
@@ -453,17 +504,68 @@ func isPodReady(pod *corev1.Pod) bool {
 }
 
 func isUnitDisrupted(entries disruptionEntries, unit disruptionUnit) bool {
-	expiry, ok := entries[unit.key()]
-	return ok && time.Now().Before(expiry)
+	entry, ok := entries[unit.key()]
+	return ok && time.Now().Before(entry.expiresAt)
 }
 
 func cleanupDisruptionEntries(entries disruptionEntries) {
 	now := time.Now()
-	for key, expiry := range entries {
-		if now.After(expiry) {
+	for key, entry := range entries {
+		if now.After(entry.expiresAt) {
 			delete(entries, key)
 		}
 	}
+}
+
+func cleanupRecoveredDisruptionEntries(entries disruptionEntries, pods []*corev1.Pod) {
+	for key, entry := range entries {
+		if entry.triggerPodUID == "" {
+			continue
+		}
+		unit, ok := parseDisruptionUnitKey(key)
+		if !ok {
+			continue
+		}
+		unitPods := podsForDisruptionUnit(unit, pods)
+		if len(unitPods) == 0 || !arePodsReady(unitPods) {
+			continue
+		}
+		if !hasPodUID(unitPods, entry.triggerPodUID) {
+			delete(entries, key)
+		}
+	}
+}
+
+func podsForDisruptionUnit(unit disruptionUnit, pods []*corev1.Pod) []*corev1.Pod {
+	unitPods := make([]*corev1.Pod, 0)
+	for _, pod := range pods {
+		if pod.Namespace != unit.namespace {
+			continue
+		}
+		if pod.Labels[workloadv1alpha1.ModelServingNameLabelKey] != unit.modelServing {
+			continue
+		}
+		switch unit.level {
+		case workloadv1alpha1.ProtectionLevelRole:
+			if pod.Labels[workloadv1alpha1.RoleLabelKey] == unit.role && pod.Labels[workloadv1alpha1.RoleIDKey] == unit.roleID {
+				unitPods = append(unitPods, pod)
+			}
+		default:
+			if pod.Labels[workloadv1alpha1.GroupNameLabelKey] == unit.groupName {
+				unitPods = append(unitPods, pod)
+			}
+		}
+	}
+	return unitPods
+}
+
+func hasPodUID(pods []*corev1.Pod, uid string) bool {
+	for _, pod := range pods {
+		if string(pod.UID) == uid {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *EvictionHandler) getOrCreateTrackerConfigMap(ctx context.Context, ms *workloadv1alpha1.ModelServing) (*corev1.ConfigMap, error) {
@@ -529,25 +631,59 @@ func decodeDisruptionEntries(cm *corev1.ConfigMap) (disruptionEntries, error) {
 	if cm.Data == nil || cm.Data[trackerEntriesKey] == "" {
 		return disruptionEntries{}, nil
 	}
-	raw := map[string]string{}
+	raw := map[string]json.RawMessage{}
 	if err := json.Unmarshal([]byte(cm.Data[trackerEntriesKey]), &raw); err != nil {
 		return nil, fmt.Errorf("decode tracker entries: %w", err)
 	}
 	entries := make(disruptionEntries, len(raw))
 	for key, value := range raw {
-		expiry, err := time.Parse(time.RFC3339Nano, value)
+		var encodedEntry struct {
+			ExpiresAt      string `json:"expiresAt"`
+			TriggerPodUID  string `json:"triggerPodUID,omitempty"`
+			TriggerPodName string `json:"triggerPodName,omitempty"`
+		}
+		if err := json.Unmarshal(value, &encodedEntry); err == nil && encodedEntry.ExpiresAt != "" {
+			expiry, err := time.Parse(time.RFC3339Nano, encodedEntry.ExpiresAt)
+			if err != nil {
+				return nil, fmt.Errorf("decode tracker entry %q expiry: %w", key, err)
+			}
+			entries[key] = disruptionEntry{
+				expiresAt:      expiry,
+				triggerPodUID:  encodedEntry.TriggerPodUID,
+				triggerPodName: encodedEntry.TriggerPodName,
+			}
+			continue
+		}
+
+		var expiryValue string
+		if err := json.Unmarshal(value, &expiryValue); err != nil {
+			return nil, fmt.Errorf("decode tracker entry %q: %w", key, err)
+		}
+		expiry, err := time.Parse(time.RFC3339Nano, expiryValue)
 		if err != nil {
 			return nil, fmt.Errorf("decode tracker entry %q expiry: %w", key, err)
 		}
-		entries[key] = expiry
+		entries[key] = disruptionEntry{expiresAt: expiry}
 	}
 	return entries, nil
 }
 
 func encodeDisruptionEntries(entries disruptionEntries) (string, error) {
-	raw := make(map[string]string, len(entries))
-	for key, expiry := range entries {
-		raw[key] = expiry.Format(time.RFC3339Nano)
+	raw := make(map[string]struct {
+		ExpiresAt      string `json:"expiresAt"`
+		TriggerPodUID  string `json:"triggerPodUID,omitempty"`
+		TriggerPodName string `json:"triggerPodName,omitempty"`
+	}, len(entries))
+	for key, entry := range entries {
+		raw[key] = struct {
+			ExpiresAt      string `json:"expiresAt"`
+			TriggerPodUID  string `json:"triggerPodUID,omitempty"`
+			TriggerPodName string `json:"triggerPodName,omitempty"`
+		}{
+			ExpiresAt:      entry.expiresAt.Format(time.RFC3339Nano),
+			TriggerPodUID:  entry.triggerPodUID,
+			TriggerPodName: entry.triggerPodName,
+		}
 	}
 	data, err := json.Marshal(raw)
 	if err != nil {
@@ -582,6 +718,32 @@ func (u disruptionUnit) key() string {
 	default:
 		return fmt.Sprintf("%s/%s/%s/%s", u.level, u.namespace, u.modelServing, u.groupName)
 	}
+}
+
+func parseDisruptionUnitKey(key string) (disruptionUnit, bool) {
+	parts := strings.Split(key, "/")
+	if len(parts) < 4 {
+		return disruptionUnit{}, false
+	}
+	unit := disruptionUnit{
+		level:        workloadv1alpha1.ProtectionLevelType(parts[0]),
+		namespace:    parts[1],
+		modelServing: parts[2],
+	}
+	switch unit.level {
+	case workloadv1alpha1.ProtectionLevelRole:
+		if len(parts) != 5 {
+			return disruptionUnit{}, false
+		}
+		unit.role = parts[3]
+		unit.roleID = parts[4]
+	default:
+		if len(parts) != 4 {
+			return disruptionUnit{}, false
+		}
+		unit.groupName = parts[3]
+	}
+	return unit, true
 }
 
 func minAvailableOrDefault(value *intstr.IntOrString) *intstr.IntOrString {
