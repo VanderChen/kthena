@@ -170,14 +170,14 @@ type EvictionStrategySpec struct {
 	// +kubebuilder:validation:Enum={ServingGroup,Role}
 	ProtectionLevel ProtectionLevelType `json:"protectionLevel"`
 
-	// MinAvailable defines the minimum number of available instances.
+	// MinAvailable defines the minimum number of available ServingGroup instances.
+	// It is used only when protectionLevel is ServingGroup.
 	// It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
-	// +kubebuilder:default="1"
 	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
 
 	// RoleMinAvailable defines role-specific minimum available role instances.
 	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
-	// If a role is absent from this map, MinAvailable is used as the fallback threshold.
+	// If a role is absent from this map, it is not protected by the eviction budget.
 	// Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
 	// +optional
 	RoleMinAvailable map[string]intstr.IntOrString `json:"roleMinAvailable,omitempty"`

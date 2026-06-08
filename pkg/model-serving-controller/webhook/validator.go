@@ -437,7 +437,7 @@ func validateEvictionStrategy(ms *workloadv1alpha1.ModelServing) field.ErrorList
 	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
 	fldPath := field.NewPath("spec").Child("rolloutStrategy").Child("evictionStrategy")
 
-	if strategy.MinAvailable != nil {
+	if strategy.ProtectionLevel == workloadv1alpha1.ProtectionLevelServingGroup && strategy.MinAvailable != nil {
 		allErrs = append(allErrs, validateIntOrPercent(strategy.MinAvailable, fldPath.Child("minAvailable"))...)
 	}
 	if strategy.RoleMinAvailable != nil {

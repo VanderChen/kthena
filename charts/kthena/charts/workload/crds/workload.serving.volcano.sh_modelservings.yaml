@@ -113,9 +113,9 @@ spec:
                         anyOf:
                         - type: integer
                         - type: string
-                        default: "1"
                         description: |-
-                          MinAvailable defines the minimum number of available instances.
+                          MinAvailable defines the minimum number of available ServingGroup instances.
+                          It is used only when protectionLevel is ServingGroup.
                           It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
                         x-kubernetes-int-or-string: true
                       protectionLevel:
@@ -137,7 +137,7 @@ spec:
                         description: |-
                           RoleMinAvailable defines role-specific minimum available role instances.
                           It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
-                          If a role is absent from this map, MinAvailable is used as the fallback threshold.
+                          If a role is absent from this map, it is not protected by the eviction budget.
                           Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
                         type: object
                     required:

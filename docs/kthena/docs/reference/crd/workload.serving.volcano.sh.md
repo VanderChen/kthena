@@ -259,8 +259,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `protectionLevel` _[ProtectionLevelType](#protectionleveltype)_ | ProtectionLevel defines the protection level: ServingGroup or Role.<br />- ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.<br />- Role: guarantees that the number of ready instances for each role is not below the threshold. | ServingGroup | Enum: [ServingGroup Role] <br /> |
-| `minAvailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MinAvailable defines the minimum number of available instances.<br />It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%). | 1 |  |
-| `roleMinAvailable` _object (keys:string, values:[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util))_ | RoleMinAvailable defines role-specific minimum available role instances.<br />It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.<br />If a role is absent from this map, MinAvailable is used as the fallback threshold.<br />Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%). |  |  |
+| `minAvailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MinAvailable defines the minimum number of available ServingGroup instances.<br />It is used only when protectionLevel is ServingGroup.<br />It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%). |  |  |
+| `roleMinAvailable` _object (keys:string, values:[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util))_ | RoleMinAvailable defines role-specific minimum available role instances.<br />It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.<br />If a role is absent from this map, it is not protected by the eviction budget.<br />Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%). |  |  |
 
 
 #### GangPolicy
@@ -901,5 +901,3 @@ _Appears in:_
 | `targetRef` _[ObjectReference](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#objectreference-v1-core)_ | TargetRef references the target object to be monitored and scaled.<br />Default target GVK is ModelServing. Currently supported kinds: ModelServing. |  |  |
 | `subTargets` _[SubTarget](#subtarget)_ | SubTarget defines the sub-target object to be monitored and scaled.<br />Currently supported kinds: `Role` when TargetRef kind is ModelServing. |  |  |
 | `metricEndpoint` _[MetricEndpoint](#metricendpoint)_ | MetricEndpoint defines the configuration for scraping metrics from the target pods. |  |  |
-
-

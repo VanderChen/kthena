@@ -789,7 +789,8 @@ func roleMinAvailableOrDefault(strategy *workloadv1alpha1.EvictionStrategySpec, 
 			return &value
 		}
 	}
-	return minAvailableOrDefault(strategy.MinAvailable)
+	defaultValue := intstr.FromInt(0)
+	return &defaultValue
 }
 
 func (h *EvictionHandler) expectedRoleInstancesInServingGroup(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {

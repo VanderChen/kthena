@@ -335,7 +335,6 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
 					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
-					MinAvailable:    intstrPtr(intstr.FromInt(0)),
 					RoleMinAvailable: map[string]intstr.IntOrString{
 						"decode": intstr.FromInt(2),
 					},
@@ -400,6 +399,126 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	// The same role in another ServingGroup has its own independent budget.
 	resp4 := handleEvictionRequest(handler, "decode-other-0-entry")
 	assert.True(t, resp4.Allowed)
+}
+
+func TestEvictionHandlerRoleProtectionIgnoresGlobalMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					MinAvailable:    intstrPtr(intstr.FromInt(3)),
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(1),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "decode",
+						Replicas: int32Ptr(2),
+					},
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+	}
+
+	handler := newTestEvictionHandler(ms, pods)
+
+	resp := handleEvictionRequest(handler, "decode-0-entry")
+	assert.True(t, resp.Allowed)
+}
+
+func TestEvictionHandlerRoleProtectionReadsPerRoleMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode":  intstr.FromInt(2),
+						"prefill": intstr.FromInt(1),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "decode",
+						Replicas: int32Ptr(2),
+					},
+					{
+						Name:     "prefill",
+						Replicas: int32Ptr(2),
+					},
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("prefill-0-entry", "ms-0", "prefill", "prefill-0", true),
+		createRolePod("prefill-1-entry", "ms-0", "prefill", "prefill-1", true),
+	}
+	handler := newTestEvictionHandler(ms, pods)
+
+	decodeResp := handleEvictionRequest(handler, "decode-0-entry")
+	assert.False(t, decodeResp.Allowed)
+	assert.Contains(t, decodeResp.Result.Message, "ServingGroup ms-0 role decode ready instances (2) <= minAvailable (2)")
+
+	prefillResp := handleEvictionRequest(handler, "prefill-0-entry")
+	assert.True(t, prefillResp.Allowed)
+}
+
+func TestEvictionHandlerRoleProtectionMissingRoleMinAvailableDefaultsToZero(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(1),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "router",
+						Replicas: int32Ptr(1),
+					},
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("router-0-entry", "ms-0", "router", "router-0", true),
+	}
+	handler := newTestEvictionHandler(ms, pods)
+
+	missingRoleResp := handleEvictionRequest(handler, "router-0-entry")
+	assert.True(t, missingRoleResp.Allowed)
 }
 
 func TestEvictionHandlerTrackerTTL(t *testing.T) {

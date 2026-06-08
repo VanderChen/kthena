@@ -1356,19 +1356,23 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 	replicas := int32(2)
 	tests := []struct {
 		name         string
+		protection   workloadv1alpha1.ProtectionLevelType
+		minAvailable *intstr.IntOrString
 		roleMinAvail map[string]intstr.IntOrString
 		wantAllowed  bool
 		wantMessage  string
 	}{
 		{
-			name: "valid role minAvailable",
+			name:       "valid role minAvailable without global minAvailable",
+			protection: workloadv1alpha1.ProtectionLevelRole,
 			roleMinAvail: map[string]intstr.IntOrString{
 				"decode": intstr.FromInt(1),
 			},
 			wantAllowed: true,
 		},
 		{
-			name: "reject unknown role key",
+			name:       "reject unknown role key",
+			protection: workloadv1alpha1.ProtectionLevelRole,
 			roleMinAvail: map[string]intstr.IntOrString{
 				"unknown": intstr.FromInt(1),
 			},
@@ -1376,12 +1380,20 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 			wantMessage: "role unknown does not exist in template.roles",
 		},
 		{
-			name: "reject invalid percent",
+			name:       "reject invalid role percent",
+			protection: workloadv1alpha1.ProtectionLevelRole,
 			roleMinAvail: map[string]intstr.IntOrString{
-				"decode": intstr.FromString("150%"),
+				"decode": intstr.FromString("101%"),
 			},
 			wantAllowed: false,
 			wantMessage: "must be a valid percent value",
+		},
+		{
+			name:         "reject invalid servingGroup minAvailable",
+			protection:   workloadv1alpha1.ProtectionLevelServingGroup,
+			minAvailable: intstrPtr(intstr.FromString("101%")),
+			wantAllowed:  false,
+			wantMessage:  "must be a valid percent value",
 		},
 	}
 
@@ -1392,8 +1404,8 @@ func TestValidateEvictionStrategyRoleMinAvailable(t *testing.T) {
 					Replicas: &replicas,
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
-							ProtectionLevel:  workloadv1alpha1.ProtectionLevelRole,
-							MinAvailable:     intstrPtr(intstr.FromInt(1)),
+							ProtectionLevel:  tt.protection,
+							MinAvailable:     tt.minAvailable,
 							RoleMinAvailable: tt.roleMinAvail,
 						},
 					},
