@@ -365,45 +365,58 @@ func (h *EvictionHandler) checkServingGroupProtection(ms *workloadv1alpha1.Model
 }
 
 func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, strategy *workloadv1alpha1.EvictionStrategySpec, allPods []*corev1.Pod, entries disruptionEntries) (bool, string, *disruptionUnit) {
+	targetGroupName := targetPod.Labels[workloadv1alpha1.GroupNameLabelKey]
 	targetRole := targetPod.Labels[workloadv1alpha1.RoleLabelKey]
 	targetRoleID := targetPod.Labels[workloadv1alpha1.RoleIDKey]
-	if targetRole == "" || targetRoleID == "" {
-		klog.Infof("Allowing Role eviction for pod %s/%s ModelServing %s/%s because target role labels are incomplete role=%q roleID=%q",
-			targetPod.Namespace, targetPod.Name, ms.Namespace, ms.Name, targetRole, targetRoleID)
+	if targetGroupName == "" || targetRole == "" || targetRoleID == "" {
+		klog.Infof("Allowing Role eviction for pod %s/%s ModelServing %s/%s because target role labels are incomplete group=%q role=%q roleID=%q",
+			targetPod.Namespace, targetPod.Name, ms.Namespace, ms.Name, targetGroupName, targetRole, targetRoleID)
 		return true, "", nil
 	}
-	targetUnit := roleUnit(ms, targetRole, targetRoleID)
+	targetUnit := roleUnit(ms, targetGroupName, targetRole, targetRoleID)
 	targetInstanceDisrupted := isUnitDisrupted(entries, targetUnit)
 
-	roleInstances := make(map[string][]*corev1.Pod)
+	type roleInstancePods struct {
+		groupName string
+		roleID    string
+		pods      []*corev1.Pod
+	}
+	roleInstances := make(map[string]roleInstancePods)
 	for _, p := range allPods {
-		if p.Labels[workloadv1alpha1.RoleLabelKey] == targetRole {
-			roleID := p.Labels[workloadv1alpha1.RoleIDKey]
-			if roleID != "" {
-				roleInstances[roleID] = append(roleInstances[roleID], p)
-			}
+		if p.Labels[workloadv1alpha1.GroupNameLabelKey] != targetGroupName || p.Labels[workloadv1alpha1.RoleLabelKey] != targetRole {
+			continue
+		}
+		roleID := p.Labels[workloadv1alpha1.RoleIDKey]
+		if roleID != "" {
+			key := roleInstanceKey(targetGroupName, roleID)
+			instance := roleInstances[key]
+			instance.groupName = targetGroupName
+			instance.roleID = roleID
+			instance.pods = append(instance.pods, p)
+			roleInstances[key] = instance
 		}
 	}
 
 	readyInstances := 0
 	targetInstanceReady := false
 	targetInstanceFound := false
+	targetInstanceKey := roleInstanceKey(targetGroupName, targetRoleID)
 	roleStates := make([]string, 0, len(roleInstances))
-	for roleID, pods := range roleInstances {
-		disrupted := isUnitDisrupted(entries, roleUnit(ms, targetRole, roleID))
-		isReady := h.isRoleInstanceReady(ms, targetRole, roleID, pods, entries)
+	for key, instance := range roleInstances {
+		disrupted := isUnitDisrupted(entries, roleUnit(ms, instance.groupName, targetRole, instance.roleID))
+		isReady := h.isRoleInstanceReady(ms, instance.groupName, targetRole, instance.roleID, instance.pods, entries)
 		if isReady {
 			readyInstances++
 		}
-		if roleID == targetRoleID {
+		if key == targetInstanceKey {
 			targetInstanceFound = true
 			targetInstanceReady = isReady
 		}
-		roleStates = append(roleStates, fmt.Sprintf("%s(pods=%d,ready=%t,tracked=%t)", roleID, len(pods), isReady, disrupted))
+		roleStates = append(roleStates, fmt.Sprintf("%s/%s(pods=%d,ready=%t,tracked=%t)", instance.groupName, instance.roleID, len(instance.pods), isReady, disrupted))
 	}
 	sort.Strings(roleStates)
 
-	totalInstances := h.expectedRoleInstances(ms, targetRole, len(roleInstances))
+	totalInstances := h.expectedRoleInstancesInServingGroup(ms, targetRole, len(roleInstances))
 	minAvailable := -1
 	if totalInstances > 0 {
 		minAvailableValue := roleMinAvailableOrDefault(strategy, targetRole)
@@ -415,7 +428,7 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 	}
 
 	if !targetInstanceFound {
-		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s was not observed while ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, targetRoleID, readyInstances, minAvailable)
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s/%s was not observed while ready instances (%d) <= minAvailable (%d).", ms.Name, targetGroupName, targetRole, targetRoleID, readyInstances, minAvailable)
 		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, false, reason)
 		return false, reason, nil
 	}
@@ -429,7 +442,7 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 			logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance is already not ready but ready instances exceed minAvailable")
 			return true, "", nil
 		}
-		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s is not ready and not tracked; ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, targetRoleID, readyInstances, minAvailable)
+		reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Target role instance %s/%s/%s is not ready and not tracked; ready instances (%d) <= minAvailable (%d).", ms.Name, targetGroupName, targetRole, targetRoleID, readyInstances, minAvailable)
 		logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, false, reason)
 		return false, reason, nil
 	}
@@ -439,7 +452,7 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 		return true, "", &targetUnit
 	}
 
-	reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. Role %s ready instances (%d) <= minAvailable (%d).", ms.Name, targetRole, readyInstances, minAvailable)
+	reason := fmt.Sprintf("Eviction denied: protected by ModelServing %s. ServingGroup %s role %s ready instances (%d) <= minAvailable (%d).", ms.Name, targetGroupName, targetRole, readyInstances, minAvailable)
 	logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, false, reason)
 	return false, reason, nil
 }
@@ -463,8 +476,8 @@ func (h *EvictionHandler) isServingGroupReady(ms *workloadv1alpha1.ModelServing,
 	return arePodsReady(pods)
 }
 
-func (h *EvictionHandler) isRoleInstanceReady(ms *workloadv1alpha1.ModelServing, role, roleID string, pods []*corev1.Pod, entries disruptionEntries) bool {
-	if isUnitDisrupted(entries, roleUnit(ms, role, roleID)) {
+func (h *EvictionHandler) isRoleInstanceReady(ms *workloadv1alpha1.ModelServing, groupName, role, roleID string, pods []*corev1.Pod, entries disruptionEntries) bool {
+	if isUnitDisrupted(entries, roleUnit(ms, groupName, role, roleID)) {
 		return false
 	}
 	return arePodsReady(pods)
@@ -547,6 +560,9 @@ func podsForDisruptionUnit(unit disruptionUnit, pods []*corev1.Pod) []*corev1.Po
 		}
 		switch unit.level {
 		case workloadv1alpha1.ProtectionLevelRole:
+			if unit.groupName != "" && pod.Labels[workloadv1alpha1.GroupNameLabelKey] != unit.groupName {
+				continue
+			}
 			if pod.Labels[workloadv1alpha1.RoleLabelKey] == unit.role && pod.Labels[workloadv1alpha1.RoleIDKey] == unit.roleID {
 				unitPods = append(unitPods, pod)
 			}
@@ -701,11 +717,12 @@ func servingGroupUnit(ms *workloadv1alpha1.ModelServing, groupName string) disru
 	}
 }
 
-func roleUnit(ms *workloadv1alpha1.ModelServing, role, roleID string) disruptionUnit {
+func roleUnit(ms *workloadv1alpha1.ModelServing, groupName, role, roleID string) disruptionUnit {
 	return disruptionUnit{
 		namespace:    ms.Namespace,
 		modelServing: ms.Name,
 		level:        workloadv1alpha1.ProtectionLevelRole,
+		groupName:    groupName,
 		role:         role,
 		roleID:       roleID,
 	}
@@ -714,10 +731,14 @@ func roleUnit(ms *workloadv1alpha1.ModelServing, role, roleID string) disruption
 func (u disruptionUnit) key() string {
 	switch u.level {
 	case workloadv1alpha1.ProtectionLevelRole:
-		return fmt.Sprintf("%s/%s/%s/%s/%s", u.level, u.namespace, u.modelServing, u.role, u.roleID)
+		return fmt.Sprintf("%s/%s/%s/%s/%s/%s", u.level, u.namespace, u.modelServing, u.groupName, u.role, u.roleID)
 	default:
 		return fmt.Sprintf("%s/%s/%s/%s", u.level, u.namespace, u.modelServing, u.groupName)
 	}
+}
+
+func roleInstanceKey(groupName, roleID string) string {
+	return groupName + "/" + roleID
 }
 
 func parseDisruptionUnitKey(key string) (disruptionUnit, bool) {
@@ -732,11 +753,19 @@ func parseDisruptionUnitKey(key string) (disruptionUnit, bool) {
 	}
 	switch unit.level {
 	case workloadv1alpha1.ProtectionLevelRole:
-		if len(parts) != 5 {
+		switch len(parts) {
+		case 6:
+			unit.groupName = parts[3]
+			unit.role = parts[4]
+			unit.roleID = parts[5]
+		case 5:
+			// Backward compatibility with tracker entries written before groupName
+			// became part of the Role disruption identity.
+			unit.role = parts[3]
+			unit.roleID = parts[4]
+		default:
 			return disruptionUnit{}, false
 		}
-		unit.role = parts[3]
-		unit.roleID = parts[4]
 	default:
 		if len(parts) != 4 {
 			return disruptionUnit{}, false
@@ -763,11 +792,10 @@ func roleMinAvailableOrDefault(strategy *workloadv1alpha1.EvictionStrategySpec, 
 	return minAvailableOrDefault(strategy.MinAvailable)
 }
 
-func (h *EvictionHandler) expectedRoleInstances(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {
-	modelServingReplicas := replicasOrDefault(ms.Spec.Replicas)
+func (h *EvictionHandler) expectedRoleInstancesInServingGroup(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {
 	for _, role := range ms.Spec.Template.Roles {
 		if role.Name == roleName {
-			return int(modelServingReplicas * replicasOrDefault(role.Replicas))
+			return int(replicasOrDefault(role.Replicas))
 		}
 	}
 	if fallback > 0 {

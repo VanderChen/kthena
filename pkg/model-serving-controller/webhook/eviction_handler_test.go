@@ -331,13 +331,13 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 			Namespace: "default",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: int32Ptr(1),
+			Replicas: int32Ptr(2),
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
 					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
 					MinAvailable:    intstrPtr(intstr.FromInt(0)),
 					RoleMinAvailable: map[string]intstr.IntOrString{
-						"decode": intstr.FromInt(1),
+						"decode": intstr.FromInt(2),
 					},
 				},
 			},
@@ -345,7 +345,7 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "decode",
-						Replicas:       int32Ptr(2),
+						Replicas:       int32Ptr(3),
 						WorkerReplicas: 1,
 						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
 					},
@@ -357,8 +357,16 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	pods := []*corev1.Pod{
 		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
 		createRolePod("decode-0-worker", "ms-0", "decode", "decode-0", true),
-		createRolePod("decode-1-entry", "ms-1", "decode", "decode-1", true),
-		createRolePod("decode-1-worker", "ms-1", "decode", "decode-1", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-1-worker", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-2-entry", "ms-0", "decode", "decode-2", true),
+		createRolePod("decode-2-worker", "ms-0", "decode", "decode-2", true),
+		createRolePod("decode-other-0-entry", "ms-1", "decode", "decode-0", true),
+		createRolePod("decode-other-0-worker", "ms-1", "decode", "decode-0", true),
+		createRolePod("decode-other-1-entry", "ms-1", "decode", "decode-1", true),
+		createRolePod("decode-other-1-worker", "ms-1", "decode", "decode-1", true),
+		createRolePod("decode-other-2-entry", "ms-1", "decode", "decode-2", true),
+		createRolePod("decode-other-2-worker", "ms-1", "decode", "decode-2", true),
 	}
 
 	fakeKubeClient := fake.NewSimpleClientset()
@@ -383,10 +391,15 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	resp2 := handleEvictionRequest(handler, "decode-0-worker")
 	assert.True(t, resp2.Allowed)
 
-	// A different decode role instance would reduce ready instances below roleMinAvailable.
+	// Another role instance in the same ServingGroup would reduce this group's
+	// decode role instances below roleMinAvailable.
 	resp3 := handleEvictionRequest(handler, "decode-1-entry")
 	assert.False(t, resp3.Allowed)
-	assert.Contains(t, resp3.Result.Message, "Role decode ready instances (1) <= minAvailable (1)")
+	assert.Contains(t, resp3.Result.Message, "ServingGroup ms-0 role decode ready instances (2) <= minAvailable (2)")
+
+	// The same role in another ServingGroup has its own independent budget.
+	resp4 := handleEvictionRequest(handler, "decode-other-0-entry")
+	assert.True(t, resp4.Allowed)
 }
 
 func TestEvictionHandlerTrackerTTL(t *testing.T) {
