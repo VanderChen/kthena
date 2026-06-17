@@ -182,6 +182,13 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		klog.Warningf("ModelServing %s/%s for pod %s/%s was not found in lister but was found by live API GET; continuing eviction protection evaluation: listerErr=%v", podNamespace, msName, podNamespace, podName, listerErr)
 	}
 
+	if !isOwnedByCurrentModelServing(pod, ms) {
+		klog.Infof("Allowing eviction for pod %s/%s because it is not owned by current ModelServing %s/%s uid=%s",
+			podNamespace, podName, podNamespace, msName, ms.UID)
+		h.allow(&admissionReview, w)
+		return
+	}
+
 	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.EvictionStrategy == nil {
 		klog.Infof("Allowing eviction for pod %s/%s ModelServing %s/%s because eviction strategy is not configured", podNamespace, podName, podNamespace, msName)
 		h.allow(&admissionReview, w)
@@ -211,6 +218,7 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		klog.Errorf("Failed to list pods for ModelServing %s: %v", ms.Name, err)
 		return true, ""
 	}
+	allPods = filterPodsForCurrentModelServing(allPods, ms)
 	allPods = includeTargetPod(allPods, targetPod)
 
 	var allowed bool
@@ -229,7 +237,7 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		}
 		entriesBeforeCleanup := len(entries)
 		cleanupDisruptionEntries(entries)
-		cleanupRecoveredDisruptionEntries(entries, allPods)
+		allPods = h.cleanupRecoveredDisruptionEntries(ctx, ms, entries, allPods, targetPod)
 		if entriesBeforeCleanup != len(entries) {
 			klog.Infof("Cleaned eviction tracker entries for ModelServing %s/%s tracker=%s entriesBefore=%d entriesAfter=%d",
 				ms.Namespace, ms.Name, cm.Name, entriesBeforeCleanup, len(entries))
@@ -530,6 +538,28 @@ func cleanupDisruptionEntries(entries disruptionEntries) {
 	}
 }
 
+func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context, ms *workloadv1alpha1.ModelServing, entries disruptionEntries, cachedPods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
+	cleanupRecoveredDisruptionEntries(entries, cachedPods)
+	if !needsLiveRecoveryCheck(entries, cachedPods) {
+		return cachedPods
+	}
+
+	livePods, err := h.liveModelServingPods(ctx, ms)
+	if err != nil {
+		klog.Warningf("Failed to refresh live pods for recovered eviction tracker cleanup modelServing=%s/%s: %v", ms.Namespace, ms.Name, err)
+		return cachedPods
+	}
+	livePods = includeTargetPod(livePods, targetPod)
+	entriesBeforeLiveCleanup := len(entries)
+	cleanupRecoveredDisruptionEntries(entries, livePods)
+	if entriesBeforeLiveCleanup != len(entries) {
+		klog.Infof("Cleaned recovered eviction tracker entries with live pod refresh modelServing=%s/%s entriesBefore=%d entriesAfter=%d",
+			ms.Namespace, ms.Name, entriesBeforeLiveCleanup, len(entries))
+		return livePods
+	}
+	return cachedPods
+}
+
 func cleanupRecoveredDisruptionEntries(entries disruptionEntries, pods []*corev1.Pod) {
 	for key, entry := range entries {
 		if entry.triggerPodUID == "" {
@@ -547,6 +577,39 @@ func cleanupRecoveredDisruptionEntries(entries disruptionEntries, pods []*corev1
 			delete(entries, key)
 		}
 	}
+}
+
+func needsLiveRecoveryCheck(entries disruptionEntries, pods []*corev1.Pod) bool {
+	for key, entry := range entries {
+		if entry.triggerPodUID == "" {
+			continue
+		}
+		unit, ok := parseDisruptionUnitKey(key)
+		if !ok {
+			continue
+		}
+		unitPods := podsForDisruptionUnit(unit, pods)
+		if len(unitPods) == 0 || !arePodsReady(unitPods) || hasPodUID(unitPods, entry.triggerPodUID) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *EvictionHandler) liveModelServingPods(ctx context.Context, ms *workloadv1alpha1.ModelServing) ([]*corev1.Pod, error) {
+	selector := labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name})
+	podList, err := h.kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return nil, err
+	}
+	pods := make([]*corev1.Pod, 0, len(podList.Items))
+	for i := range podList.Items {
+		pod := podList.Items[i].DeepCopy()
+		if isOwnedByCurrentModelServing(pod, ms) {
+			pods = append(pods, pod)
+		}
+	}
+	return pods, nil
 }
 
 func podsForDisruptionUnit(unit disruptionUnit, pods []*corev1.Pod) []*corev1.Pod {
@@ -584,10 +647,52 @@ func hasPodUID(pods []*corev1.Pod, uid string) bool {
 	return false
 }
 
+func filterPodsForCurrentModelServing(pods []*corev1.Pod, ms *workloadv1alpha1.ModelServing) []*corev1.Pod {
+	if ms.UID == "" {
+		return pods
+	}
+	filtered := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if isOwnedByCurrentModelServing(pod, ms) {
+			filtered = append(filtered, pod)
+		}
+	}
+	return filtered
+}
+
+func isOwnedByCurrentModelServing(obj metav1.Object, ms *workloadv1alpha1.ModelServing) bool {
+	if ms.UID == "" {
+		return true
+	}
+	for _, ownerRef := range obj.GetOwnerReferences() {
+		if ownerRef.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() &&
+			ownerRef.Kind == "ModelServing" &&
+			ownerRef.Name == ms.Name &&
+			ownerRef.UID == ms.UID {
+			return true
+		}
+	}
+	return false
+}
+
+func modelServingOwnerReference(ms *workloadv1alpha1.ModelServing) metav1.OwnerReference {
+	return metav1.OwnerReference{
+		APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+		Kind:       "ModelServing",
+		Name:       ms.Name,
+		UID:        ms.UID,
+	}
+}
+
 func (h *EvictionHandler) getOrCreateTrackerConfigMap(ctx context.Context, ms *workloadv1alpha1.ModelServing) (*corev1.ConfigMap, error) {
 	name := trackerConfigMapName(ms.Name)
 	cm, err := h.kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
+		if !isOwnedByCurrentModelServing(cm, ms) {
+			klog.Warningf("Resetting stale eviction tracker ConfigMap %s/%s because owner does not match current ModelServing uid=%s",
+				cm.Namespace, cm.Name, ms.UID)
+			return h.resetTrackerConfigMap(ctx, ms, cm)
+		}
 		return cm, nil
 	}
 	if !apierrors.IsNotFound(err) {
@@ -607,20 +712,28 @@ func (h *EvictionHandler) getOrCreateTrackerConfigMap(ctx context.Context, ms *w
 		},
 	}
 	if ms.UID != "" {
-		cm.OwnerReferences = []metav1.OwnerReference{
-			{
-				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
-				Kind:       "ModelServing",
-				Name:       ms.Name,
-				UID:        ms.UID,
-			},
-		}
+		cm.OwnerReferences = []metav1.OwnerReference{modelServingOwnerReference(ms)}
 	}
 	cm, err = h.kubeClient.CoreV1().ConfigMaps(ms.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		return nil, apierrors.NewConflict(schema.GroupResource{Resource: "configmaps"}, name, err)
 	}
 	return cm, err
+}
+
+func (h *EvictionHandler) resetTrackerConfigMap(ctx context.Context, ms *workloadv1alpha1.ModelServing, cm *corev1.ConfigMap) (*corev1.ConfigMap, error) {
+	updated := cm.DeepCopy()
+	if updated.Labels == nil {
+		updated.Labels = map[string]string{}
+	}
+	updated.Labels[workloadv1alpha1.ModelServingNameLabelKey] = ms.Name
+	if ms.UID != "" {
+		updated.OwnerReferences = []metav1.OwnerReference{modelServingOwnerReference(ms)}
+	}
+	updated.Data = map[string]string{
+		trackerEntriesKey: "{}",
+	}
+	return h.kubeClient.CoreV1().ConfigMaps(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 }
 
 func disruptionEntryKeys(entries disruptionEntries) []string {

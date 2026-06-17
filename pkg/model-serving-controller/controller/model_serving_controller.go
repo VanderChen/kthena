@@ -981,7 +981,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
 				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, firstOwnerUID(pod))
 				c.enqueueModelServingAfter(ms, 1*time.Second)
 				break
 			}
@@ -2487,6 +2487,14 @@ func (c *ModelServingController) findOutdatedRolesInServingGroups(ms *workloadv1
 	}
 
 	return outdatedRolesMap
+}
+
+func firstOwnerUID(obj metav1.Object) types.UID {
+	ownerReferences := obj.GetOwnerReferences()
+	if len(ownerReferences) == 0 {
+		return ""
+	}
+	return ownerReferences[0].UID
 }
 
 // handleModelServingDatastoreCacheDump handles requests to dump the ServingGroup and role in dataStore cache.

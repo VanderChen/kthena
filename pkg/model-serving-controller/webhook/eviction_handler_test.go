@@ -29,7 +29,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
@@ -322,6 +324,292 @@ func TestEvictionHandlerClearsRecoveredServingGroupTracker(t *testing.T) {
 	assert.NotNil(t, unit)
 	assert.Equal(t, servingGroupUnit(ms, "ms-1").key(), unit.key())
 	assert.NotContains(t, entries, unitKey)
+}
+
+func TestEvictionHandlerRefreshesLivePodsForRecoveredServingGroupTracker(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	staleCachePods := []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "old-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "g1-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	}
+	livePods := []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "new-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "g1-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	}
+	tracker := trackerConfigMap(ms, disruptionEntries{
+		servingGroupUnit(ms, "ms-0").key(): {
+			expiresAt:      time.Now().Add(time.Minute),
+			triggerPodUID:  "old-prefill-uid",
+			triggerPodName: "pod-g1-prefill",
+		},
+	})
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, staleCachePods, livePods, tracker)
+
+	resp := handleEvictionRequest(handler, "pod-g2-prefill")
+	assert.True(t, resp.Allowed)
+
+	updatedTracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(updatedTracker)
+	assert.NoError(t, err)
+	assert.NotContains(t, entries, servingGroupUnit(ms, "ms-0").key())
+	assert.Contains(t, entries, servingGroupUnit(ms, "ms-1").key())
+}
+
+func TestEvictionHandlerKeepsServingGroupTrackerWhenLivePodsStillContainTriggerUID(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "old-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "g1-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	}
+	tracker := trackerConfigMap(ms, disruptionEntries{
+		servingGroupUnit(ms, "ms-0").key(): {
+			expiresAt:      time.Now().Add(time.Minute),
+			triggerPodUID:  "old-prefill-uid",
+			triggerPodName: "pod-g1-prefill",
+		},
+	})
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, pods, pods, tracker)
+
+	resp := handleEvictionRequest(handler, "pod-g2-prefill")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Current ready groups (2) <= minAvailable (2)")
+
+	updatedTracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(updatedTracker)
+	assert.NoError(t, err)
+	assert.Contains(t, entries, servingGroupUnit(ms, "ms-0").key())
+}
+
+func TestEvictionHandlerRefreshesLivePodsForRecoveredRoleTracker(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(2),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "decode",
+						Replicas: int32Ptr(3),
+					},
+				},
+			},
+		},
+	}
+	staleCachePods := []*corev1.Pod{
+		createRolePodWithUID("decode-0-entry", "ms-0", "decode", "decode-0", "old-decode-uid", true),
+		createRolePodWithUID("decode-1-entry", "ms-0", "decode", "decode-1", "decode-1-uid", true),
+		createRolePodWithUID("decode-2-entry", "ms-0", "decode", "decode-2", "decode-2-uid", true),
+	}
+	livePods := []*corev1.Pod{
+		createRolePodWithUID("decode-0-entry", "ms-0", "decode", "decode-0", "new-decode-uid", true),
+		createRolePodWithUID("decode-1-entry", "ms-0", "decode", "decode-1", "decode-1-uid", true),
+		createRolePodWithUID("decode-2-entry", "ms-0", "decode", "decode-2", "decode-2-uid", true),
+	}
+	tracker := trackerConfigMap(ms, disruptionEntries{
+		roleUnit(ms, "ms-0", "decode", "decode-0").key(): {
+			expiresAt:      time.Now().Add(time.Minute),
+			triggerPodUID:  "old-decode-uid",
+			triggerPodName: "decode-0-entry",
+		},
+	})
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, staleCachePods, livePods, tracker)
+
+	resp := handleEvictionRequest(handler, "decode-1-entry")
+	assert.True(t, resp.Allowed)
+
+	updatedTracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(updatedTracker)
+	assert.NoError(t, err)
+	assert.NotContains(t, entries, roleUnit(ms, "ms-0", "decode", "decode-0").key())
+	assert.Contains(t, entries, roleUnit(ms, "ms-0", "decode", "decode-1").key())
+}
+
+func TestEvictionHandlerResetsTrackerFromPreviousSameNamedModelServing(t *testing.T) {
+	oldMS := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("old-ms-uid"),
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("new-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := withModelServingOwnerPods(ms, []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "g1-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "g1-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	})
+	staleTracker := trackerConfigMap(ms, disruptionEntries{
+		servingGroupUnit(ms, "ms-0").key(): {
+			expiresAt:      time.Now().Add(time.Minute),
+			triggerPodUID:  "old-trigger-uid",
+			triggerPodName: "old-pod",
+		},
+	})
+	staleTracker.OwnerReferences = []metav1.OwnerReference{modelServingOwnerReference(oldMS)}
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, pods, pods, staleTracker)
+
+	resp := handleEvictionRequest(handler, "pod-g3-prefill")
+	assert.True(t, resp.Allowed)
+
+	updatedTracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.True(t, isOwnedByCurrentModelServing(updatedTracker, ms))
+	entries, err := decodeDisruptionEntries(updatedTracker)
+	assert.NoError(t, err)
+	assert.NotContains(t, entries, servingGroupUnit(ms, "ms-0").key())
+	assert.Contains(t, entries, servingGroupUnit(ms, "ms-2").key())
+}
+
+func TestEvictionHandlerIgnoresPodsFromPreviousSameNamedModelServing(t *testing.T) {
+	oldMS := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("old-ms-uid"),
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("new-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	currentPods := withModelServingOwnerPods(ms, []*corev1.Pod{
+		createRolePodWithUID("pod-g1-prefill", "ms-0", "prefill", "prefill-0", "g1-prefill-uid", true),
+		createRolePodWithUID("pod-g1-decode", "ms-0", "decode", "decode-0", "g1-decode-uid", true),
+		createRolePodWithUID("pod-g2-prefill", "ms-1", "prefill", "prefill-0", "g2-prefill-uid", true),
+		createRolePodWithUID("pod-g2-decode", "ms-1", "decode", "decode-0", "g2-decode-uid", true),
+		createRolePodWithUID("pod-g3-prefill", "ms-2", "prefill", "prefill-0", "g3-prefill-uid", true),
+		createRolePodWithUID("pod-g3-decode", "ms-2", "decode", "decode-0", "g3-decode-uid", true),
+	})
+	oldNotReadyPod := withModelServingOwner(createRolePodWithUID("old-pod-g1-prefill", "ms-0", "prefill", "prefill-0", "old-prefill-uid", false), oldMS)
+	pods := append(currentPods, oldNotReadyPod)
+
+	handler, _ := newTestEvictionHandlerWithLivePods(ms, pods, pods)
+
+	resp := handleEvictionRequest(handler, "pod-g3-prefill")
+	assert.True(t, resp.Allowed)
+}
+
+func TestEvictionHandlerAllowsPodFromPreviousSameNamedModelServing(t *testing.T) {
+	oldMS := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("old-ms-uid"),
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("new-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(1)),
+				},
+			},
+		},
+	}
+	oldPod := withModelServingOwner(createRolePodWithUID("old-pod-g1-prefill", "ms-0", "prefill", "prefill-0", "old-prefill-uid", true), oldMS)
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, []*corev1.Pod{oldPod}, []*corev1.Pod{oldPod})
+
+	resp := handleEvictionRequest(handler, "old-pod-g1-prefill")
+	assert.True(t, resp.Allowed)
+
+	_, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestEvictionHandlerRoleProtection(t *testing.T) {
@@ -647,6 +935,47 @@ func newTestEvictionHandler(ms *workloadv1alpha1.ModelServing, pods []*corev1.Po
 	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
 }
 
+func newTestEvictionHandlerWithLivePods(ms *workloadv1alpha1.ModelServing, cachePods, livePods []*corev1.Pod, objects ...runtime.Object) (*EvictionHandler, *fake.Clientset) {
+	kubeObjects := make([]runtime.Object, 0, len(livePods)+len(objects))
+	for _, pod := range livePods {
+		kubeObjects = append(kubeObjects, pod)
+	}
+	kubeObjects = append(kubeObjects, objects...)
+	fakeKubeClient := fake.NewSimpleClientset(kubeObjects...)
+	fakeKthenaClient := kthenafake.NewSimpleClientset(ms)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	for _, p := range cachePods {
+		podInformer.Informer().GetStore().Add(p)
+	}
+
+	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
+	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
+	msInformer.Informer().GetStore().Add(ms)
+
+	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister()), fakeKubeClient
+}
+
+func trackerConfigMap(ms *workloadv1alpha1.ModelServing, entries disruptionEntries) *corev1.ConfigMap {
+	encoded, err := encodeDisruptionEntries(entries)
+	if err != nil {
+		panic(err)
+	}
+	return &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      trackerConfigMapName(ms.Name),
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+			},
+		},
+		Data: map[string]string{
+			trackerEntriesKey: encoded,
+		},
+	}
+}
+
 func createPod(name, groupName string, ready bool) *corev1.Pod {
 	return createRolePod(name, groupName, "worker", "worker-0", ready)
 }
@@ -681,6 +1010,20 @@ func createRolePodWithUID(name, groupName, role, roleID, uid string, ready bool)
 			},
 		},
 	}
+}
+
+func withModelServingOwnerPods(ms *workloadv1alpha1.ModelServing, pods []*corev1.Pod) []*corev1.Pod {
+	ownedPods := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		ownedPods = append(ownedPods, withModelServingOwner(pod, ms))
+	}
+	return ownedPods
+}
+
+func withModelServingOwner(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing) *corev1.Pod {
+	ownedPod := pod.DeepCopy()
+	ownedPod.OwnerReferences = []metav1.OwnerReference{modelServingOwnerReference(ms)}
+	return ownedPod
 }
 
 func handleEvictionRequest(handler *EvictionHandler, podName string) *admissionv1.AdmissionResponse {
