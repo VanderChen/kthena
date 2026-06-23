@@ -76,9 +76,9 @@ type Scope struct {
 }
 
 type InstanceInfo struct {
-	IsReady    bool
-	IsFailed   bool
-	MetricsMap algorithm.Metrics
+	UnreadyCount int32
+	FailedCount  int32
+	MetricsMap   algorithm.Metrics
 }
 
 type Generations struct {
@@ -114,26 +114,24 @@ func (collector *MetricCollector) UpdateMetrics(ctx context.Context, podLister l
 
 	currentHistograms := make(map[string]HistogramInfo)
 	instanceInfo := collector.fetchMetricsFromPods(ctx, pods, &currentHistograms)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isFailed", instanceInfo.IsFailed)
-	klog.V(10).InfoS("finish to processInstance", "instanceInfo.isReady", instanceInfo.IsReady)
+	klog.V(10).InfoS("finish to processInstance", "instanceInfo.failedCount", instanceInfo.FailedCount)
+	klog.V(10).InfoS("finish to processInstance", "instanceInfo.unreadyCount", instanceInfo.UnreadyCount)
 	klog.V(10).InfoS("finish to processInstance", "instanceInfo.metricsMap", instanceInfo.MetricsMap)
-	if instanceInfo.IsFailed {
-		klog.Warningf("some pod of %s are failed in namespace: %s.", collector.Scope, collector.Scope.Namespace)
+
+	unreadyInstancesCount = instanceInfo.UnreadyCount + instanceInfo.FailedCount
+
+	if len(instanceInfo.MetricsMap) == 0 && (instanceInfo.UnreadyCount > 0 || instanceInfo.FailedCount > 0) {
+		klog.Warningf("all pods of %s are failed or not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
 		return
 	}
 
-	if !instanceInfo.IsReady {
-		unreadyInstancesCount++
-		klog.Warningf("some pod of %s are not ready in namespace: %s.", collector.Scope, collector.Scope.Namespace)
-		return
-	}
 	readyInstancesMetric = instanceInfo.MetricsMap
 	collector.PastHistograms.Append(currentHistograms)
 	return
 }
 
 func (collector *MetricCollector) fetchMetricsFromPods(ctx context.Context, pods []*corev1.Pod, currentHistograms *map[string]HistogramInfo) InstanceInfo {
-	instanceInfo := InstanceInfo{true, false, make(algorithm.Metrics)}
+	instanceInfo := InstanceInfo{0, 0, make(algorithm.Metrics)}
 	pastHistograms, ok := collector.PastHistograms.GetLastUnfreshSnapshot()
 	if !ok {
 		pastHistograms = make(map[string]HistogramInfo)
@@ -141,8 +139,14 @@ func (collector *MetricCollector) fetchMetricsFromPods(ctx context.Context, pods
 	klog.InfoS("fetch metrics from pods start")
 	for _, pod := range pods {
 		func() {
-			instanceInfo.IsReady = instanceInfo.IsReady && inferControllerUtils.IsPodRunningAndReady(pod)
-			instanceInfo.IsFailed = instanceInfo.IsFailed || util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod)
+			if util.IsPodFailed(pod) {
+				instanceInfo.FailedCount++
+				return
+			}
+			if !inferControllerUtils.IsPodRunningAndReady(pod) {
+				instanceInfo.UnreadyCount++
+				return
+			}
 
 			pastValue, ok := pastHistograms[pod.Name]
 			var pastHistogramMap map[string]*histogram.Snapshot
