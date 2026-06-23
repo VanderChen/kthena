@@ -287,6 +287,73 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
+func TestCreatePodAlreadyExistsDeletingOwnedPodRequeues(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms",
+			Namespace: "default",
+			UID:       types.UID("ms-uid"),
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+
+	now := metav1.Now()
+	existing := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "ms-entry-0",
+			Namespace:         "default",
+			DeletionTimestamp: &now,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+				workloadv1alpha1.EntryLabelKey:            utils.Entry,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+				},
+			},
+		},
+	}
+	_, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), existing, metav1.CreateOptions{})
+	require.NoError(t, err)
+	drainWorkqueue(t, controller.workqueue)
+
+	newPod := existing.DeepCopy()
+	newPod.DeletionTimestamp = nil
+	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", newPod, true, nil, "entry")
+	require.NoError(t, err)
+
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
+func TestDeletePodParentListerMissRequeuesByLabel(t *testing.T) {
+	h := newTestController(t)
+	controller := h.controller
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ms-0-prefill-1-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: "ms",
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "prefill",
+				workloadv1alpha1.RoleIDKey:                "prefill-1",
+			},
+		},
+	}
+
+	controller.deletePod(pod)
+	h.expectQueuedKey(namespacedKey("default", "ms"))
+}
+
 func TestDeletePodGroupEnqueues(t *testing.T) {
 	ms := newModelServingForDeleteTest("default", "ms")
 	h := newTestController(t, ms)
@@ -1287,7 +1354,9 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 
-	go controller.Run(context.Background(), 1)
+	controllerCtx, cancelController := context.WithCancel(context.Background())
+	defer cancelController()
+	go controller.Run(controllerCtx, 1)
 
 	// Start informers
 	kthenaInformerFactory.Start(stop)
@@ -2545,6 +2614,7 @@ func TestManageRoleReplicas(t *testing.T) {
 		initialRoleIDs   []int
 		addEntryPod      bool
 		mismatchOwnerUID bool
+		recoveryPolicy   workloadv1alpha1.RecoveryPolicy
 		expectedRoleSize int
 		expectedPodCount int
 		expectRequeue    bool
@@ -2605,6 +2675,10 @@ func TestManageRoleReplicas(t *testing.T) {
 			assert.NoError(t, err)
 
 			roleName := "default"
+			recoveryPolicy := tt.recoveryPolicy
+			if recoveryPolicy == "" {
+				recoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+			}
 			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
@@ -2638,7 +2712,7 @@ func TestManageRoleReplicas(t *testing.T) {
 							},
 						},
 					},
-					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+					RecoveryPolicy: recoveryPolicy,
 				},
 			}
 
@@ -2689,6 +2763,174 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManageRoleReplicasRoleRecreateMissingPodsDeletesRole(t *testing.T) {
+	roleName := "prefill"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-ms",
+			UID:       types.UID("test-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:       ptr.To[int32](1),
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           roleName,
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 1,
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "entry", Image: "test-image"}},
+							},
+						},
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "worker", Image: "test-image"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	roleID := utils.GenerateRoleID(roleName, 0)
+	revision := "rev-1"
+	roleTemplateHash := "role-template-hash"
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(nsn, 0, revision)
+	controller.store.AddRole(nsn, groupName, roleName, roleID, revision, roleTemplateHash)
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleRunning))
+
+	entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision, roleTemplateHash)
+	_, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
+
+	controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+
+	require.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
+func TestManageRoleReplicasRoleRecreateCreatingRoleCompletesPods(t *testing.T) {
+	roleName := "prefill"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-ms",
+			UID:       types.UID("test-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas:       ptr.To[int32](1),
+			RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           roleName,
+						Replicas:       ptr.To[int32](1),
+						WorkerReplicas: 1,
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "entry", Image: "test-image"}},
+							},
+						},
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "worker", Image: "test-image"}},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	roleID := utils.GenerateRoleID(roleName, 0)
+	revision := "rev-1"
+	roleTemplateHash := "role-template-hash"
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddServingGroup(nsn, 0, revision)
+	controller.store.AddRole(nsn, groupName, roleName, roleID, revision, roleTemplateHash)
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleCreating))
+
+	entryPod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, 0, revision, roleTemplateHash)
+	_, err := h.kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), entryPod, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
+
+	controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
+
+	require.Equal(t, datastore.RoleCreating, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+	selector := labels.SelectorFromSet(map[string]string{
+		workloadv1alpha1.GroupNameLabelKey: groupName,
+		workloadv1alpha1.RoleLabelKey:      roleName,
+		workloadv1alpha1.RoleIDKey:         roleID,
+	})
+	pods, err := h.kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 2)
+}
+
+func TestReconcileDeletingRoleUsesLiveCheckWhenInformerIsStale(t *testing.T) {
+	roleName := "prefill"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-ms",
+			UID:       types.UID("test-ms-uid"),
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	roleID := utils.GenerateRoleID(roleName, 0)
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddRole(nsn, groupName, roleName, roleID, "rev-1", "role-template-hash")
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleDeleting))
+
+	stalePod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms-0-prefill-0-0",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        ms.UID,
+				},
+			},
+		},
+	}
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(stalePod))
+
+	require.False(t, controller.reconcileDeletingRole(context.Background(), ms, groupName, roleName, roleID))
+	require.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+
+	require.True(t, controller.reconcileDeletingRole(context.Background(), ms, groupName, roleName, roleID))
+	require.Equal(t, datastore.RoleNotFound, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
 // TestScaleDownServingGroups tests the scaleDownServingGroups function with various scenarios
@@ -5346,6 +5588,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
 			Template: workloadv1alpha1.ServingGroup{
+				RestartGracePeriodSeconds: ptr.To[int64](5),
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -5441,6 +5684,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
 			Template: workloadv1alpha1.ServingGroup{
+				RestartGracePeriodSeconds: ptr.To[int64](5),
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
