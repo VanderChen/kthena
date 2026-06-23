@@ -100,6 +100,11 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 	addPodLabelAndAnnotation(entryPod, role.EntryTemplate.Metadata)
 	entryPod.Spec = role.EntryTemplate.Spec
 	entryPod.Spec.SchedulerName = ms.Spec.SchedulerName
+	// Set Hostname and Subdomain for per-pod DNS support
+	entryPod.Spec.Hostname = entryPodName
+	if role.WorkerReplicas > 0 {
+		entryPod.Spec.Subdomain = entryPodName
+	}
 	// Build environment variables into each container of all pod
 	envVars := createCommonEnvVars(role, entryPod, 0)
 	addPodEnvVars(entryPod, envVars...)
@@ -117,6 +122,9 @@ func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelSer
 	addPodLabelAndAnnotation(workerPod, role.WorkerTemplate.Metadata)
 	workerPod.Spec = role.WorkerTemplate.Spec
 	workerPod.Spec.SchedulerName = ms.Spec.SchedulerName
+	// Set Hostname and Subdomain for per-pod DNS support
+	workerPod.Spec.Hostname = workerPodName
+	workerPod.Spec.Subdomain = entryPod.Name
 	envVars := createCommonEnvVars(role, entryPod, podIndex)
 	addPodEnvVars(workerPod, envVars...)
 	return workerPod
