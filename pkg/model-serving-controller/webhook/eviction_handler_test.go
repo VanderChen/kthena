@@ -481,6 +481,55 @@ func TestEvictionHandlerRefreshesLivePodsForRecoveredRoleTracker(t *testing.T) {
 	assert.Contains(t, entries, roleUnit(ms, "ms-0", "decode", "decode-1").key())
 }
 
+func TestEvictionHandlerRefreshesLivePodsWhenRoleCacheObservationIncomplete(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("current-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode":  intstr.FromInt(1),
+						"prefill": intstr.FromInt(1),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "prefill",
+						Replicas: int32Ptr(2),
+					},
+					{
+						Name:     "decode",
+						Replicas: int32Ptr(3),
+					},
+				},
+			},
+		},
+	}
+	livePods := withModelServingOwnerPods(ms, []*corev1.Pod{
+		createRolePodWithUID("decode-0-entry", "ms-0", "decode", "decode-0", "decode-0-uid", true),
+		createRolePodWithUID("decode-1-entry", "ms-0", "decode", "decode-1", "decode-1-uid", true),
+		createRolePodWithUID("decode-2-entry", "ms-0", "decode", "decode-2", "decode-2-uid", true),
+	})
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, nil, livePods)
+
+	resp := handleEvictionRequest(handler, "decode-1-entry")
+	assert.True(t, resp.Allowed)
+
+	updatedTracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(updatedTracker)
+	assert.NoError(t, err)
+	assert.Contains(t, entries, roleUnit(ms, "ms-0", "decode", "decode-1").key())
+}
+
 func TestEvictionHandlerResetsTrackerFromPreviousSameNamedModelServing(t *testing.T) {
 	oldMS := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{

@@ -220,6 +220,7 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 	}
 	allPods = filterPodsForCurrentModelServing(allPods, ms)
 	allPods = includeTargetPod(allPods, targetPod)
+	allPods = h.refreshLivePodsForIncompleteObservation(ctx, ms, targetPod, strategy, allPods)
 
 	var allowed bool
 	var reason string
@@ -424,7 +425,7 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 	}
 	sort.Strings(roleStates)
 
-	totalInstances := h.expectedRoleInstancesInServingGroup(ms, targetRole, len(roleInstances))
+	totalInstances := expectedRoleInstancesInServingGroup(ms, targetRole, len(roleInstances))
 	minAvailable := -1
 	if totalInstances > 0 {
 		minAvailableValue := roleMinAvailableOrDefault(strategy, targetRole)
@@ -510,6 +511,69 @@ func includeTargetPod(pods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
 		}
 	}
 	return append(pods, targetPod)
+}
+
+func (h *EvictionHandler) refreshLivePodsForIncompleteObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, strategy *workloadv1alpha1.EvictionStrategySpec, cachedPods []*corev1.Pod) []*corev1.Pod {
+	expected, observed, scope := expectedAndObservedInstances(ms, targetPod, strategy, cachedPods)
+	if expected <= 0 || observed >= expected {
+		return cachedPods
+	}
+
+	livePods, err := h.liveModelServingPods(ctx, ms)
+	if err != nil {
+		klog.Warningf("Failed to refresh live pods for incomplete eviction observation modelServing=%s/%s pod=%s/%s scope=%s observed=%d expected=%d: %v",
+			ms.Namespace, ms.Name, targetPod.Namespace, targetPod.Name, scope, observed, expected, err)
+		return cachedPods
+	}
+	livePods = includeTargetPod(livePods, targetPod)
+	liveExpected, liveObserved, _ := expectedAndObservedInstances(ms, targetPod, strategy, livePods)
+	klog.Infof("Refreshed live pods for incomplete eviction observation modelServing=%s/%s pod=%s/%s scope=%s cachedObserved=%d expected=%d liveObserved=%d liveExpected=%d cachedPods=%d livePods=%d",
+		ms.Namespace, ms.Name, targetPod.Namespace, targetPod.Name, scope, observed, expected, liveObserved, liveExpected, len(cachedPods), len(livePods))
+	return livePods
+}
+
+func expectedAndObservedInstances(ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, strategy *workloadv1alpha1.EvictionStrategySpec, pods []*corev1.Pod) (int, int, string) {
+	if strategy.ProtectionLevel == workloadv1alpha1.ProtectionLevelRole {
+		targetGroupName := targetPod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		targetRole := targetPod.Labels[workloadv1alpha1.RoleLabelKey]
+		if targetGroupName == "" || targetRole == "" {
+			return 0, 0, "role"
+		}
+		observed := observedRoleInstances(pods, targetGroupName, targetRole)
+		expected := expectedRoleInstancesInServingGroup(ms, targetRole, observed)
+		return expected, observed, fmt.Sprintf("role/%s/%s", targetGroupName, targetRole)
+	}
+
+	observed := observedServingGroups(pods)
+	expected := int(replicasOrDefault(ms.Spec.Replicas))
+	return expected, observed, "servingGroup"
+}
+
+func observedRoleInstances(pods []*corev1.Pod, groupName, role string) int {
+	instances := map[string]struct{}{}
+	for _, pod := range pods {
+		if pod.Labels[workloadv1alpha1.GroupNameLabelKey] != groupName || pod.Labels[workloadv1alpha1.RoleLabelKey] != role {
+			continue
+		}
+		roleID := pod.Labels[workloadv1alpha1.RoleIDKey]
+		if roleID == "" {
+			continue
+		}
+		instances[roleID] = struct{}{}
+	}
+	return len(instances)
+}
+
+func observedServingGroups(pods []*corev1.Pod) int {
+	groups := map[string]struct{}{}
+	for _, pod := range pods {
+		groupName := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if groupName == "" {
+			continue
+		}
+		groups[groupName] = struct{}{}
+	}
+	return len(groups)
 }
 
 func isPodReady(pod *corev1.Pod) bool {
@@ -906,7 +970,7 @@ func roleMinAvailableOrDefault(strategy *workloadv1alpha1.EvictionStrategySpec, 
 	return &defaultValue
 }
 
-func (h *EvictionHandler) expectedRoleInstancesInServingGroup(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {
+func expectedRoleInstancesInServingGroup(ms *workloadv1alpha1.ModelServing, roleName string, fallback int) int {
 	for _, role := range ms.Spec.Template.Roles {
 		if role.Name == roleName {
 			return int(replicasOrDefault(role.Replicas))
