@@ -350,6 +350,10 @@ func (h *EvictionHandler) checkServingGroupProtection(ms *workloadv1alpha1.Model
 	}
 
 	if !targetGroupReady {
+		if !isPodReady(targetPod) {
+			logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target pod is already not ready")
+			return true, "", nil
+		}
 		if targetGroupDisrupted {
 			logServingGroupEvictionState(ms, targetPod, targetGroupName, targetGroupFound, targetGroupReady, readyGroups, len(groups), totalReplicas, minAvailable, groupStates, true, "target group is already tracked as disrupted")
 			return true, "", nil
@@ -443,6 +447,10 @@ func (h *EvictionHandler) checkRoleProtection(ms *workloadv1alpha1.ModelServing,
 	}
 
 	if !targetInstanceReady {
+		if !isPodReady(targetPod) {
+			logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target pod is already not ready")
+			return true, "", nil
+		}
 		if targetInstanceDisrupted {
 			logRoleEvictionState(ms, targetPod, targetRole, targetRoleID, targetInstanceFound, targetInstanceReady, readyInstances, len(roleInstances), totalInstances, minAvailable, roleStates, true, "target role instance is already tracked as disrupted")
 			return true, "", nil

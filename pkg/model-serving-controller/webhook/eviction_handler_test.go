@@ -158,7 +158,7 @@ func TestEvictionHandlerAllowsSameTrackedServingGroup(t *testing.T) {
 	assert.Contains(t, resp3.Result.Message, "Current ready groups (2) <= minAvailable (2)")
 }
 
-func TestEvictionHandlerDeniesUntrackedNotReadyServingGroupAtMinAvailable(t *testing.T) {
+func TestEvictionHandlerAllowsNotReadyTargetServingGroupAtMinAvailable(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-ms",
@@ -180,9 +180,44 @@ func TestEvictionHandlerDeniesUntrackedNotReadyServingGroupAtMinAvailable(t *tes
 		createPod("pod-g3", "ms-2", true),
 	}
 
-	handler := newTestEvictionHandler(ms, pods)
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, pods, pods)
 
 	resp := handleEvictionRequest(handler, "pod-g1")
+	assert.True(t, resp.Allowed)
+
+	tracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(tracker)
+	assert.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestEvictionHandlerDeniesReadyTargetWhenOtherNodeMakesServingGroupNotReadyAtMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		withNode(createRolePod("pod-g1-prefill", "ms-0", "prefill", "prefill-0", true), "drain-node"),
+		withNode(createRolePod("pod-g1-decode", "ms-0", "decode", "decode-0", false), "other-node"),
+		withNode(createPod("pod-g2", "ms-1", true), "other-node"),
+		withNode(createPod("pod-g3", "ms-2", true), "other-node"),
+	}
+
+	handler := newTestEvictionHandler(ms, pods)
+
+	resp := handleEvictionRequest(handler, "pod-g1-prefill")
 	assert.False(t, resp.Allowed)
 	assert.Contains(t, resp.Result.Message, "Target group ms-0 is not ready and not tracked")
 }
@@ -738,6 +773,99 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	assert.True(t, resp4.Allowed)
 }
 
+func TestEvictionHandlerAllowsNotReadyTargetRoleInstanceAtMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(2),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           "decode",
+						Replicas:       int32Ptr(3),
+						WorkerReplicas: 1,
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+					},
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", false),
+		createRolePod("decode-0-worker", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-1-worker", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-2-entry", "ms-0", "decode", "decode-2", true),
+		createRolePod("decode-2-worker", "ms-0", "decode", "decode-2", true),
+	}
+
+	handler, kubeClient := newTestEvictionHandlerWithLivePods(ms, pods, pods)
+
+	resp := handleEvictionRequest(handler, "decode-0-entry")
+	assert.True(t, resp.Allowed)
+
+	tracker, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+	assert.NoError(t, err)
+	entries, err := decodeDisruptionEntries(tracker)
+	assert.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestEvictionHandlerDeniesReadyTargetWhenOtherNodeMakesRoleInstanceNotReadyAtMinAvailable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(2),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{
+				Roles: []workloadv1alpha1.Role{
+					{
+						Name:           "decode",
+						Replicas:       int32Ptr(3),
+						WorkerReplicas: 1,
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+					},
+				},
+			},
+		},
+	}
+	pods := []*corev1.Pod{
+		withNode(createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true), "drain-node"),
+		withNode(createRolePod("decode-0-worker", "ms-0", "decode", "decode-0", false), "other-node"),
+		withNode(createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true), "other-node"),
+		withNode(createRolePod("decode-1-worker", "ms-0", "decode", "decode-1", true), "other-node"),
+		withNode(createRolePod("decode-2-entry", "ms-0", "decode", "decode-2", true), "other-node"),
+		withNode(createRolePod("decode-2-worker", "ms-0", "decode", "decode-2", true), "other-node"),
+	}
+
+	handler := newTestEvictionHandler(ms, pods)
+
+	resp := handleEvictionRequest(handler, "decode-0-entry")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Target role instance ms-0/decode/decode-0 is not ready and not tracked")
+}
+
 func TestEvictionHandlerRoleProtectionIgnoresGlobalMinAvailable(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1059,6 +1187,11 @@ func createRolePodWithUID(name, groupName, role, roleID, uid string, ready bool)
 			},
 		},
 	}
+}
+
+func withNode(pod *corev1.Pod, nodeName string) *corev1.Pod {
+	pod.Spec.NodeName = nodeName
+	return pod
 }
 
 func withModelServingOwnerPods(ms *workloadv1alpha1.ModelServing, pods []*corev1.Pod) []*corev1.Pod {
