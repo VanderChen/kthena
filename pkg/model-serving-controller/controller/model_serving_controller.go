@@ -62,7 +62,6 @@ const (
 	// enqueueAfter is the time duration to wait to re-enqueue:
 	enqueueAfter = 1 * time.Second
 
-	roleDeletionRecheckDelay       = 1 * time.Second
 	roleDeletionLiveCheckThreshold = 2
 	modelServingFullSyncPeriod     = 5 * time.Minute
 
@@ -397,7 +396,6 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	// delete the pod
 	if ms == nil {
 		klog.Warningf("ModelServing of deleted pod: %s not found, might be already deleted", pod.Name)
-		c.enqueueModelServingByChildResourceAfter(pod, enqueueAfter)
 		return
 	}
 
@@ -439,7 +437,6 @@ func (c *ModelServingController) deleteService(obj interface{}) {
 	// ms is nil means the modelserving is deleted
 	if ms == nil {
 		klog.Warningf("ModelServing of deleted service: %s not found, might be already deleted", svc.Name)
-		c.enqueueModelServingByChildResourceAfter(svc, enqueueAfter)
 		return
 	}
 
@@ -517,21 +514,6 @@ func (c *ModelServingController) enqueueModelServingAfter(ms *workloadv1alpha1.M
 		return
 	}
 	c.workqueue.AddAfter(key, duration)
-}
-
-func (c *ModelServingController) enqueueModelServingKeyAfter(key string, duration time.Duration) {
-	if key == "" || c.workqueue == nil {
-		return
-	}
-	c.workqueue.AddAfter(key, duration)
-}
-
-func (c *ModelServingController) enqueueModelServingByChildResourceAfter(obj metav1.Object, duration time.Duration) {
-	key, ok := modelServingKeyFromChildResource(obj)
-	if !ok {
-		return
-	}
-	c.enqueueModelServingKeyAfter(key, duration)
 }
 
 func (c *ModelServingController) worker(ctx context.Context) {
@@ -1004,18 +986,17 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 			continue
 		}
 		for _, pod := range pods {
-			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			if !isOwnedByCurrentModelServing(pod, ms.UID) {
 				// If the pod is not owned by the ModelServing, we do not need to handle it.
-				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
+				klog.Warningf("manageRoleReplicas: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), ignoring it for current role accounting",
 					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, firstOwnerUID(pod))
-				c.enqueueModelServingAfter(ms, 1*time.Second)
-				break
 			}
 		}
-		if len(pods) < expectedPods {
+		ownedPods := filterPodsOwnedByModelServing(pods, ms.UID)
+		if len(ownedPods) < expectedPods {
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleObj.Status == datastore.RoleRunning {
-				klog.V(2).Infof("manageRoleReplicas: running role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+				klog.V(2).Infof("manageRoleReplicas: running role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 				if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName); groupStatus == datastore.ServingGroupRunning {
 					if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupCreating); err != nil {
 						klog.Warningf("manageRoleReplicas: failed to set ServingGroup %s/%s to Creating before RoleRecreate recovery: %v", ms.Namespace, groupName, err)
@@ -1024,7 +1005,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 				c.DeleteRole(ctx, ms, groupName, targetRole.Name, roleObj.Name)
 				continue
 			}
-			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
 				klog.Errorf("manageRoleReplicas: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
@@ -1079,7 +1060,6 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	// If the role is already in the deletion process, no further processing will be done.
 	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID)
 	if roleStatus == datastore.RoleDeleting {
-		c.enqueueModelServingAfter(ms, roleDeletionRecheckDelay)
 		return
 	}
 	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
@@ -1148,7 +1128,6 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		c.enqueueModelServing(ms)
 		return
 	}
-	c.enqueueModelServingAfter(ms, roleDeletionRecheckDelay)
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
@@ -1532,7 +1511,7 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	// Count running and ready pods
 	runningPods := 0
 	for _, pod := range pods {
-		if utils.IsPodRunningAndReady(pod) {
+		if isOwnedByCurrentModelServing(pod, ms.UID) && utils.IsPodRunningAndReady(pod) {
 			runningPods++
 		}
 	}
@@ -1658,7 +1637,6 @@ func (c *ModelServingController) reconcileDeletingRole(ctx context.Context, ms *
 			return true
 		}
 	}
-	c.enqueueModelServingAfter(ms, roleDeletionRecheckDelay)
 	return false
 }
 
@@ -1708,7 +1686,7 @@ func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing
 		klog.Errorf("failed to get service, err:%v", err)
 		return false
 	}
-	return len(pods) == 0 && len(services) == 0
+	return len(filterPodsOwnedByModelServing(pods, ms.UID)) == 0 && len(filterServicesOwnedByModelServing(services, ms.UID)) == 0
 }
 
 func (c *ModelServingController) isRoleDeletedLive(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) (bool, error) {
@@ -1758,19 +1736,31 @@ func roleDeletionKey(ms *workloadv1alpha1.ModelServing, servingGroupName, roleNa
 	return fmt.Sprintf("%s/%s/%s/%s/%s", ms.Namespace, ms.Name, servingGroupName, roleName, roleID)
 }
 
-func modelServingKeyFromChildResource(obj metav1.Object) (string, bool) {
-	if obj == nil {
-		return "", false
+func filterPodsOwnedByModelServing(pods []*corev1.Pod, uid types.UID) []*corev1.Pod {
+	owned := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if isOwnedByCurrentModelServing(pod, uid) {
+			owned = append(owned, pod)
+		}
 	}
-	labels := obj.GetLabels()
-	if labels == nil {
-		return "", false
+	return owned
+}
+
+func filterServicesOwnedByModelServing(services []*corev1.Service, uid types.UID) []*corev1.Service {
+	owned := make([]*corev1.Service, 0, len(services))
+	for _, svc := range services {
+		if isOwnedByCurrentModelServing(svc, uid) {
+			owned = append(owned, svc)
+		}
 	}
-	name := labels[workloadv1alpha1.ModelServingNameLabelKey]
-	if name == "" {
-		return "", false
+	return owned
+}
+
+func isOwnedByCurrentModelServing(obj metav1.Object, uid types.UID) bool {
+	if uid == "" {
+		return true
 	}
-	return obj.GetNamespace() + "/" + name, true
+	return utils.IsOwnedByModelServingWithUID(obj, uid)
 }
 
 func firstOwnerUID(obj metav1.Object) types.UID {

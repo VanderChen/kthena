@@ -333,9 +333,10 @@ func TestCreatePodAlreadyExistsDeletingOwnedPodRequeues(t *testing.T) {
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
 }
 
-func TestDeletePodParentListerMissRequeuesByLabel(t *testing.T) {
+func TestDeletePodParentListerMissDoesNotRequeueByLabelOnly(t *testing.T) {
 	h := newTestController(t)
 	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -351,7 +352,7 @@ func TestDeletePodParentListerMissRequeuesByLabel(t *testing.T) {
 	}
 
 	controller.deletePod(pod)
-	h.expectQueuedKey(namespacedKey("default", "ms"))
+	assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
 }
 
 func TestPeriodicFullSyncRequeuesModelServing(t *testing.T) {
@@ -2670,14 +2671,14 @@ func TestManageRoleReplicas(t *testing.T) {
 			expectRequeue:    false,
 		},
 		{
-			name:             "reenqueue when pod owner UID mismatches",
+			name:             "cleanup stale same-named pod when owner UID mismatches",
 			roleReplicas:     1,
 			workerReplicas:   0,
 			initialRoleIDs:   []int{0},
 			addEntryPod:      true,
 			mismatchOwnerUID: true,
 			expectedRoleSize: 1,
-			expectedPodCount: 1,
+			expectedPodCount: 0,
 			expectRequeue:    true,
 		},
 	}
@@ -2838,7 +2839,7 @@ func TestManageRoleReplicasRoleRecreateMissingPodsDeletesRole(t *testing.T) {
 	controller.manageRoleReplicas(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision)
 
 	require.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
-	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+	assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
 }
 
 func TestManageRoleReplicasRoleRecreateCreatingRoleCompletesPods(t *testing.T) {
@@ -2947,6 +2948,52 @@ func TestReconcileDeletingRoleUsesLiveCheckWhenInformerIsStale(t *testing.T) {
 
 	require.False(t, controller.reconcileDeletingRole(context.Background(), ms, groupName, roleName, roleID))
 	require.Equal(t, datastore.RoleDeleting, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+
+	require.True(t, controller.reconcileDeletingRole(context.Background(), ms, groupName, roleName, roleID))
+	require.Equal(t, datastore.RoleNotFound, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
+func TestReconcileDeletingRoleIgnoresStaleSameNamedPodFromOldModelServing(t *testing.T) {
+	roleName := "prefill"
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "default",
+			Name:      "test-ms",
+			UID:       types.UID("new-ms-uid"),
+		},
+	}
+	h := newTestController(t, ms)
+	controller := h.controller
+	drainWorkqueue(t, controller.workqueue)
+
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	roleID := utils.GenerateRoleID(roleName, 0)
+	nsn := utils.GetNamespaceName(ms)
+	controller.store.AddRole(nsn, groupName, roleName, roleID, "rev-1", "role-template-hash")
+	require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, roleName, roleID, datastore.RoleDeleting))
+
+	oldPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms-0-prefill-0-0",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        groupName,
+				workloadv1alpha1.RoleLabelKey:             roleName,
+				workloadv1alpha1.RoleIDKey:                roleID,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				{
+					APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+					Kind:       workloadv1alpha1.ModelServingKind.Kind,
+					Name:       ms.Name,
+					UID:        types.UID("old-ms-uid"),
+				},
+			},
+		},
+	}
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(oldPod))
 
 	require.True(t, controller.reconcileDeletingRole(context.Background(), ms, groupName, roleName, roleID))
 	require.Equal(t, datastore.RoleNotFound, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
