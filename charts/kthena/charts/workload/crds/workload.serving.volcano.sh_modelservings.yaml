@@ -186,16 +186,17 @@ spec:
                     type: object
                   networkTopology:
                     description: |-
-                      NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,
-                      it works only when the scheduler supports network topology-aware scheduling.
+                      NetworkTopology defines topology-aware aggregation and relationship
+                      policies for ServingGroups and Roles on the scheduler's HyperNode tree.
                     properties:
                       groupPolicy:
                         description: GroupPolicy defines the network topology scheduling
                           requirement of  all the instances within the `ServingGroup`.
                         properties:
                           highestTierAllowed:
-                            description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
+                            description: |-
+                              HighestTierAllowed is a mandatory maximum LCA tier in hard mode and a preferred,
+                              fallback-capable maximum LCA tier in soft mode. It is optional in soft mode.
                             minimum: 0
                             type: integer
                           highestTierName:
@@ -213,13 +214,197 @@ spec:
                             - soft
                             type: string
                         type: object
+                      roleAffinity:
+                        description: RoleAffinity co-locates selected Role policies
+                          within each ServingGroup.
+                        properties:
+                          preferred:
+                            description: Preferred contains weighted soft affinity
+                              terms.
+                            items:
+                              description: |-
+                                RoleAffinityTerm selects Role policy names and the topology tier used to
+                                compare their SubJobs. Exactly one topology tier field must be set.
+                              properties:
+                                roles:
+                                  description: Roles contains names from spec.template.roles.
+                                  items:
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - roles
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          required:
+                            description: Required contains hard affinity terms that
+                              must all be satisfied.
+                            items:
+                              description: |-
+                                RoleAffinityTerm selects Role policy names and the topology tier used to
+                                compare their SubJobs. Exactly one topology tier field must be set.
+                              properties:
+                                roles:
+                                  description: Roles contains names from spec.template.roles.
+                                  items:
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - roles
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                        x-kubernetes-validations:
+                        - message: weight must not be set in required terms
+                          rule: '!has(self.required) || self.required.all(term, !has(term.weight))'
+                        - message: weight must be set in preferred terms
+                          rule: '!has(self.preferred) || self.preferred.all(term,
+                            has(term.weight))'
+                      roleAntiAffinity:
+                        description: |-
+                          RoleAntiAffinity spreads or separates selected Role policies within each
+                          ServingGroup.
+                        properties:
+                          preferred:
+                            description: Preferred contains weighted soft anti-affinity
+                              terms.
+                            items:
+                              description: |-
+                                RoleAffinityTerm selects Role policy names and the topology tier used to
+                                compare their SubJobs. Exactly one topology tier field must be set.
+                              properties:
+                                roles:
+                                  description: Roles contains names from spec.template.roles.
+                                  items:
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - roles
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          required:
+                            description: Required contains hard anti-affinity terms
+                              that must all be satisfied.
+                            items:
+                              description: |-
+                                RoleAffinityTerm selects Role policy names and the topology tier used to
+                                compare their SubJobs. Exactly one topology tier field must be set.
+                              properties:
+                                roles:
+                                  description: Roles contains names from spec.template.roles.
+                                  items:
+                                    type: string
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-type: set
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              required:
+                              - roles
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                        x-kubernetes-validations:
+                        - message: weight must not be set in required terms
+                          rule: '!has(self.required) || self.required.all(term, !has(term.weight))'
+                        - message: weight must be set in preferred terms
+                          rule: '!has(self.preferred) || self.preferred.all(term,
+                            has(term.weight))'
                       rolePolicy:
                         description: RolePolicy defines the fine-grained network topology
                           scheduling requirement for instances of a `role`.
                         properties:
                           highestTierAllowed:
-                            description: HighestTierAllowed specifies the highest
-                              tier that a job allowed to cross when scheduling.
+                            description: |-
+                              HighestTierAllowed is a mandatory maximum LCA tier in hard mode and a preferred,
+                              fallback-capable maximum LCA tier in soft mode. It is optional in soft mode.
                             minimum: 0
                             type: integer
                           highestTierName:
@@ -237,6 +422,80 @@ spec:
                             - soft
                             type: string
                         type: object
+                      servingGroupAntiAffinity:
+                        description: |-
+                          ServingGroupAntiAffinity separates ServingGroups belonging to this
+                          ModelServing. The controller selects peer PodGroups automatically.
+                        properties:
+                          preferred:
+                            description: Preferred contains weighted soft anti-affinity
+                              terms.
+                            items:
+                              description: |-
+                                ServingGroupAffinityTerm selects the topology tier used to compare peer
+                                ServingGroups. Exactly one topology tier field must be set.
+                              properties:
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                          required:
+                            description: Required contains hard anti-affinity terms
+                              that must all be satisfied.
+                            items:
+                              description: |-
+                                ServingGroupAffinityTerm selects the topology tier used to compare peer
+                                ServingGroups. Exactly one topology tier field must be set.
+                              properties:
+                                topologyTier:
+                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                topologyTierName:
+                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  maxLength: 253
+                                  type: string
+                                weight:
+                                  description: Weight applies only to preferred terms
+                                    and must be between 1 and 100.
+                                  format: int32
+                                  maximum: 100
+                                  minimum: 1
+                                  type: integer
+                              type: object
+                              x-kubernetes-validations:
+                              - message: exactly one of topologyTierName and topologyTier
+                                  must be set
+                                rule: has(self.topologyTierName) != has(self.topologyTier)
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                        x-kubernetes-validations:
+                        - message: weight must not be set in required terms
+                          rule: '!has(self.required) || self.required.all(term, !has(term.weight))'
+                        - message: weight must be set in preferred terms
+                          rule: '!has(self.preferred) || self.preferred.all(term,
+                            has(term.weight))'
                     type: object
                   restartGracePeriodSeconds:
                     default: 0

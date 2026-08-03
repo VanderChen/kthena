@@ -2665,6 +2665,16 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 
 func (c *ModelServingController) createOrUpdatePodGroupByServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
 	if err, retryAfter := c.podGroupManager.CreateOrUpdatePodGroup(ctx, ms, servingGroupName); err != nil {
+		if c.recorder != nil {
+			c.recorder.Eventf(
+				ms,
+				corev1.EventTypeWarning,
+				"PodGroupSyncFailed",
+				"Failed to reconcile PodGroup %s: %v",
+				servingGroupName,
+				err,
+			)
+		}
 		if retryAfter > 0 {
 			klog.V(2).Infof("Retry syncing modelserving %s after %v: %v", servingGroupName, retryAfter, err)
 			c.enqueueModelServingAfter(ms, retryAfter)

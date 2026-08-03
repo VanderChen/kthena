@@ -69,6 +69,7 @@ const sidebars: SidebarsConfig = {
             'user-guide/binpack-scale-down',
             'user-guide/gang-scheduling',
             'user-guide/network-topology',
+            'user-guide/topology-affinity',
           ],
         },
         {

@@ -37,6 +37,7 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -219,6 +220,32 @@ func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
 	err := controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, "ms-0")
 	assert.NoError(t, err)
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
+func TestCreateOrUpdatePodGroupByServingGroupEmitsFailureEvent(t *testing.T) {
+	recorder := record.NewFakeRecorder(1)
+	controller := &ModelServingController{
+		recorder: recorder,
+		podGroupManager: &fakePodGroupManager{
+			createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
+				return fmt.Errorf("networkTopology affinity rules require spec.topologyAffinity in the installed Volcano PodGroup CRD"), 0
+			},
+		},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default"},
+	}
+
+	err := controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, "ms-0")
+	assert.Error(t, err)
+
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "Warning PodGroupSyncFailed")
+		assert.Contains(t, event, "networkTopology affinity rules require spec.topologyAffinity")
+	case <-time.After(time.Second):
+		t.Fatal("expected PodGroupSyncFailed event")
+	}
 }
 
 func TestCreatePodAlreadyExistsRequeues(t *testing.T) {

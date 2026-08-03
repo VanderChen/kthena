@@ -648,7 +648,9 @@ _Appears in:_
 
 
 
-NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+NetworkTopology defines topology-aware placement policies and relationships
+for a ServingGroup. It works only when the scheduler supports the configured
+Volcano network-topology and group-topology-affinity capabilities.
 
 
 
@@ -659,6 +661,9 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `groupPolicy` _[NetworkTopologySpec](#networktopologyspec)_ | GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`. |  |  |
 | `rolePolicy` _[NetworkTopologySpec](#networktopologyspec)_ | RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`. |  |  |
+| `servingGroupAntiAffinity` _[ServingGroupAntiAffinity](#servinggroupantiaffinity)_ | ServingGroupAntiAffinity separates ServingGroups belonging to this<br />ModelServing. The controller selects peer PodGroups automatically. |  |  |
+| `roleAffinity` _[RoleAffinity](#roleaffinity)_ | RoleAffinity co-locates selected Role policies within each ServingGroup. |  |  |
+| `roleAntiAffinity` _[RoleAntiAffinity](#roleantiaffinity)_ | RoleAntiAffinity spreads or separates selected Role policies within each<br />ServingGroup. |  |  |
 
 
 #### PluginScope
@@ -868,6 +873,63 @@ _Appears in:_
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition indicates the ordinal at which the ModelServing should be partitioned<br />for updates. During a rolling update, all ServingGroups from ordinal Replicas-1 to<br />Partition are updated. All ServingGroups from ordinal Partition-1 to 0 remain untouched.<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
+#### RoleAffinity
+
+
+
+RoleAffinity defines required and preferred co-location rules between Role
+policies in one ServingGroup.
+
+
+
+_Appears in:_
+- [NetworkTopology](#networktopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `required` _[RoleAffinityTerm](#roleaffinityterm) array_ | Required contains hard affinity terms that must all be satisfied. |  |  |
+| `preferred` _[RoleAffinityTerm](#roleaffinityterm) array_ | Preferred contains weighted soft affinity terms. |  |  |
+
+
+#### RoleAffinityTerm
+
+
+
+RoleAffinityTerm selects Role policy names and the topology tier used to
+compare their SubJobs. Exactly one topology tier field must be set.
+
+
+
+_Appears in:_
+- [RoleAffinity](#roleaffinity)
+- [RoleAntiAffinity](#roleantiaffinity)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `roles` _string array_ | Roles contains names from spec.template.roles. |  | MinItems: 1 <br /> |
+| `weight` _integer_ | Weight applies only to preferred terms and must be between 1 and 100. |  | Maximum: 100 <br />Minimum: 1 <br /> |
+| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName. |  | MaxLength: 253 <br /> |
+| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier. |  | Minimum: 0 <br /> |
+
+
+#### RoleAntiAffinity
+
+
+
+RoleAntiAffinity defines required and preferred separation rules between
+Role policies in one ServingGroup.
+
+
+
+_Appears in:_
+- [NetworkTopology](#networktopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `required` _[RoleAffinityTerm](#roleaffinityterm) array_ | Required contains hard anti-affinity terms that must all be satisfied. |  |  |
+| `preferred` _[RoleAffinityTerm](#roleaffinityterm) array_ | Preferred contains weighted soft anti-affinity terms. |  |  |
+
+
 #### RoleRatioConstraint
 
 
@@ -1012,8 +1074,45 @@ _Appears in:_
 | --- | --- | --- | --- |
 | `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error) | 0 |  |
 | `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy defines the gang scheduler config. |  |  |
-| `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,<br />it works only when the scheduler supports network topology-aware scheduling. |  |  |
+| `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines topology-aware aggregation and relationship<br />policies for ServingGroups and Roles on the scheduler's HyperNode tree. |  |  |
 | `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |
+
+
+#### ServingGroupAffinityTerm
+
+
+
+ServingGroupAffinityTerm selects the topology tier used to compare peer
+ServingGroups. Exactly one topology tier field must be set.
+
+
+
+_Appears in:_
+- [ServingGroupAntiAffinity](#servinggroupantiaffinity)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `weight` _integer_ | Weight applies only to preferred terms and must be between 1 and 100. |  | Maximum: 100 <br />Minimum: 1 <br /> |
+| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName. |  | MaxLength: 253 <br /> |
+| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier. |  | Minimum: 0 <br /> |
+
+
+#### ServingGroupAntiAffinity
+
+
+
+ServingGroupAntiAffinity defines required and preferred separation rules
+between ServingGroups of one ModelServing.
+
+
+
+_Appears in:_
+- [NetworkTopology](#networktopology)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `required` _[ServingGroupAffinityTerm](#servinggroupaffinityterm) array_ | Required contains hard anti-affinity terms that must all be satisfied. |  |  |
+| `preferred` _[ServingGroupAffinityTerm](#servinggroupaffinityterm) array_ | Preferred contains weighted soft anti-affinity terms. |  |  |
 
 
 #### Target

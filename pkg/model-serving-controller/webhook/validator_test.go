@@ -212,6 +212,209 @@ func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.
 	}
 }
 
+func TestValidateTopologyAffinity(t *testing.T) {
+	newModelServing := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			Spec: workloadv1alpha1.ModelServingSpec{
+				SchedulerName: "volcano",
+				Template: workloadv1alpha1.ServingGroup{
+					Roles: []workloadv1alpha1.Role{
+						{Name: "prefill", Replicas: ptr.To[int32](2)},
+						{Name: "decode", Replicas: ptr.To[int32](2)},
+					},
+					NetworkTopology: &workloadv1alpha1.NetworkTopology{
+						ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{
+							Required: []workloadv1alpha1.ServingGroupAffinityTerm{{TopologyTierName: "communication-domain"}},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name         string
+		mutate       func(*workloadv1alpha1.ModelServing)
+		wantContains []string
+	}{
+		{
+			name: "valid required and preferred rules",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				weight := int32(60)
+				nodeTier := int32(0)
+				ms.Spec.Template.NetworkTopology.ServingGroupAntiAffinity.Preferred = []workloadv1alpha1.ServingGroupAffinityTerm{
+					{Weight: &weight, TopologyTier: &nodeTier},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTierName: "rack"},
+					},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAntiAffinity = &workloadv1alpha1.RoleAntiAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill"}, TopologyTierName: "node"},
+						{Roles: []string{"decode"}, TopologyTierName: "node"},
+					},
+				}
+			},
+		},
+		{
+			name: "network topology without affinity rules preserves existing validation behavior",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.SchedulerName = "default-scheduler"
+				ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{}
+			},
+		},
+		{
+			name: "requires volcano scheduler",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.SchedulerName = "default-scheduler"
+			},
+			wantContains: []string{"affinity rules require schedulerName to be volcano"},
+		},
+		{
+			name: "rejects empty topology affinity",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{
+					ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{},
+				}
+			},
+			wantContains: []string{"at least one topology affinity term"},
+		},
+		{
+			name: "rejects missing and duplicate tiers",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				tier := int32(1)
+				ms.Spec.Template.NetworkTopology.ServingGroupAntiAffinity.Required = []workloadv1alpha1.ServingGroupAffinityTerm{
+					{},
+					{TopologyTierName: "rack", TopologyTier: &tier},
+				}
+			},
+			wantContains: []string{
+				"spec.template.networkTopology.servingGroupAntiAffinity.required[0]",
+				"spec.template.networkTopology.servingGroupAntiAffinity.required[1]",
+				"exactly one of topologyTierName and topologyTier",
+			},
+		},
+		{
+			name: "validates required and preferred weights",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				requiredWeight := int32(1)
+				invalidPreferredWeight := int32(101)
+				ms.Spec.Template.NetworkTopology.ServingGroupAntiAffinity.Required[0].Weight = &requiredWeight
+				ms.Spec.Template.NetworkTopology.ServingGroupAntiAffinity.Preferred = []workloadv1alpha1.ServingGroupAffinityTerm{
+					{TopologyTierName: "rack"},
+					{Weight: &invalidPreferredWeight, TopologyTierName: "rack"},
+				}
+			},
+			wantContains: []string{
+				"weight must not be set in a required term",
+				"weight is required in a preferred term",
+				"must be between 1 and 100",
+			},
+		},
+		{
+			name: "validates Role references cardinality and uniqueness",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill"}, TopologyTierName: "rack"},
+						{Roles: []string{"prefill", "missing", "prefill"}, TopologyTierName: "rack"},
+					},
+				}
+			},
+			wantContains: []string{
+				"must contain at least 2 distinct Role name(s)",
+				"Not found",
+				"Duplicate value",
+			},
+		},
+		{
+			name: "defers named-tier relationship validation to Volcano",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTierName: "rack"},
+					},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAntiAffinity = &workloadv1alpha1.RoleAntiAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTierName: "rack"},
+					},
+				}
+			},
+		},
+		{
+			name: "allows equal numeric Role tiers",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				rackTier := int32(1)
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTier: &rackTier},
+					},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAntiAffinity = &workloadv1alpha1.RoleAntiAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTier: &rackTier},
+					},
+				}
+			},
+		},
+		{
+			name: "rejects broader numeric anti-affinity tier",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				nodeTier := int32(0)
+				rackTier := int32(1)
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTier: &nodeTier},
+					},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAntiAffinity = &workloadv1alpha1.RoleAntiAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTier: &rackTier},
+					},
+				}
+			},
+			wantContains: []string{"broader anti-affinity tier"},
+		},
+		{
+			name: "allows affinity at rack and anti-affinity at node",
+			mutate: func(ms *workloadv1alpha1.ModelServing) {
+				nodeTier := int32(0)
+				rackTier := int32(1)
+				ms.Spec.Template.NetworkTopology.RoleAffinity = &workloadv1alpha1.RoleAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill", "decode"}, TopologyTier: &rackTier},
+					},
+				}
+				ms.Spec.Template.NetworkTopology.RoleAntiAffinity = &workloadv1alpha1.RoleAntiAffinity{
+					Required: []workloadv1alpha1.RoleAffinityTerm{
+						{Roles: []string{"prefill"}, TopologyTier: &nodeTier},
+						{Roles: []string{"decode"}, TopologyTier: &nodeTier},
+					},
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := newModelServing()
+			tt.mutate(ms)
+			errs := validateTopologyAffinity(ms)
+			if len(tt.wantContains) == 0 {
+				assert.Empty(t, errs)
+				return
+			}
+			combined := errs.ToAggregate().Error()
+			for _, expected := range tt.wantContains {
+				assert.Contains(t, combined, expected)
+			}
+		})
+	}
+}
+
 func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	replicas := int32(3)
 	type args struct {

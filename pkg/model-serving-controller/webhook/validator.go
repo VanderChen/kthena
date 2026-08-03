@@ -89,6 +89,7 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
+	allErrs = append(allErrs, validateTopologyAffinity(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 
@@ -314,6 +315,216 @@ func validateGangPolicy(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	}
 
 	return allErrs
+}
+
+// validateTopologyAffinity validates required/preferred topology terms and the
+// Role references that cannot be expressed completely in the CRD schema.
+func validateTopologyAffinity(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	var allErrs field.ErrorList
+	networkTopology := ms.Spec.Template.NetworkTopology
+	if networkTopology == nil ||
+		(networkTopology.ServingGroupAntiAffinity == nil && networkTopology.RoleAffinity == nil && networkTopology.RoleAntiAffinity == nil) {
+		return allErrs
+	}
+
+	topologyPath := field.NewPath("spec").Child("template").Child("networkTopology")
+	if ms.Spec.SchedulerName != "volcano" {
+		allErrs = append(allErrs, field.Invalid(
+			topologyPath,
+			networkTopology,
+			"networkTopology affinity rules require schedulerName to be volcano",
+		))
+	}
+
+	hasTerms := false
+	if antiAffinity := networkTopology.ServingGroupAntiAffinity; antiAffinity != nil {
+		path := topologyPath.Child("servingGroupAntiAffinity")
+		hasTerms = hasTerms || len(antiAffinity.Required) > 0 || len(antiAffinity.Preferred) > 0
+		for i := range antiAffinity.Required {
+			termPath := path.Child("required").Index(i)
+			allErrs = append(allErrs, validateTopologyTerm(
+				antiAffinity.Required[i].Weight,
+				antiAffinity.Required[i].TopologyTierName,
+				antiAffinity.Required[i].TopologyTier,
+				true,
+				termPath,
+			)...)
+		}
+		for i := range antiAffinity.Preferred {
+			termPath := path.Child("preferred").Index(i)
+			allErrs = append(allErrs, validateTopologyTerm(
+				antiAffinity.Preferred[i].Weight,
+				antiAffinity.Preferred[i].TopologyTierName,
+				antiAffinity.Preferred[i].TopologyTier,
+				false,
+				termPath,
+			)...)
+		}
+	}
+
+	roleReplicas := make(map[string]int32, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		roleReplicas[role.Name] = replicasOrDefault(role.Replicas)
+	}
+
+	if affinity := networkTopology.RoleAffinity; affinity != nil {
+		path := topologyPath.Child("roleAffinity")
+		hasTerms = hasTerms || len(affinity.Required) > 0 || len(affinity.Preferred) > 0
+		allErrs = append(allErrs, validateRoleAffinityTerms(affinity.Required, roleReplicas, true, true, path.Child("required"))...)
+		allErrs = append(allErrs, validateRoleAffinityTerms(affinity.Preferred, roleReplicas, false, true, path.Child("preferred"))...)
+	}
+
+	if antiAffinity := networkTopology.RoleAntiAffinity; antiAffinity != nil {
+		path := topologyPath.Child("roleAntiAffinity")
+		hasTerms = hasTerms || len(antiAffinity.Required) > 0 || len(antiAffinity.Preferred) > 0
+		allErrs = append(allErrs, validateRoleAffinityTerms(antiAffinity.Required, roleReplicas, true, false, path.Child("required"))...)
+		allErrs = append(allErrs, validateRoleAffinityTerms(antiAffinity.Preferred, roleReplicas, false, false, path.Child("preferred"))...)
+	}
+
+	if !hasTerms {
+		allErrs = append(allErrs, field.Required(topologyPath, "at least one topology affinity term must be configured"))
+	}
+
+	allErrs = append(allErrs, validateRequiredRoleTopologyConflicts(networkTopology, roleReplicas, topologyPath)...)
+	return allErrs
+}
+
+func validateTopologyTerm(weight *int32, topologyTierName string, topologyTier *int32, required bool, termPath *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+
+	if (topologyTierName != "") == (topologyTier != nil) {
+		allErrs = append(allErrs, field.Invalid(
+			termPath,
+			"",
+			"exactly one of topologyTierName and topologyTier must be set",
+		))
+	}
+	if topologyTier != nil && *topologyTier < 0 {
+		allErrs = append(allErrs, field.Invalid(termPath.Child("topologyTier"), *topologyTier, "must be greater than or equal to 0"))
+	}
+
+	if required {
+		if weight != nil {
+			allErrs = append(allErrs, field.Forbidden(termPath.Child("weight"), "weight must not be set in a required term"))
+		}
+		return allErrs
+	}
+
+	if weight == nil {
+		allErrs = append(allErrs, field.Required(termPath.Child("weight"), "weight is required in a preferred term"))
+	} else if *weight < 1 || *weight > 100 {
+		allErrs = append(allErrs, field.Invalid(termPath.Child("weight"), *weight, "must be between 1 and 100"))
+	}
+	return allErrs
+}
+
+func validateRoleAffinityTerms(
+	terms []workloadv1alpha1.RoleAffinityTerm,
+	roleReplicas map[string]int32,
+	required bool,
+	affinity bool,
+	termsPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+
+	for i := range terms {
+		term := &terms[i]
+		termPath := termsPath.Index(i)
+		allErrs = append(allErrs, validateTopologyTerm(
+			term.Weight,
+			term.TopologyTierName,
+			term.TopologyTier,
+			required,
+			termPath,
+		)...)
+
+		minimumRoles := 1
+		if affinity {
+			minimumRoles = 2
+		}
+		if len(term.Roles) < minimumRoles {
+			allErrs = append(allErrs, field.Invalid(
+				termPath.Child("roles"),
+				term.Roles,
+				fmt.Sprintf("must contain at least %d distinct Role name(s)", minimumRoles),
+			))
+		}
+
+		seen := make(map[string]struct{}, len(term.Roles))
+		for roleIndex, roleName := range term.Roles {
+			rolePath := termPath.Child("roles").Index(roleIndex)
+			if _, exists := roleReplicas[roleName]; !exists {
+				allErrs = append(allErrs, field.NotFound(rolePath, roleName))
+			}
+			if _, exists := seen[roleName]; exists {
+				allErrs = append(allErrs, field.Duplicate(rolePath, roleName))
+				continue
+			}
+			seen[roleName] = struct{}{}
+		}
+	}
+
+	return allErrs
+}
+
+// validateRequiredRoleTopologyConflicts rejects hard constraints whose tier
+// relationship and Role pairs make them impossible to satisfy statically.
+func validateRequiredRoleTopologyConflicts(
+	networkTopology *workloadv1alpha1.NetworkTopology,
+	roleReplicas map[string]int32,
+	topologyPath *field.Path,
+) field.ErrorList {
+	var allErrs field.ErrorList
+	if networkTopology.RoleAffinity == nil || networkTopology.RoleAntiAffinity == nil {
+		return allErrs
+	}
+
+	for antiIndex, antiTerm := range networkTopology.RoleAntiAffinity.Required {
+		for affinityIndex, affinityTerm := range networkTopology.RoleAffinity.Required {
+			if !topologyTiersConflict(affinityTerm, antiTerm) || !roleTermsConflict(affinityTerm.Roles, antiTerm.Roles, roleReplicas) {
+				continue
+			}
+			allErrs = append(allErrs, field.Invalid(
+				topologyPath.Child("roleAntiAffinity").Child("required").Index(antiIndex),
+				antiTerm,
+				fmt.Sprintf("conflicts with roleAffinity.required[%d] at a broader anti-affinity tier", affinityIndex),
+			))
+		}
+	}
+	return allErrs
+}
+
+func topologyTiersConflict(affinityTerm, antiAffinityTerm workloadv1alpha1.RoleAffinityTerm) bool {
+	if affinityTerm.TopologyTier != nil && antiAffinityTerm.TopologyTier != nil {
+		return *affinityTerm.TopologyTier < *antiAffinityTerm.TopologyTier
+	}
+	return false
+}
+
+func roleTermsConflict(affinityRoles, antiAffinityRoles []string, roleReplicas map[string]int32) bool {
+	affinitySet := make(map[string]struct{}, len(affinityRoles))
+	for _, roleName := range affinityRoles {
+		affinitySet[roleName] = struct{}{}
+	}
+
+	if len(antiAffinityRoles) == 1 {
+		roleName := antiAffinityRoles[0]
+		_, included := affinitySet[roleName]
+		return included && roleReplicas[roleName] > 1
+	}
+
+	sharedRolesWithReplicas := 0
+	seen := make(map[string]struct{}, len(antiAffinityRoles))
+	for _, roleName := range antiAffinityRoles {
+		if _, duplicate := seen[roleName]; duplicate {
+			continue
+		}
+		seen[roleName] = struct{}{}
+		if _, included := affinitySet[roleName]; included && roleReplicas[roleName] > 0 {
+			sharedRolesWithReplicas++
+		}
+	}
+	return sharedRolesWithReplicas >= 2
 }
 
 // validateWorkerReplicas validates worker replicas in roles

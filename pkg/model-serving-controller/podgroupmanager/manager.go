@@ -61,6 +61,7 @@ type Manager struct {
 	volcanoClient                volcanoclient.Interface
 	hasPodGroupCRD               atomic.Bool
 	hasSubGroupPolicy            atomic.Bool
+	hasTopologyAffinity          atomic.Bool
 	podGroupInformerInitCallback func(cache.SharedIndexInformer)
 
 	CrdInformer cache.SharedIndexInformer
@@ -81,6 +82,7 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 
 	newManager.hasPodGroupCRD.Store(false)
 	newManager.hasSubGroupPolicy.Store(false)
+	newManager.hasTopologyAffinity.Store(false)
 
 	crd, err := apiextClient.ApiextensionsV1().CustomResourceDefinitions().Get(
 		context.TODO(),
@@ -94,6 +96,7 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 			// If PodGroup CRD is not found, we can safely assume that
 			// gang scheduling is not supported.
 			newManager.hasSubGroupPolicy.Store(false)
+			newManager.hasTopologyAffinity.Store(false)
 		} else {
 			klog.Errorf("failed to get PodGroup CRD: %v", err)
 		}
@@ -225,6 +228,9 @@ func (m *Manager) stopPodGroupInformer() {
 // or updates it if it does.
 // Returns an error and a requeue duration if there is an error.
 func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
+	if err := m.validateTopologyAffinityCapabilities(ms); err != nil {
+		return err, 0
+	}
 	if !m.shouldCreatePodGroup(ms) {
 		return nil, 0
 	}
@@ -248,7 +254,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 	return m.updatePodGroupIfNeeded(ctx, podGroup, ms), 0
 }
 
-// shouldCreatePodGroup checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
+// shouldCreatePodGroup checks whether Volcano PodGroup scheduling is enabled for the ModelServing.
 // These advanced scheduling features are only effective when used with the "volcano" scheduler.
 func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
 	// If PodGroup CRD is not present, gang scheduling is not supported.
@@ -303,6 +309,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 	}
 
 	syncPodGroupNetworkTopology(ms, &podGroup.Spec)
+	syncPodGroupTopologyAffinity(ms, &podGroup.Spec)
 
 	if m.hasSubGroupPolicy.Load() {
 		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
@@ -451,6 +458,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 		updated.Spec.Queue = extractQueueName(ms)
 
 		syncPodGroupNetworkTopology(ms, &updated.Spec)
+		syncPodGroupTopologyAffinity(ms, &updated.Spec)
 
 		// Apply network topology policy
 		if m.hasSubGroupPolicy.Load() {
@@ -546,6 +554,7 @@ func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition
 		klog.Info("[CRD Deleted] PodGroup CRD removed")
 		m.hasPodGroupCRD.Store(false)
 		m.hasSubGroupPolicy.Store(false)
+		m.hasTopologyAffinity.Store(false)
 		m.stopPodGroupInformer()
 		return
 	}
@@ -554,6 +563,7 @@ func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition
 		klog.Warning("PodGroup CRD detected but volcano client is not initialized; disabling PodGroup support")
 		m.hasPodGroupCRD.Store(false)
 		m.hasSubGroupPolicy.Store(false)
+		m.hasTopologyAffinity.Store(false)
 		return
 	}
 
@@ -566,6 +576,13 @@ func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition
 		klog.Info("PodGroup CRD does not have subGroupPolicy feature")
 		m.hasSubGroupPolicy.Store(false)
 	}
+	if podGroupCRDHasTopologyAffinity(crd) {
+		klog.Info("PodGroup CRD has topologyAffinity feature")
+		m.hasTopologyAffinity.Store(true)
+	} else {
+		klog.Info("PodGroup CRD does not have topologyAffinity feature")
+		m.hasTopologyAffinity.Store(false)
+	}
 
 	if initErr := m.initPodGroupInformer(); initErr != nil {
 		klog.Errorf("failed to initialize PodGroup informer: %v", initErr)
@@ -574,6 +591,14 @@ func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition
 }
 
 func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
+	return podGroupCRDHasSpecProperty(crd, "subGroupPolicy")
+}
+
+func podGroupCRDHasTopologyAffinity(crd *apiextv1.CustomResourceDefinition) bool {
+	return podGroupCRDHasSpecProperty(crd, "topologyAffinity")
+}
+
+func podGroupCRDHasSpecProperty(crd *apiextv1.CustomResourceDefinition, property string) bool {
 	if crd == nil {
 		return false
 	}
@@ -589,11 +614,34 @@ func podGroupCRDHasSubGroup(crd *apiextv1.CustomResourceDefinition) bool {
 			continue
 		}
 
-		if _, ok := specProps.Properties["subGroupPolicy"]; ok {
+		if _, ok := specProps.Properties[property]; ok {
 			return true
 		}
 	}
 	return false
+}
+
+func (m *Manager) validateTopologyAffinityCapabilities(ms *workloadv1alpha1.ModelServing) error {
+	if ms == nil || !hasTopologyAffinityRules(ms.Spec.Template.NetworkTopology) {
+		return nil
+	}
+	if !m.hasPodGroupCRD.Load() {
+		return fmt.Errorf("ModelServing networkTopology affinity rules require the Volcano PodGroup CRD")
+	}
+	if !m.hasTopologyAffinity.Load() {
+		return fmt.Errorf("ModelServing networkTopology affinity rules require spec.topologyAffinity in the installed Volcano PodGroup CRD")
+	}
+
+	networkTopology := ms.Spec.Template.NetworkTopology
+	if (networkTopology.RoleAffinity != nil || networkTopology.RoleAntiAffinity != nil) && !m.hasSubGroupPolicy.Load() {
+		return fmt.Errorf("ModelServing role topology affinity requires spec.subGroupPolicy in the installed Volcano PodGroup CRD")
+	}
+	return nil
+}
+
+func hasTopologyAffinityRules(networkTopology *workloadv1alpha1.NetworkTopology) bool {
+	return networkTopology != nil &&
+		(networkTopology.ServingGroupAntiAffinity != nil || networkTopology.RoleAffinity != nil || networkTopology.RoleAntiAffinity != nil)
 }
 
 // syncPodGroupNetworkTopology sets or clears PodGroup group-level NetworkTopology
@@ -606,10 +654,94 @@ func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedu
 	spec.NetworkTopology = nil
 }
 
+// syncPodGroupTopologyAffinity converts the ModelServing-native topology rules
+// to Volcano PodGroup topology-affinity terms and clears removed rules.
+func syncPodGroupTopologyAffinity(ms *workloadv1alpha1.ModelServing, spec *schedulingv1beta1.PodGroupSpec) {
+	networkTopology := ms.Spec.Template.NetworkTopology
+	if !hasTopologyAffinityRules(networkTopology) {
+		spec.TopologyAffinity = nil
+		return
+	}
+
+	converted := &schedulingv1beta1.TopologyAffinitySpec{}
+	if networkTopology.ServingGroupAntiAffinity != nil {
+		converted.PodGroupAntiAffinity = &schedulingv1beta1.PodGroupAntiAffinity{
+			Required:  convertServingGroupAffinityTerms(ms, networkTopology.ServingGroupAntiAffinity.Required),
+			Preferred: convertServingGroupAffinityTerms(ms, networkTopology.ServingGroupAntiAffinity.Preferred),
+		}
+	}
+	if networkTopology.RoleAffinity != nil {
+		converted.SubGroupAffinity = &schedulingv1beta1.SubGroupAffinity{
+			Required:  convertRoleAffinityTerms(networkTopology.RoleAffinity.Required),
+			Preferred: convertRoleAffinityTerms(networkTopology.RoleAffinity.Preferred),
+		}
+	}
+	if networkTopology.RoleAntiAffinity != nil {
+		converted.SubGroupAntiAffinity = &schedulingv1beta1.SubGroupAntiAffinity{
+			Required:  convertRoleAffinityTerms(networkTopology.RoleAntiAffinity.Required),
+			Preferred: convertRoleAffinityTerms(networkTopology.RoleAntiAffinity.Preferred),
+		}
+	}
+	spec.TopologyAffinity = converted
+}
+
+func convertServingGroupAffinityTerms(ms *workloadv1alpha1.ModelServing, terms []workloadv1alpha1.ServingGroupAffinityTerm) []schedulingv1beta1.PodGroupAffinityTerm {
+	if len(terms) == 0 {
+		return nil
+	}
+
+	converted := make([]schedulingv1beta1.PodGroupAffinityTerm, 0, len(terms))
+	for _, term := range terms {
+		converted = append(converted, schedulingv1beta1.PodGroupAffinityTerm{
+			Weight: topologyAffinityWeight(term.Weight),
+			PodGroupSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				},
+			},
+			TopologyTierName: term.TopologyTierName,
+			TopologyTier:     copyInt32Pointer(term.TopologyTier),
+		})
+	}
+	return converted
+}
+
+func convertRoleAffinityTerms(terms []workloadv1alpha1.RoleAffinityTerm) []schedulingv1beta1.SubGroupAffinityTerm {
+	if len(terms) == 0 {
+		return nil
+	}
+
+	converted := make([]schedulingv1beta1.SubGroupAffinityTerm, 0, len(terms))
+	for _, term := range terms {
+		converted = append(converted, schedulingv1beta1.SubGroupAffinityTerm{
+			SubGroups:        append([]string(nil), term.Roles...),
+			Weight:           topologyAffinityWeight(term.Weight),
+			TopologyTierName: term.TopologyTierName,
+			TopologyTier:     copyInt32Pointer(term.TopologyTier),
+		})
+	}
+	return converted
+}
+
+func topologyAffinityWeight(weight *int32) int32 {
+	if weight == nil {
+		return 0
+	}
+	return *weight
+}
+
+func copyInt32Pointer(value *int32) *int32 {
+	if value == nil {
+		return nil
+	}
+	return ptr.To(*value)
+}
+
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
 	return current.Spec.MinMember != updated.Spec.MinMember ||
 		!reflect.DeepEqual(current.Spec.MinResources, updated.Spec.MinResources) ||
 		!reflect.DeepEqual(current.Spec.NetworkTopology, updated.Spec.NetworkTopology) ||
+		!reflect.DeepEqual(current.Spec.TopologyAffinity, updated.Spec.TopologyAffinity) ||
 		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy) ||
 		current.Spec.Queue != updated.Spec.Queue
 }
