@@ -224,6 +224,24 @@ _Appears in:_
 | `ratioConstraint` _[RoleRatioConstraint](#roleratioconstraint)_ | RatioConstraint defines the acceptable ratio range of a single role pair.<br />It enforces that replicas[numeratorRole] / replicas[denominatorRole] stays<br />within [minRatio, maxRatio] when denominator replica is non-zero. |  |  |
 
 
+#### EvictionStrategySpec
+
+
+
+EvictionStrategySpec defines the protection policy during node eviction.
+
+
+
+_Appears in:_
+- [RolloutStrategy](#rolloutstrategy)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `protectionLevel` _[ProtectionLevelType](#protectionleveltype)_ | ProtectionLevel defines the protection level: ServingGroup or Role.<br />- ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.<br />- Role: guarantees that the number of ready instances for each role is not below the threshold. | ServingGroup | Enum: [ServingGroup Role] <br /> |
+| `minAvailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MinAvailable defines the minimum number of available ServingGroup instances.<br />It is used only when protectionLevel is ServingGroup.<br />It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%). |  |  |
+| `roleMinAvailable` _object (keys:string, values:[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util))_ | RoleMinAvailable defines role-specific minimum available role instances.<br />It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.<br />If a role is absent from this map, it is not protected by the eviction budget.<br />Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%). |  |  |
+
+
 #### GangPolicy
 
 
@@ -860,6 +878,23 @@ _Appears in:_
 | `serverURL` _string_ | ServerURL is the base URL of the Prometheus HTTP API server.<br />Example: "http://prometheus.monitoring.svc:9090". |  | Format: uri <br />MinLength: 1 <br /> |
 | `query` _string_ | Query is a PromQL instant-query expression. It must evaluate to a single<br />scalar or a one-element vector, e.g. "avg(rate(vllm:request_latency[1m]))".<br />More Query details refer to https://prometheus.io/docs/prometheus/latest/querying/basics |  | MinLength: 1 <br /> |
 | `auth` _[PrometheusAuth](#prometheusauth)_ | Auth holds optional authentication configuration for the Prometheus server. |  |  |
+
+
+#### ProtectionLevelType
+
+_Underlying type:_ _string_
+
+ProtectionLevelType defines the level of protection during eviction.
+
+
+
+_Appears in:_
+- [EvictionStrategySpec](#evictionstrategyspec)
+
+| Field | Description |
+| --- | --- |
+| `ServingGroup` | ProtectionLevelServingGroup guarantees that the number of ready ServingGroups is not below the threshold.<br /> |
+| `Role` | ProtectionLevelRole guarantees that the number of ready instances for each role is not below the threshold.<br /> |
 
 
 #### RecoveryPolicy
