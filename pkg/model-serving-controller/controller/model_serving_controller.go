@@ -2076,7 +2076,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	}
 
 	for i := 1; i <= int(role.WorkerReplicas); i++ {
-		workerPod := utils.GenerateWorkerPod(role, ms, entryPod, servingGroupName, roleIndex, i, revision, roleTemplateHash)
+		workerPod := utils.GenerateWorkerPod(role, ms, servingGroupName, roleIndex, i, revision, roleTemplateHash)
 		c.podGroupManager.AnnotatePodWithPodGroup(workerPod, ms, servingGroupName, taskName)
 		if err := c.createPod(ctx, ms, servingGroupName, role.Name, roleID, role.DeepCopy(), workerPod, false, chain, "worker"); err != nil {
 			return err
