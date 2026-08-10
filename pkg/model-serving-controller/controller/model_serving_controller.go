@@ -1013,6 +1013,11 @@ func (c *ModelServingController) emitRoleStatusEvent(
 
 func (c *ModelServingController) getModelServingAndResourceDetails(resource metav1.Object) (*workloadv1alpha1.ModelServing, string, string, string) {
 	ms, servingGroupName, err := c.getModelServingByChildResource(resource)
+	if apierrors.IsNotFound(err) {
+		modelServingName, groupName, _ := utils.GetModelServingAndGroupByLabel(resource.GetLabels())
+		ms, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(resource.GetNamespace()).Get(context.TODO(), modelServingName, metav1.GetOptions{})
+		servingGroupName = groupName
+	}
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			klog.V(4).Infof("modelServing of svc %s/%s has been deleted", resource.GetNamespace(), resource.GetName())
