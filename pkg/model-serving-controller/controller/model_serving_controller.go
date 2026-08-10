@@ -1508,6 +1508,9 @@ func (c *ModelServingController) getModelServingByChildResource(resource metav1.
 		return nil, "", fmt.Errorf("cannot get modelServing name and ServingGroup name from resource %s/%s", resource.GetNamespace(), resource.GetName())
 	}
 	ms, err := c.modelServingLister.ModelServings(resource.GetNamespace()).Get(modelServingName)
+	if apierrors.IsNotFound(err) {
+		ms, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(resource.GetNamespace()).Get(context.TODO(), modelServingName, metav1.GetOptions{})
+	}
 	if err != nil {
 		return nil, "", err
 	}

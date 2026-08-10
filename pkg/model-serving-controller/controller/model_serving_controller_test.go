@@ -322,6 +322,39 @@ func TestDeletePodGroupOwnerMismatchDoesNotEnqueue(t *testing.T) {
 	assertQueueStaysEmpty(t, controller.workqueue, 200*time.Millisecond)
 }
 
+func TestGetModelServingByChildResourceFallsBackToClientOnCacheMiss(t *testing.T) {
+	ms := newModelServingForDeleteTest("default", "ms")
+	kthenaClient := kthenafake.NewSimpleClientset(ms)
+	modelServingInformer := informersv1alpha1.NewSharedInformerFactory(kthenaClient, 0).
+		Workload().V1alpha1().ModelServings()
+	controller := &ModelServingController{
+		modelServingClient: kthenaClient,
+		modelServingLister: modelServingInformer.Lister(),
+	}
+
+	resources := []metav1.Object{
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: ms.Namespace,
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+				workloadv1alpha1.RoleLabelKey:             "role",
+				workloadv1alpha1.RoleIDKey:                "role-0",
+			},
+		}},
+		newPodGroupForDeleteTest(ms, "ms-0", ms.UID),
+	}
+
+	for _, resource := range resources {
+		actualMS, groupName, err := controller.getModelServingByChildResource(resource)
+		require.NoError(t, err)
+		require.NotNil(t, actualMS)
+		assert.Equal(t, ms.UID, actualMS.UID)
+		assert.Equal(t, "ms-0", groupName)
+	}
+}
+
 func TestIsServingGroupOutdated(t *testing.T) {
 	ns := "test-ns"
 	groupName := "test-group"
