@@ -1729,6 +1729,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), roleTemplateHash, roleName, roleID)
 
 	// Check and update role status to Running when all pods in the role are ready
+	roleBecameRunning := false
 	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
 	if err != nil {
 		klog.Warningf("failed to check role %s/%s readiness, skipping role status update: %v", roleName, roleID, err)
@@ -1738,6 +1739,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 			if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleRunning); err != nil {
 				klog.Warningf("failed to update role %s/%s status to Running: %v", roleName, roleID, err)
 			} else {
+				roleBecameRunning = true
 				klog.V(2).Infof("Update role %s/%s status to Running", roleName, roleID)
 				// Emit event for role transitioning to Running
 				message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Running", roleName, roleID, servingGroupName)
@@ -1761,6 +1763,12 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		c.enqueueModelServing(ms)
 	} else {
 		klog.V(4).Infof("ServingGroup %s still creating", servingGroupName)
+		// A Role maxSurge replica makes the Role ready before the ServingGroup
+		// replica count contracts to its declared size. Reconcile immediately so
+		// RoleRollingUpdate can spend the newly available deletion budget.
+		if roleBecameRunning {
+			c.enqueueModelServing(ms)
+		}
 	}
 	return nil
 }

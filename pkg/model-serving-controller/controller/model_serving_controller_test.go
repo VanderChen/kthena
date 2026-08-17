@@ -7243,6 +7243,8 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 		newPodWorkerID     int
 		initialRoleStatus  datastore.RoleStatus
 		expectedRoleStatus datastore.RoleStatus
+		specRoleReplicas   int32
+		expectEnqueued     bool
 	}{
 		{
 			description:    "single entry pod becomes ready - role should transition to Running",
@@ -7257,6 +7259,16 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			newPodWorkerID:     0,
 			initialRoleStatus:  datastore.RoleCreating,
 			expectedRoleStatus: datastore.RoleRunning,
+		},
+		{
+			description:        "ready role is enqueued when ServingGroup replica count has not converged",
+			workerReplicas:     0,
+			newPodIsEntry:      true,
+			newPodWorkerID:     0,
+			initialRoleStatus:  datastore.RoleCreating,
+			expectedRoleStatus: datastore.RoleRunning,
+			specRoleReplicas:   2,
+			expectEnqueued:     true,
 		},
 		{
 			description:    "entry pod ready but workers not ready - role should stay Creating",
@@ -7381,6 +7393,11 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			// Create store and add initial role status
 			store := datastore.New()
 
+			roleReplicas := tt.specRoleReplicas
+			if roleReplicas == 0 {
+				roleReplicas = 1
+			}
+
 			// Create ModelServing
 			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
@@ -7394,7 +7411,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           roleName,
-								Replicas:       ptr.To[int32](1),
+								Replicas:       ptr.To(roleReplicas),
 								WorkerReplicas: tt.workerReplicas,
 								EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 									Spec: corev1.PodSpec{
@@ -7540,6 +7557,9 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			)
 			assert.Equal(t, tt.expectedRoleStatus, actualRoleStatus,
 				"Role status mismatch: expected %s, got %s", tt.expectedRoleStatus, actualRoleStatus)
+			if tt.expectEnqueued {
+				assert.Positive(t, controller.workqueue.Len(), "ModelServing should be enqueued when a Role becomes ready")
+			}
 		})
 	}
 }
