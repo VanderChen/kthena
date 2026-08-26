@@ -221,7 +221,39 @@ func TestGetMaxUnavailable(t *testing.T) {
 					},
 				},
 			},
-			expectedResult: 0,
+			expectedResult: 1,
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 20% rounds down to minimum 1",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("20%")),
+						},
+					},
+				},
+			},
+			expectedResult: 1,
+			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as percentage - 1% rounds down to minimum 1",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("1%")),
+						},
+					},
+				},
+			},
+			expectedResult: 1,
 			expectError:    false,
 		},
 		{
@@ -285,8 +317,23 @@ func TestGetMaxUnavailable(t *testing.T) {
 					},
 				},
 			},
-			expectedResult: 0, // 0% of 10 is 0
+			expectedResult: 1, // Defensive fallback; admission rejects explicit 0%.
 			expectError:    false,
+		},
+		{
+			name: "MaxUnavailable as invalid percentage",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("invalid")),
+						},
+					},
+				},
+			},
+			expectError: true,
 		},
 	}
 

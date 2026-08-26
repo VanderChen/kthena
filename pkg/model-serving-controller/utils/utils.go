@@ -598,7 +598,16 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 		}
 	}
 	// Calculate maxUnavailable as absolute numbers
-	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+	maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+	if err != nil {
+		return 0, err
+	}
+	// A non-zero percentage can round down to zero for a small replica count.
+	// Keep the effective value at least one so rolling updates can make progress.
+	if maxUnavailableValue < 1 {
+		maxUnavailableValue = 1
+	}
+	return maxUnavailableValue, nil
 }
 
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {

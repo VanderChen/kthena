@@ -106,6 +106,7 @@ func TestValidPodNameLength(t *testing.T) {
 
 func TestValidateRollingUpdateConfiguration(t *testing.T) {
 	replicas := int32(3)
+	oneReplica := int32(1)
 	type args struct {
 		ms *workloadv1alpha1.ModelServing
 	}
@@ -170,7 +171,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			},
 		},
 		{
-			name: "both maxUnavailable and maxSurge are zero",
+			name: "integer zero maxUnavailable",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -193,6 +194,60 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					"maxUnavailable cannot be 0",
 				),
 			},
+		},
+		{
+			name: "percentage zero maxUnavailable",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: ptr.To(intstr.FromString("0%")),
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList{
+				field.Invalid(
+					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
+					"",
+					"maxUnavailable cannot be 0",
+				),
+			},
+		},
+		{
+			name: "positive percentage rounding down to zero",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &replicas,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: ptr.To(intstr.FromString("20%")),
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
+		},
+		{
+			name: "one percent with one replica",
+			args: args{
+				ms: &workloadv1alpha1.ModelServing{
+					Spec: workloadv1alpha1.ModelServingSpec{
+						Replicas: &oneReplica,
+						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+							RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+								MaxUnavailable: ptr.To(intstr.FromString("1%")),
+							},
+						},
+					},
+				},
+			},
+			want: field.ErrorList(nil),
 		},
 		{
 			name: "valid partition - within range",

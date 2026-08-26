@@ -153,8 +153,11 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
 	}
 
-	if ms.Spec.Replicas != nil && maxUnavailable != nil {
-		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, int(*ms.Spec.Replicas), false)
+	if maxUnavailable != nil {
+		// Scaling a percentage against 100 yields the configured percentage value
+		// itself. Validate that value instead of the replica-scaled runtime value,
+		// which may legitimately round down to zero for small replica counts.
+		maxUnavailableValue, err := intstr.GetScaledValueFromIntOrPercent(maxUnavailable, 100, false)
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
 		} else if maxUnavailableValue == 0 {
