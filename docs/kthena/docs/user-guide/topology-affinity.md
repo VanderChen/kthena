@@ -141,6 +141,9 @@ installed PodGroup CRD lacks a required capability. Required rules may leave a
 workload pending when the cluster has too few topology domains or insufficient
 resources. Preferred rules may fall back to other placements.
 
-Updating topology affinity updates generated PodGroups but does not evict or
-migrate already-running Pods. The new rules apply to Pods scheduled after the
-update or recreated later.
+`spec.template.networkTopology` is immutable after ModelServing creation. The
+validating webhook rejects adding, removing, or changing its aggregation and
+affinity fields. ModelServing and Role replicas can still scale when the
+topology configuration is unchanged; this guarantees that Pods created during
+scale-out use the same constraints as existing Pods. To use a different
+topology policy, create a replacement ModelServing and migrate traffic to it.

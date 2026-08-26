@@ -142,6 +142,8 @@ type ServingGroup struct {
 
 	// NetworkTopology defines topology-aware aggregation and relationship
 	// policies for ServingGroups and Roles on the scheduler's HyperNode tree.
+	// The field is immutable after the ModelServing is created so Pods added by
+	// later scaling operations use the same topology constraints as existing Pods.
 	// +optional
 	NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
 

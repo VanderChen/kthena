@@ -17,15 +17,24 @@ limitations under the License.
 package webhook
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 
+	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/utils/ptr"
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
 func TestValidPodNameLength(t *testing.T) {
@@ -129,6 +138,119 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 	assert.False(t, allowed)
 	assert.Contains(t, reason, "spec.replicas")
 	assert.Contains(t, reason, "spec.template.roles[0].replicas")
+}
+
+func TestModelServingValidatorNetworkTopologyIsImmutableOnUpdate(t *testing.T) {
+	newModelServing := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			TypeMeta: v1.TypeMeta{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       "ModelServing",
+			},
+			ObjectMeta: v1.ObjectMeta{Name: "immutable-topology"},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas:      ptr.To[int32](1),
+				SchedulerName: "volcano",
+				Template: workloadv1alpha1.ServingGroup{
+					NetworkTopology: &workloadv1alpha1.NetworkTopology{
+						GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+							Mode: schedulingv1beta1.HardNetworkTopologyMode,
+						},
+						ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{
+							Required: []workloadv1alpha1.ServingGroupAffinityTerm{{TopologyTierName: "rack"}},
+						},
+					},
+					Roles: []workloadv1alpha1.Role{{
+						Name:     "predictor",
+						Replicas: ptr.To[int32](1),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "predictor", Image: "nginx:latest"}},
+						}},
+					}},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		mutate      func(oldModelServing, modelServing *workloadv1alpha1.ModelServing)
+		wantAllowed bool
+	}{
+		{
+			name: "allows ModelServing and Role scaling with unchanged topology",
+			mutate: func(_, modelServing *workloadv1alpha1.ModelServing) {
+				modelServing.Spec.Replicas = ptr.To[int32](2)
+				modelServing.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+			},
+			wantAllowed: true,
+		},
+		{
+			name: "rejects adding network topology",
+			mutate: func(oldModelServing, _ *workloadv1alpha1.ModelServing) {
+				oldModelServing.Spec.Template.NetworkTopology = nil
+			},
+		},
+		{
+			name: "rejects removing network topology",
+			mutate: func(_, modelServing *workloadv1alpha1.ModelServing) {
+				modelServing.Spec.Template.NetworkTopology = nil
+			},
+		},
+		{
+			name: "rejects changing aggregation policy",
+			mutate: func(_, modelServing *workloadv1alpha1.ModelServing) {
+				modelServing.Spec.Template.NetworkTopology.GroupPolicy.Mode = schedulingv1beta1.SoftNetworkTopologyMode
+			},
+		},
+		{
+			name: "rejects changing affinity policy",
+			mutate: func(_, modelServing *workloadv1alpha1.ModelServing) {
+				modelServing.Spec.Template.NetworkTopology.ServingGroupAntiAffinity.Required[0].TopologyTierName = "zone"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldModelServing := newModelServing()
+			modelServing := oldModelServing.DeepCopy()
+			tt.mutate(oldModelServing, modelServing)
+
+			oldRaw, err := json.Marshal(oldModelServing)
+			assert.NoError(t, err)
+			newRaw, err := json.Marshal(modelServing)
+			assert.NoError(t, err)
+
+			admissionReview := admissionv1.AdmissionReview{
+				TypeMeta: v1.TypeMeta{APIVersion: "admission.k8s.io/v1", Kind: "AdmissionReview"},
+				Request: &admissionv1.AdmissionRequest{
+					UID:       types.UID("immutable-topology-test"),
+					Operation: admissionv1.Update,
+					Object:    runtime.RawExtension{Raw: newRaw},
+					OldObject: runtime.RawExtension{Raw: oldRaw},
+				},
+			}
+			body, err := json.Marshal(admissionReview)
+			assert.NoError(t, err)
+
+			request := httptest.NewRequest(http.MethodPost, "/validate-workload-ai-v1alpha1-modelserving", bytes.NewReader(body))
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			NewModelServingValidator().Handle(response, request)
+
+			assert.Equal(t, http.StatusOK, response.Code)
+			var responseReview admissionv1.AdmissionReview
+			assert.NoError(t, json.Unmarshal(response.Body.Bytes(), &responseReview))
+			if assert.NotNil(t, responseReview.Response) {
+				assert.Equal(t, tt.wantAllowed, responseReview.Response.Allowed)
+				if !tt.wantAllowed && assert.NotNil(t, responseReview.Response.Result) {
+					assert.Contains(t, responseReview.Response.Result.Message, "spec.template.networkTopology")
+					assert.Contains(t, responseReview.Response.Result.Message, "field is immutable")
+				}
+			}
+		})
+	}
 }
 
 func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.T) {

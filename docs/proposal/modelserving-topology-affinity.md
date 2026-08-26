@@ -90,6 +90,8 @@ users.
    term shapes before generating a PodGroup.
 8. Fail clearly when the installed Volcano CRD or scheduler does not provide
    the required capability.
+9. Keep topology constraints consistent across Pods created before and after
+   ModelServing or Role scaling by making `networkTopology` immutable.
 
 #### Non-Goals
 
@@ -102,8 +104,8 @@ users.
    or NUMA-aware scheduling.
 6. Pairing Role replicas by ordinal, such as placing `prefill-0` with
    `decode-0`, while independently placing `prefill-1` with `decode-1`.
-7. Automatically evicting already-running Pods after a topology-affinity policy
-   changes.
+7. In-place migration between topology policies. A different topology policy
+   requires creating a replacement ModelServing.
 
 ### Proposal
 
@@ -267,9 +269,9 @@ roleAntiAffinity:
 2. Required rules can make a ModelServing unschedulable when there are not
    enough domains or resources. Kthena cannot validate domain capacity from the
    ModelServing object.
-3. Topology-affinity terms use scheduling-time semantics. Updating a generated
-   PodGroup affects pending or later-recreated Pods but does not move running
-   Pods automatically.
+3. Topology-affinity terms use scheduling-time semantics. The controller may
+   repair a generated PodGroup to match its immutable ModelServing policy, but
+   it does not move already-running Pods automatically.
 4. Role affinity and anti-affinity apply only within one ServingGroup/PodGroup.
 5. The initial implementation requires `schedulerName: volcano`.
 6. The installed PodGroup CRD must contain both `spec.topologyAffinity` and,
@@ -376,6 +378,7 @@ type ServingGroup struct {
 
     // NetworkTopology defines topology-aware aggregation and relationship
     // policies for ServingGroups and Roles on the scheduler's HyperNode tree.
+    // It is immutable after creation.
     // +optional
     NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
 }
@@ -550,7 +553,7 @@ The behavior is:
    and emits an actionable Event. The controller must not create the PodGroup
    after silently omitting the rule.
 5. `PodGroup.spec.topologyAffinity` participates in PodGroup change detection so
-   additions, updates, and removals are reconciled.
+   controller repairs and initial convergence preserve the immutable policy.
 
 #### Validation
 
@@ -571,19 +574,26 @@ required/preferred location or the Role list:
 8. Role anti-affinity terms contain at least one Role.
 9. Statically comparable hard affinity and anti-affinity tiers do not
    contradict each other.
+10. On UPDATE, `spec.template.networkTopology` is deeply equal to its value in
+    the old object. Adding, removing, or changing aggregation or relationship
+    fields is rejected as an immutable-field violation.
 
 Named-tier hierarchy and available domain capacity cannot be derived from the
 ModelServing object and remain scheduler-time validation and diagnostics.
 
 #### Update Semantics
 
-Adding, removing, or changing topology affinity updates generated PodGroups.
-The changed rule applies to Pods scheduled after that update. Existing bound
-Pods are not evicted or migrated automatically.
+`spec.template.networkTopology` is immutable after ModelServing creation. The
+validating webhook rejects adding, removing, or changing `groupPolicy`,
+`rolePolicy`, `servingGroupAntiAffinity`, `roleAffinity`, or
+`roleAntiAffinity`.
 
-Users who require immediate convergence must recreate or roll the affected
-ServingGroups. Automatic topology-driven rollout or migration is a separate
-design because it affects availability and disruption policy.
+This restriction prevents scale-out Pods from receiving different topology
+constraints than Pods that already belong to the same ModelServing. Scaling the
+ModelServing or individual Roles remains allowed when `networkTopology` is
+unchanged. A user who needs different topology constraints must create a
+replacement ModelServing and migrate traffic using the normal availability and
+rollout controls.
 
 #### Interaction with Other Scheduler Plugins
 
@@ -615,10 +625,12 @@ Unit and API tests should cover:
    `minSubGroups`.
 7. Role topology terms containing Role policy names only, without enumerating
    Role instance IDs.
-8. PodGroup creation, update, and clearing behavior.
+8. PodGroup creation and controller repair behavior.
 9. Fail-closed behavior with an older or incomplete PodGroup CRD.
 10. No behavior change when the affinity fields under `networkTopology` are
     absent.
+11. Webhook rejection when `networkTopology` is added, removed, or changed, and
+    successful ModelServing/Role scaling when it remains unchanged.
 
 Kind verification should use a HyperNode hierarchy containing enough domains
 to demonstrate:
