@@ -799,13 +799,13 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition := c.getPartition(ms)
-	for index, servingGroup := range servingGroupList {
+	for _, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
 			continue
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
-		isPartitionProtected := partition > 0 && index < partition
+		isPartitionProtected := partition > 0 && servingGroupOrdinal < partition
 
 		rolesToManage := ms.Spec.Template.Roles
 		revisionToUse := newRevision
@@ -824,7 +824,8 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 					if oldRoles, err := utils.GetRolesFromControllerRevision(cr); err != nil {
 						klog.Warningf("manageRole: failed to get roles from ControllerRevision %s for protected ServingGroup %s: %v", revisionToUse, servingGroup.Name, err)
 					} else {
-						rolesToManage = oldRoles
+						rolesToManage = mergeLatestRoleReplicas(oldRoles, ms.Spec.Template.Roles)
+						klog.V(4).Infof("manageRole: using historical templates from revision %s with latest replica counts for protected ServingGroup %s", revisionToUse, servingGroup.Name)
 					}
 				} else {
 					klog.Warningf("manageRole: ControllerRevision %s not found for protected ServingGroup %s, fallback to latest roles", revisionToUse, servingGroup.Name)
@@ -833,16 +834,42 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		}
 
 		for _, targetRole := range rolesToManage {
-			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
+			if err := c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
+// mergeLatestRoleReplicas keeps historical Role templates for partition-protected
+// ServingGroups while applying the latest independently scalable replica counts.
+func mergeLatestRoleReplicas(historicalRoles, latestRoles []workloadv1alpha1.Role) []workloadv1alpha1.Role {
+	latestRolesByName := make(map[string]workloadv1alpha1.Role, len(latestRoles))
+	for _, role := range latestRoles {
+		latestRolesByName[role.Name] = role
+	}
+
+	mergedRoles := make([]workloadv1alpha1.Role, 0, len(historicalRoles))
+	for i := range historicalRoles {
+		role := historicalRoles[i].DeepCopy()
+		if latestRole, ok := latestRolesByName[role.Name]; ok {
+			if latestRole.Replicas == nil {
+				role.Replicas = nil
+			} else {
+				replicas := *latestRole.Replicas
+				role.Replicas = &replicas
+			}
+		}
+		mergedRoles = append(mergedRoles, *role)
+	}
+	return mergedRoles
+}
+
 // scaleDownRoles handles Role scaling down with two-level priority-based selection:
 // 1. Primary: Not-ready roles (Creating, NotFound) are deleted first
 // 2. Secondary: Among roles with same status, lower deletion cost = delete first
-func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) {
+func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) error {
 	// Calculate priority information for all Roles
 	var roleScores []RoleWithScore
 
@@ -875,7 +902,7 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s scaling down", ms.Namespace+"/"+ms.Name, groupName, targetRole.Name)
 	if err != nil {
 		klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
-		return
+		return err
 	}
 
 	// Delete from beginning (not-ready, low cost, high index first)
@@ -884,13 +911,16 @@ func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloa
 		targetName := roleScores[i].Name
 		klog.V(2).Infof("Scaling down role %s (priority: %d, deletion cost: %d, index: %d)",
 			targetName, roleScores[i].Priority, roleScores[i].DeletionCost, roleScores[i].Index)
-		c.DeleteRole(ctx, ms, groupName, targetRole.Name, targetName)
+		if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, targetName); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // scaleUpRoles handles Role scaling up.
 // It creates new Roles with increasing indices starting from the current max index + 1.
-func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int, servingGroupOrdinal int, newRevision string) error {
 	startingIndex := 0
 	if len(roleList) > 0 {
 		_, ordinal := utils.GetParentNameAndOrdinal(roleList[len(roleList)-1].Name)
@@ -906,7 +936,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s scaling up", ms.Namespace+"/"+ms.Name, groupName, targetRole.Name)
 	if err != nil {
 		klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
-		return
+		return err
 	}
 
 	klog.V(2).Infof("scaling up role %s in ServingGroup %s: creating %d new replicas", targetRole.Name, groupName, toCreate)
@@ -917,7 +947,7 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 		// Create pods for role
 		err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, newIndex, servingGroupOrdinal, newRevision, roleTemplateHash)
 		if err != nil {
-			klog.Errorf("create role %s for ServingGroup %s failed: %v", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
+			return fmt.Errorf("create role %s for ServingGroup %s: %w", utils.GenerateRoleID(targetRole.Name, newIndex), groupName, err)
 		} else {
 			// Insert new Role to global storage
 			roleID := utils.GenerateRoleID(targetRole.Name, newIndex)
@@ -927,17 +957,17 @@ func (c *ModelServingController) scaleUpRoles(ctx context.Context, ms *workloadv
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
 		}
 	}
+	return nil
 }
 
 // manageRoleReplicas manages the replicas of a specific role within an Serving group
 // It handles both scale up and scale down operations for the role
-func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) {
+func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, servingGroupOrdinal int, newRevision string) error {
 	// TODO: add podGroup update after gang scheduler finished
 	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
 	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
 	if err != nil {
-		klog.Errorf("manageRoleReplicas: cannot get role %s in ServingGroup %s, err:%v", targetRole.Name, groupName, err)
-		return
+		return fmt.Errorf("manageRoleReplicas: cannot get role %s in ServingGroup %s: %w", targetRole.Name, groupName, err)
 	}
 
 	// TODO: need to check the pod spec match the modelserving spec, if not, recreate the pod
@@ -967,7 +997,7 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 			klog.V(2).Infof("manageRoleReplicas: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			if err := c.CreatePodsByRole(ctx, *targetRole.DeepCopy(), ms, roleIndex, servingGroupOrdinal, newRevision); err != nil {
-				klog.Errorf("manageRoleReplicas: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+				return fmt.Errorf("manageRoleReplicas: recreate pods for role %s/%s in ServingGroup %s: %w", targetRole.Name, roleObj.Name, groupName, err)
 			}
 		}
 	}
@@ -975,11 +1005,16 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 	// Determine whether it is a scale-up or scale-down scenario
 	if len(roleList) < expectedCount {
 		klog.V(2).Infof("manageRoleReplicas: scaling UP role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
-		c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision)
+		if err := c.scaleUpRoles(ctx, ms, groupName, targetRole, roleList, expectedCount, servingGroupOrdinal, newRevision); err != nil {
+			return err
+		}
 	} else if len(roleList) > expectedCount {
 		klog.V(2).Infof("manageRoleReplicas: scaling DOWN role %s in ServingGroup %s: current=%d, expected=%d", targetRole.Name, groupName, len(roleList), expectedCount)
-		c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount)
+		if err := c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // emitRoleStatusEvent emits a Kubernetes Event for a role-related status change.
@@ -1010,7 +1045,7 @@ func (c *ModelServingController) getModelServingAndResourceDetails(resource meta
 	return ms, servingGroupName, roleName, roleID
 }
 
-func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) {
+func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) (deleteErr error) {
 	selector := labels.SelectorFromSet(map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: groupName,
 		workloadv1alpha1.RoleLabelKey:      roleName,
@@ -1020,19 +1055,18 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	// If the role is already in the deletion process, no further processing will be done.
 	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID)
 	if roleStatus == datastore.RoleDeleting {
-		return
+		return nil
 	}
 	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
 	klog.V(4).Infof("Setting role %s/%s status to Deleting", ms.GetName(), roleID)
 	if err != nil {
 		klog.Errorf("failed to set role %s/%s status: %v", groupName, roleID, err)
-		return
+		return err
 	}
 
 	// Emit event for role entering Deleting state.
 	message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Deleting", roleName, roleID, groupName)
 	c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleDeleting", message)
-	var deleteErr error
 	defer func() {
 		if deleteErr == nil {
 			return
@@ -1053,7 +1087,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	)
 	if deleteErr != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
-		return
+		return deleteErr
 	}
 	// There is no DeleteCollection operation in the service of client-go. We need to list and delete them one by one.
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID)
@@ -1061,7 +1095,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	if err != nil {
 		deleteErr = err
 		klog.Errorf("failed to get service %v", err)
-		return
+		return deleteErr
 	}
 	for _, svc := range services {
 		deleteSvcErr := c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
@@ -1071,7 +1105,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 			} else {
 				deleteErr = deleteSvcErr
 				klog.Errorf("failed to delete service %s/%s: %v", ms.Namespace, svc.Name, deleteSvcErr)
-				return
+				return deleteErr
 			}
 		}
 	}
@@ -1086,6 +1120,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		// so the controller can recreate any missing resources if needed.
 		c.enqueueModelServing(ms)
 	}
+	return nil
 }
 
 func (c *ModelServingController) manageServingGroupRollingUpdate(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
@@ -1222,7 +1257,9 @@ func (c *ModelServingController) deleteOutdatedRolesForRoleRollingUpdate(
 				}
 				klog.V(2).Infof("Role %s in ServingGroup %s will be terminated for update", roleName, sg.Name)
 				for i := range outdatedRoles {
-					c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name)
+					if err := c.DeleteRole(ctx, ms, sg.Name, roleName, outdatedRoles[i].Name); err != nil {
+						return updateCount, fmt.Errorf("delete outdated role %s/%s in ServingGroup %s: %w", roleName, outdatedRoles[i].Name, sg.Name, err)
+					}
 					hasDeletedRoles = true
 				}
 			}
@@ -1411,7 +1448,9 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 				return fmt.Errorf("failed to set ServingGroup %s status: %v", servingGroupName, err)
 			}
 		}
-		c.DeleteRole(context.Background(), ms, servingGroupName, utils.GetRoleName(pod), utils.GetRoleID(pod))
+		if err := c.DeleteRole(context.Background(), ms, servingGroupName, utils.GetRoleName(pod), utils.GetRoleID(pod)); err != nil {
+			return err
+		}
 	}
 	return nil
 }
