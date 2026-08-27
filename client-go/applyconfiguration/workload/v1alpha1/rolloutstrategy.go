@@ -27,6 +27,7 @@ import (
 type RolloutStrategyApplyConfiguration struct {
 	Type                       *workloadv1alpha1.RolloutStrategyType         `json:"type,omitempty"`
 	RollingUpdateConfiguration *RollingUpdateConfigurationApplyConfiguration `json:"rollingUpdateConfiguration,omitempty"`
+	RoleCoordination           *RoleCoordinationApplyConfiguration           `json:"roleCoordination,omitempty"`
 	EvictionStrategy           *EvictionStrategySpecApplyConfiguration       `json:"evictionStrategy,omitempty"`
 }
 
@@ -49,6 +50,14 @@ func (b *RolloutStrategyApplyConfiguration) WithType(value workloadv1alpha1.Roll
 // If called multiple times, the RollingUpdateConfiguration field is set to the value of the last call.
 func (b *RolloutStrategyApplyConfiguration) WithRollingUpdateConfiguration(value *RollingUpdateConfigurationApplyConfiguration) *RolloutStrategyApplyConfiguration {
 	b.RollingUpdateConfiguration = value
+	return b
+}
+
+// WithRoleCoordination sets the RoleCoordination field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RoleCoordination field is set to the value of the last call.
+func (b *RolloutStrategyApplyConfiguration) WithRoleCoordination(value *RoleCoordinationApplyConfiguration) *RolloutStrategyApplyConfiguration {
+	b.RoleCoordination = value
 	return b
 }
 

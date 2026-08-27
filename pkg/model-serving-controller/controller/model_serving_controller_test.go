@@ -2476,6 +2476,7 @@ func TestScaleUpRoles(t *testing.T) {
 		deletingIndices    []int // Subset of existingIndices that are RoleDeleting
 		expectedCount      int   // Target count for scale up
 		expectedNewIndices []int // Expected indices for newly created roles
+		blockTargetStart   bool
 
 		expectNoCreation bool // Whether no new roles should be created
 	}{
@@ -2536,6 +2537,14 @@ func TestScaleUpRoles(t *testing.T) {
 			expectedCount:      3,
 			expectedNewIndices: []int{2},
 			expectNoCreation:   false,
+		},
+		{
+			name:               "dependency gate blocks target-version scale up",
+			existingIndices:    []int{0, 1},
+			expectedCount:      4,
+			expectedNewIndices: []int{},
+			blockTargetStart:   true,
+			expectNoCreation:   true,
 		},
 	}
 
@@ -2617,7 +2626,9 @@ func TestScaleUpRoles(t *testing.T) {
 			targetRole := ms.Spec.Template.Roles[0]
 
 			// Call scaleUpRoles directly
-			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
+			require.NoError(t, controller.scaleUpRoles(
+				context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision", !tt.blockTargetStart,
+			))
 
 			// Verify the results
 			roles, err := controller.store.GetRoleList(nsn, groupName, "prefill")
@@ -2732,7 +2743,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
-	err = controller.syncRoleReplicas(context.Background(), ms, newRevision)
+	err = controller.syncRoleReplicas(context.Background(), ms, newRevision, nil)
 	assert.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
@@ -2882,7 +2893,9 @@ func TestManageRoleReplicas(t *testing.T) {
 				assert.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 			}
 
-			require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, nil))
+			require.NoError(t, controller.manageRoleReplicasPerGroup(
+				context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, revision, nil, true,
+			))
 
 			roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
 			assert.NoError(t, err)
@@ -2953,7 +2966,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	err = controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil)
+	err = controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil, true)
 	require.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
@@ -7643,6 +7656,101 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	}
 }
 
+func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
+	const (
+		namespace = "default"
+		msName    = "test-ms"
+		groupName = "test-ms-0"
+		roleName  = "a"
+		roleID    = "a-0"
+	)
+	maxSkew := intstr.FromString("10%")
+
+	for _, tt := range []struct {
+		name          string
+		coordination  *workloadv1alpha1.RoleCoordination
+		expectedQueue int
+	}{
+		{
+			name:          "coordinated Role transition enqueues before ServingGroup Ready",
+			coordination:  &workloadv1alpha1.RoleCoordination{MaxSkew: &maxSkew},
+			expectedQueue: 1,
+		},
+		{
+			name:          "legacy Role transition retains maxSurge requeue behavior",
+			expectedQueue: 1,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			factory := informers.NewSharedInformerFactory(kubeClient, 0)
+			podInformer := factory.Core().V1().Pods()
+			serviceInformer := factory.Core().V1().Services()
+			require.NoError(t, podInformer.Informer().AddIndexers(cache.Indexers{
+				GroupNameKey: utils.GroupNameIndexFunc,
+				RoleIDKey:    utils.RoleIDIndexFunc,
+			}))
+			require.NoError(t, serviceInformer.Informer().AddIndexers(cache.Indexers{
+				GroupNameKey: utils.GroupNameIndexFunc,
+				RoleIDKey:    utils.RoleIDIndexFunc,
+			}))
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: msName, UID: "test-uid"},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](1),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type:             workloadv1alpha1.RoleRollingUpdate,
+						RoleCoordination: tt.coordination,
+					},
+					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+						{Name: "a", Replicas: ptr.To[int32](1)},
+						{Name: "b", Replicas: ptr.To[int32](1)},
+					}},
+				},
+			}
+			store := datastore.New()
+			nsn := utils.GetNamespaceName(ms)
+			store.AddServingGroupAndRole(nsn, groupName, "old-revision", "target-hash", roleName, roleID)
+			store.AddServingGroupAndRole(nsn, groupName, "old-revision", "old-hash", "b", "b-0")
+
+			queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()) //nolint:staticcheck
+			defer queue.ShutDown()
+			controller := &ModelServingController{
+				kubeClientSet:    kubeClient,
+				podsInformer:     podInformer.Informer(),
+				podsLister:       podInformer.Lister(),
+				servicesInformer: serviceInformer.Informer(),
+				servicesLister:   serviceInformer.Lister(),
+				store:            store,
+				workqueue:        queue,
+			}
+
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: namespace,
+					Name:      "test-ms-0-a-0-entry",
+					Labels: map[string]string{
+						workloadv1alpha1.ModelServingNameLabelKey: msName,
+						workloadv1alpha1.GroupNameLabelKey:        groupName,
+						workloadv1alpha1.RoleLabelKey:             roleName,
+						workloadv1alpha1.RoleIDKey:                roleID,
+						workloadv1alpha1.RoleTemplateHashLabelKey: "target-hash",
+						workloadv1alpha1.EntryLabelKey:            utils.Entry,
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
+			}
+			require.NoError(t, podInformer.Informer().GetIndexer().Add(pod))
+			require.NoError(t, controller.handleReadyPod(ms, groupName, pod))
+			assert.Equal(t, tt.expectedQueue, queue.Len())
+		})
+	}
+}
+
 func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 	tests := []struct {
 		name                  string
@@ -7968,14 +8076,8 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 				)
 			}
 
-			result, err := controller.deleteOutdatedResourcesForRollingUpdate(
-				context.Background(),
-				ms,
-				tt.maxScaleDown,
-				tt.notRunningOutdatedGroups,
-				tt.runningOutdatedGroups,
-				"v1",
-			)
+			groups := append(tt.runningOutdatedGroups, tt.notRunningOutdatedGroups...)
+			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, tt.maxScaleDown, groups)
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedUpdateCount, result)
@@ -8022,7 +8124,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	groups, err := controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 	require.Len(t, groups, 2, "rolling update waits for replica sync to create surge capacity")
 
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
@@ -8036,13 +8138,13 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	// An unready surge consumes its slot but cannot authorize deletion when
 	// maxUnavailable is zero.
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
 	}
 
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, surgeName, datastore.ServingGroupRunning))
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
 	// The highest outdated group is replaced first while the temporary capacity
 	// remains available.
@@ -8053,7 +8155,7 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 1), datastore.ServingGroupRunning))
 
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
 	// Once all remaining groups use the new revision, replica synchronization
 	// derives the normal desired count. The high ordinal remains a normal replica
@@ -8150,7 +8252,7 @@ func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
 				require.NoError(t, controller.store.UpdateServingGroupStatus(key, group.Name, group.Status))
 			}
 
-			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+			require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", &roleRolloutPolicy{}))
 			groups, err := controller.store.GetServingGroupByModelServing(key)
 			require.NoError(t, err)
 			outdatedLeft := 0
@@ -8357,7 +8459,7 @@ func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T
 		controller.store.AddServingGroup(key, group.ordinal, group.revision)
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
 	}
-	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new"))
+	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", &roleRolloutPolicy{}))
 	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
 }
 
@@ -8506,13 +8608,10 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", roleID, status))
 			}
 
-			_, err = controller.deleteOutdatedResourcesForRollingUpdate(
-				context.Background(),
-				ms,
-				0,
-				nil,
+			_, err = controller.deleteOutdatedRoles(
+				context.Background(), ms,
 				[]datastore.ServingGroup{{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}},
-				newRevision,
+				newRevision, nil,
 			)
 			require.NoError(t, err)
 
@@ -8785,6 +8884,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			rolesToDelete, hasOutdatedRoles, err := controller.rolesToDeleteForRoleRollingUpdate(
 				ms,
 				datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning},
+				nil,
 			)
 
 			if tt.expectErrContains != "" {
@@ -8839,11 +8939,141 @@ func TestRolesToDeleteForRoleRollingUpdate_LegacyRoleTemplateHashFromControllerR
 	rolesToDelete, hasOutdatedRoles, err := controller.rolesToDeleteForRoleRollingUpdate(
 		ms,
 		datastore.ServingGroup{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning},
+		nil,
 	)
 
 	require.NoError(t, err)
 	assert.True(t, hasOutdatedRoles)
 	assert.Equal(t, []roleToDelete{{roleName: roleName, roleID: "prefill-0"}}, rolesToDelete)
+}
+
+func TestRolesToDeleteForRoleRollingUpdate_CoordinatedDependencyStartup(t *testing.T) {
+	const (
+		namespace = "default"
+		msName    = "test-ms"
+		groupName = "test-ms-0"
+		oldHash   = "old-hash"
+	)
+	maxSkew := intstr.FromString("20%")
+	roleSpec := func(name string) workloadv1alpha1.Role {
+		return workloadv1alpha1.Role{
+			Name:     name,
+			Replicas: ptr.To[int32](10),
+			EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:new"}}},
+			},
+		}
+	}
+	newModelServing := func() *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: msName},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.RoleRollingUpdate,
+					RoleCoordination: &workloadv1alpha1.RoleCoordination{
+						MaxSkew: &maxSkew,
+						Dependencies: []workloadv1alpha1.RoleRolloutDependency{
+							{Role: "a", DependsOn: []string{"b"}},
+							{Role: "b", DependsOn: []string{"c"}},
+						},
+					},
+				},
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+					roleSpec("a"), roleSpec("b"), roleSpec("c"),
+				}},
+			},
+		}
+	}
+	setup := func(t *testing.T, ms *workloadv1alpha1.ModelServing, readyByRole map[string]int) (*ModelServingController, *roleRolloutGroupPolicy) {
+		t.Helper()
+		store := datastore.New()
+		nsn := utils.GetNamespaceName(ms)
+		store.AddServingGroup(nsn, 0, "old-revision")
+		for _, role := range ms.Spec.Template.Roles {
+			targetHash := utils.CalRoleTemplateHash(role)
+			ready := readyByRole[role.Name]
+			for ordinal := 0; ordinal < 10; ordinal++ {
+				roleID := fmt.Sprintf("%s-%d", role.Name, ordinal)
+				hash := oldHash
+				if ordinal >= 10-ready {
+					hash = targetHash
+				}
+				store.AddRole(nsn, groupName, role.Name, roleID, "old-revision", hash)
+				require.NoError(t, store.UpdateRoleStatus(nsn, groupName, role.Name, roleID, datastore.RoleRunning))
+			}
+		}
+		states := make([]coordinatedRoleState, 0, len(ms.Spec.Template.Roles))
+		for _, role := range ms.Spec.Template.Roles {
+			if !isCoordinatedRole(ms, role.Name) {
+				continue
+			}
+			ready := readyByRole[role.Name]
+			states = append(states, newCoordinatedRoleStateForTest(role.Name, 10, ready, 0))
+		}
+		decision, err := calculateRoleRolloutLimits(states, ms.Spec.RolloutStrategy.RoleCoordination)
+		require.NoError(t, err)
+		return &ModelServingController{store: store, kubeClientSet: kubefake.NewSimpleClientset()}, &decision
+	}
+
+	t.Run("B and C prestart while A waits", func(t *testing.T) {
+		ms := newModelServing()
+		controller, plan := setup(t, ms, nil)
+		selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+			Name: groupName, Revision: "old-revision", Status: datastore.ServingGroupRunning,
+		}, plan)
+		require.NoError(t, err)
+		assert.True(t, hasOutdated)
+		assert.Equal(t, map[string]int{"b": 2, "c": 2}, selectedCountByRole(selected))
+	})
+
+	t.Run("ready B and C dependency closure unlocks A", func(t *testing.T) {
+		ms := newModelServing()
+		controller, plan := setup(t, ms, map[string]int{"b": 2, "c": 2})
+		selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+			Name: groupName, Revision: "old-revision", Status: datastore.ServingGroupRunning,
+		}, plan)
+		require.NoError(t, err)
+		assert.True(t, hasOutdated)
+		assert.Equal(t, map[string]int{"a": 2}, selectedCountByRole(selected))
+	})
+
+	t.Run("completion partition retains old B and C while A is incomplete", func(t *testing.T) {
+		ms := newModelServing()
+		controller, plan := setup(t, ms, map[string]int{"a": 8, "b": 9, "c": 9})
+		selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+			Name: groupName, Revision: "old-revision", Status: datastore.ServingGroupRunning,
+		}, plan)
+		require.NoError(t, err)
+		assert.True(t, hasOutdated)
+		assert.Equal(t, map[string]int{"a": 2}, selectedCountByRole(selected))
+	})
+
+	t.Run("A completion releases B but C remains protected", func(t *testing.T) {
+		ms := newModelServing()
+		controller, plan := setup(t, ms, map[string]int{"a": 10, "b": 9, "c": 9})
+		selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+			Name: groupName, Revision: "old-revision", Status: datastore.ServingGroupRunning,
+		}, plan)
+		require.NoError(t, err)
+		assert.True(t, hasOutdated)
+		assert.Equal(t, map[string]int{"b": 1}, selectedCountByRole(selected))
+	})
+
+	t.Run("unselected Role keeps legacy independent candidates", func(t *testing.T) {
+		ms := newModelServing()
+		coordination := ms.Spec.RolloutStrategy.RoleCoordination
+		coordination.Roles = []string{"a", "b"}
+		coordination.Dependencies = []workloadv1alpha1.RoleRolloutDependency{
+			{Role: "a", DependsOn: []string{"b"}},
+		}
+		controller, plan := setup(t, ms, nil)
+		selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+			Name: groupName, Revision: "old-revision", Status: datastore.ServingGroupRunning,
+		}, plan)
+		require.NoError(t, err)
+		assert.True(t, hasOutdated)
+		assert.Equal(t, map[string]int{"b": 2, "c": 10}, selectedCountByRole(selected))
+	})
 }
 
 func TestFindOutdatedRolesInServingGroups(t *testing.T) {

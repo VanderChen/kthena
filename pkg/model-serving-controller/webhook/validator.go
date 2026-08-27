@@ -122,7 +122,9 @@ func (v *ModelServingValidator) validateModelServing(ctx context.Context, modelS
 }
 
 func (v *ModelServingValidator) validateModelServingUpdate(ctx context.Context, oldModelServing, modelServing *workloadv1alpha1.ModelServing) (bool, string) {
-	return v.validateModelServingErrors(ctx, modelServing, validateNetworkTopologyImmutable(oldModelServing, modelServing))
+	allErrs := validateNetworkTopologyImmutable(oldModelServing, modelServing)
+	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
+	return v.validateModelServingErrors(ctx, modelServing, allErrs)
 }
 
 func (v *ModelServingValidator) validateModelServingErrors(ctx context.Context, modelServing *workloadv1alpha1.ModelServing, allErrs field.ErrorList) (bool, string) {
@@ -132,6 +134,7 @@ func (v *ModelServingValidator) validateModelServingErrors(ctx context.Context, 
 	allErrs = append(allErrs, validatorReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRollingUpdateConfiguration(modelServing)...)
 	allErrs = append(allErrs, validateMaxUnavailableForRoles(modelServing)...)
+	allErrs = append(allErrs, validateRoleCoordination(modelServing)...)
 	allErrs = append(allErrs, validateGangPolicy(modelServing)...)
 	allErrs = append(allErrs, validateTopologyAffinity(modelServing)...)
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
@@ -139,6 +142,10 @@ func (v *ModelServingValidator) validateModelServingErrors(ctx context.Context, 
 	allErrs = append(allErrs, v.validateRanktablePlugin(ctx, modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
 
+	return validationResult(allErrs)
+}
+
+func validationResult(allErrs field.ErrorList) (bool, string) {
 	if len(allErrs) > 0 {
 		var messages []string
 		for _, err := range allErrs {
