@@ -2011,6 +2011,48 @@ func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.Mod
 	return true, nil
 }
 
+// rolesForServingGroupReadiness returns the role template that was used to
+// create a partition-protected ServingGroup. Such a group keeps its old
+// ControllerRevision and must not be checked against the latest template.
+func (c *ModelServingController) rolesForServingGroupReadiness(ms *workloadv1alpha1.ModelServing, servingGroupName string) []workloadv1alpha1.Role {
+	latestRoles := ms.Spec.Template.Roles
+	partition, configured, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	if err != nil {
+		klog.Warningf("failed to resolve partition when checking ServingGroup %s readiness: %v", servingGroupName, err)
+		return latestRoles
+	}
+	_, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
+	if !configured || partition <= 0 || ordinal < 0 || ordinal >= partition {
+		return latestRoles
+	}
+
+	revision, _ := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName)
+	if revision == "" {
+		revision = ms.Status.CurrentRevision
+	}
+	if revision == "" || c.kubeClientSet == nil {
+		return latestRoles
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	if err != nil {
+		klog.Warningf("failed to get ControllerRevision %s when checking ServingGroup %s readiness: %v", revision, servingGroupName, err)
+		return latestRoles
+	}
+	if cr == nil {
+		klog.Warningf("ControllerRevision %s not found when checking partition-protected ServingGroup %s readiness, falling back to latest roles", revision, servingGroupName)
+		return latestRoles
+	}
+	roles, err := utils.GetRolesFromControllerRevision(cr)
+	if err != nil {
+		klog.Warningf("failed to get roles from ControllerRevision %s when checking ServingGroup %s readiness: %v", revision, servingGroupName, err)
+		return latestRoles
+	}
+	return roles
+}
+
 func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) (bool, error) {
 	// Get all pods for this specific role
 	roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, servingGroupName, roleName, roleID)
