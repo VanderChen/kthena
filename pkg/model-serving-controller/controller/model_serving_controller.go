@@ -1970,18 +1970,8 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
 			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
 
-			chain, err := c.buildPluginChain(ms)
-			if err != nil {
-				klog.Errorf("failed to build plugin chain: %v", err)
-			} else if chain != nil {
-				if err := chain.OnServingGroupDelete(context.TODO(), &plugins.HookRequest{
-					ModelServing:    ms,
-					ServingGroup:    servingGroupName,
-					KubeClient:      c.kubeClientSet,
-					ConfigMapLister: c.configMapsLister,
-				}); err != nil {
-					klog.Errorf("failed to execute OnServingGroupDelete hook: %v", err)
-				}
+			if err := c.runServingGroupDeletePlugins(context.TODO(), ms, servingGroupName); err != nil {
+				klog.Errorf("failed to execute OnServingGroupDelete hook: %v", err)
 			}
 
 			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
@@ -2499,14 +2489,32 @@ func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *w
 		}
 	}
 	return chain.OnRoleDelete(ctx, &plugins.HookRequest{
-		ModelServing:  ms,
-		ServingGroup:  groupName,
-		RoleName:      roleName,
-		RoleID:        roleID,
-		RoleIndex:     roleIndex,
-		Role:          role,
-		KubeClient:    c.kubeClientSet,
-		ServiceLister: c.servicesLister,
+		ModelServing:    ms,
+		ServingGroup:    groupName,
+		RoleName:        roleName,
+		RoleID:          roleID,
+		RoleIndex:       roleIndex,
+		Role:            role,
+		KubeClient:      c.kubeClientSet,
+		ConfigMapLister: c.configMapsLister,
+		ServiceLister:   c.servicesLister,
+	})
+}
+
+func (c *ModelServingController) runServingGroupDeletePlugins(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string) error {
+	chain, err := c.buildPluginChain(ms)
+	if err != nil {
+		return fmt.Errorf("build ServingGroup delete plugin chain: %w", err)
+	}
+	if chain == nil {
+		return nil
+	}
+	return chain.OnServingGroupDelete(ctx, &plugins.HookRequest{
+		ModelServing:    ms,
+		ServingGroup:    groupName,
+		KubeClient:      c.kubeClientSet,
+		ConfigMapLister: c.configMapsLister,
+		ServiceLister:   c.servicesLister,
 	})
 }
 
@@ -2658,6 +2666,9 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 				return err
 			}
 		}
+	}
+	if err = c.runServingGroupDeletePlugins(ctx, ms, servingGroupName); err != nil {
+		return err
 	}
 
 	if c.isServingGroupDeleted(ms, servingGroupName) {

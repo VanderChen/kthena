@@ -26,6 +26,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	testhelper "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils/test"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +52,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins/ranktable"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -5760,6 +5762,141 @@ func TestManageHeadlessService(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProductionPluginsCoexistOnPodCreate(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "default")
+
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	parserCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-ranktable-parser", Namespace: "default"},
+		Data: map[string]string{
+			"annotation-name": "ascend.com/ranktable",
+			"parser-template": `{{- $data := . | fromJson -}}
+podName: {{ $data.pod_name | quote }}`,
+		},
+	}
+	templateCM := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-ranktable-template", Namespace: "default"},
+		Data: map[string]string{
+			"inference-engine":    "mindie",
+			"ranktable-level":     "role",
+			"pod-parser-template": parserCM.Name,
+			"ranktable-template":  `{"version":"1.0","status":"{{ .Status }}"}`,
+			"mount-path":          "/etc/ranktable",
+			"filename":            "ranktable.json",
+		},
+	}
+	require.NoError(t, controller.configMapsInformer.GetIndexer().Add(parserCM))
+	require.NoError(t, controller.configMapsInformer.GetIndexer().Add(templateCM))
+
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "production-ms",
+			Namespace: "default",
+			UID:       types.UID("production-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Plugins: []workloadv1alpha1.PluginSpec{
+				{Name: plugins.HeadlessServicePluginName, Type: workloadv1alpha1.PluginTypeBuiltIn},
+				{
+					Name:   ranktable.PluginName,
+					Type:   workloadv1alpha1.PluginTypeBuiltIn,
+					Config: &apiextensionsv1.JSON{Raw: []byte(`{"template":"production-ranktable-template"}`)},
+				},
+			},
+		},
+	}
+	role := &workloadv1alpha1.Role{
+		Name:           "prefill",
+		WorkerReplicas: 1,
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-ms-0-prefill-0-0", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers:     []corev1.Container{{Name: "main"}},
+			InitContainers: []corev1.Container{{Name: "init"}},
+		},
+	}
+	req := &plugins.HookRequest{
+		ModelServing:    ms,
+		ServingGroup:    "production-ms-0",
+		RoleName:        role.Name,
+		RoleID:          "prefill-0",
+		Role:            role,
+		IsEntry:         true,
+		Pod:             pod,
+		ConfigMapLister: controller.configMapsLister,
+		KubeClient:      kubeClient,
+		ServiceLister:   controller.servicesLister,
+	}
+	chain, err := controller.buildPluginChain(ms)
+	require.NoError(t, err)
+	require.NoError(t, chain.OnPodCreate(context.Background(), req))
+	// Re-running mutation hooks must remain idempotent when a Pod create is retried.
+	require.NoError(t, chain.OnPodCreate(context.Background(), req))
+
+	serviceName := pod.Name
+	_, err = kubeClient.CoreV1().Services(ms.Namespace).Get(context.Background(), serviceName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, pod.Name, pod.Spec.Hostname)
+	assert.Equal(t, serviceName, pod.Spec.Subdomain)
+	for _, container := range append(pod.Spec.Containers, pod.Spec.InitContainers...) {
+		require.Len(t, container.VolumeMounts, 1)
+		assert.Equal(t, ranktable.VolumeName, container.VolumeMounts[0].Name)
+	}
+	require.Len(t, pod.Spec.Volumes, 1)
+	assert.Equal(t, ranktable.VolumeName, pod.Spec.Volumes[0].Name)
+	assert.Equal(t, serviceName+"."+ms.Namespace, pod.Spec.Containers[0].Env[0].Value)
+
+	ranktableName := ranktable.GenerateRanktableConfigMapName(ms.Name, req.ServingGroup+"-"+req.RoleID)
+	_, err = kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), ranktableName, metav1.GetOptions{})
+	require.NoError(t, err)
+}
+
+func TestServingGroupDeletePluginsRunOnFastDeletionPath(t *testing.T) {
+	const (
+		namespace = "default"
+		groupName = "production-ms-0"
+	)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "production-ms", Namespace: namespace},
+		Spec: workloadv1alpha1.ModelServingSpec{Plugins: []workloadv1alpha1.PluginSpec{{
+			Name:   ranktable.PluginName,
+			Type:   workloadv1alpha1.PluginTypeBuiltIn,
+			Config: &apiextensionsv1.JSON{Raw: []byte(`{"template":"production-ranktable-template"}`)},
+		}}},
+	}
+	ranktableCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name:      ranktable.GenerateRanktableConfigMapName(ms.Name, groupName),
+		Namespace: namespace,
+		Labels: map[string]string{
+			workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+			workloadv1alpha1.GroupNameLabelKey:        groupName,
+			"app.kubernetes.io/component":             "ranktable",
+		},
+	}}
+	kubeClient := kubefake.NewSimpleClientset(ranktableCM)
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, controller.runServingGroupDeletePlugins(context.Background(), ms, groupName))
+	_, err = kubeClient.CoreV1().ConfigMaps(namespace).Get(context.Background(), ranktableCM.Name, metav1.GetOptions{})
+	assert.True(t, apierrors.IsNotFound(err))
 }
 
 func TestCleanupHeadlessServices(t *testing.T) {
