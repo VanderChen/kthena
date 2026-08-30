@@ -25,8 +25,11 @@ import (
 // NetworkTopologyApplyConfiguration represents a declarative configuration of the NetworkTopology type for use
 // with apply.
 type NetworkTopologyApplyConfiguration struct {
-	GroupPolicy *v1beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
-	RolePolicy  *v1beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+	GroupPolicy              *v1beta1.NetworkTopologySpec                `json:"groupPolicy,omitempty"`
+	RolePolicy               *v1beta1.NetworkTopologySpec                `json:"rolePolicy,omitempty"`
+	ServingGroupAntiAffinity *ServingGroupAntiAffinityApplyConfiguration `json:"servingGroupAntiAffinity,omitempty"`
+	RoleAffinity             *RoleAffinityApplyConfiguration             `json:"roleAffinity,omitempty"`
+	RoleAntiAffinity         *RoleAntiAffinityApplyConfiguration         `json:"roleAntiAffinity,omitempty"`
 }
 
 // NetworkTopologyApplyConfiguration constructs a declarative configuration of the NetworkTopology type for use with
@@ -48,5 +51,29 @@ func (b *NetworkTopologyApplyConfiguration) WithGroupPolicy(value v1beta1.Networ
 // If called multiple times, the RolePolicy field is set to the value of the last call.
 func (b *NetworkTopologyApplyConfiguration) WithRolePolicy(value v1beta1.NetworkTopologySpec) *NetworkTopologyApplyConfiguration {
 	b.RolePolicy = &value
+	return b
+}
+
+// WithServingGroupAntiAffinity sets the ServingGroupAntiAffinity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ServingGroupAntiAffinity field is set to the value of the last call.
+func (b *NetworkTopologyApplyConfiguration) WithServingGroupAntiAffinity(value *ServingGroupAntiAffinityApplyConfiguration) *NetworkTopologyApplyConfiguration {
+	b.ServingGroupAntiAffinity = value
+	return b
+}
+
+// WithRoleAffinity sets the RoleAffinity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RoleAffinity field is set to the value of the last call.
+func (b *NetworkTopologyApplyConfiguration) WithRoleAffinity(value *RoleAffinityApplyConfiguration) *NetworkTopologyApplyConfiguration {
+	b.RoleAffinity = value
+	return b
+}
+
+// WithRoleAntiAffinity sets the RoleAntiAffinity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the RoleAntiAffinity field is set to the value of the last call.
+func (b *NetworkTopologyApplyConfiguration) WithRoleAntiAffinity(value *RoleAntiAffinityApplyConfiguration) *NetworkTopologyApplyConfiguration {
+	b.RoleAntiAffinity = value
 	return b
 }

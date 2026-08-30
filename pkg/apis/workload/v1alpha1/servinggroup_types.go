@@ -42,13 +42,29 @@ type GangPolicy struct {
 	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 
-// NetworkTopologySpec defines the network topology affinity scheduling policy for the roles and group, it works only when the scheduler supports network topology feature.
+// NetworkTopology defines topology-aware placement policies and relationships
+// for a ServingGroup. It works only when the scheduler supports the configured
+// Volcano network-topology and group-topology-affinity capabilities.
 type NetworkTopology struct {
 	// GroupPolicy defines the network topology scheduling requirement of  all the instances within the `ServingGroup`.
 	GroupPolicy *volcanoV1Beta1.NetworkTopologySpec `json:"groupPolicy,omitempty"`
 
 	// RolePolicy defines the fine-grained network topology scheduling requirement for instances of a `role`.
 	RolePolicy *volcanoV1Beta1.NetworkTopologySpec `json:"rolePolicy,omitempty"`
+
+	// ServingGroupAntiAffinity separates ServingGroups belonging to this
+	// ModelServing. The controller selects peer PodGroups automatically.
+	// +optional
+	ServingGroupAntiAffinity *ServingGroupAntiAffinity `json:"servingGroupAntiAffinity,omitempty"`
+
+	// RoleAffinity co-locates selected Role policies within each ServingGroup.
+	// +optional
+	RoleAffinity *RoleAffinity `json:"roleAffinity,omitempty"`
+
+	// RoleAntiAffinity spreads or separates selected Role policies within each
+	// ServingGroup.
+	// +optional
+	RoleAntiAffinity *RoleAntiAffinity `json:"roleAntiAffinity,omitempty"`
 }
 
 // Role defines the specific pod instance role that performs the inference task.
@@ -124,8 +140,10 @@ type ServingGroup struct {
 	// +optional
 	GangPolicy *GangPolicy `json:"gangPolicy,omitempty"`
 
-	// NetworkTopology defines the network topology affinity scheduling policy for the roles of the `ServingGroup`,
-	// it works only when the scheduler supports network topology-aware scheduling.
+	// NetworkTopology defines topology-aware aggregation and relationship
+	// policies for ServingGroups and Roles on the scheduler's HyperNode tree.
+	// The field is immutable after the ModelServing is created so Pods added by
+	// later scaling operations use the same topology constraints as existing Pods.
 	// +optional
 	NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
 

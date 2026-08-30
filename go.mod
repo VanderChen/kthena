@@ -43,6 +43,10 @@ require (
 	volcano.sh/apis v1.13.2-0.20260105020123-deb066235db8
 )
 
+// TODO: Remove this replacement after Volcano group topology affinity is
+// published in the official volcano.sh/apis module.
+replace volcano.sh/apis => github.com/VanderChen/volcano/staging/src/volcano.sh/apis v0.0.0-20260716142833-47e691146727
+
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/BurntSushi/toml v1.5.0 // indirect

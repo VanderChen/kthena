@@ -742,6 +742,21 @@ func TestHasPodGroupChanged(t *testing.T) {
 		assert.True(t, result, "Expected change when SubGroupPolicy content differs")
 	})
 
+	t.Run("TopologyAffinityChanged", func(t *testing.T) {
+		current := basePodGroup()
+		updated := basePodGroup()
+		updated.Spec.TopologyAffinity = &schedulingv1beta1.TopologyAffinitySpec{
+			SubGroupAntiAffinity: &schedulingv1beta1.SubGroupAntiAffinity{
+				Required: []schedulingv1beta1.SubGroupAffinityTerm{
+					{SubGroups: []string{"test-subgroup"}, TopologyTierName: "node"},
+				},
+			},
+		}
+
+		result := hasPodGroupChanged(current, updated)
+		assert.True(t, result, "Expected change when TopologyAffinity differs")
+	})
+
 	t.Run("AllFieldsNil", func(t *testing.T) {
 		current := &schedulingv1beta1.PodGroup{
 			Spec: schedulingv1beta1.PodGroupSpec{
@@ -765,6 +780,208 @@ func TestHasPodGroupChanged(t *testing.T) {
 		result := hasPodGroupChanged(current, updated)
 		assert.False(t, result, "Expected no change when all fields are nil/empty")
 	})
+}
+
+func TestValidateTopologyAffinityCapabilities(t *testing.T) {
+	servingGroupTerm := workloadv1alpha1.ServingGroupAffinityTerm{TopologyTierName: "rack"}
+	roleTerm := workloadv1alpha1.RoleAffinityTerm{Roles: []string{"role0"}, TopologyTierName: "node"}
+
+	tests := []struct {
+		name                string
+		networkTopology     *workloadv1alpha1.NetworkTopology
+		hasPodGroupCRD      bool
+		hasSubGroupPolicy   bool
+		hasTopologyAffinity bool
+		wantErrorSubstring  string
+	}{
+		{
+			name: "no topology affinity needs no capability",
+		},
+		{
+			name:            "network topology without affinity rules needs no affinity capability",
+			networkTopology: &workloadv1alpha1.NetworkTopology{},
+		},
+		{
+			name: "missing PodGroup CRD",
+			networkTopology: &workloadv1alpha1.NetworkTopology{
+				ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{Required: []workloadv1alpha1.ServingGroupAffinityTerm{servingGroupTerm}},
+			},
+			wantErrorSubstring: "affinity rules require the Volcano PodGroup CRD",
+		},
+		{
+			name: "missing topology affinity field",
+			networkTopology: &workloadv1alpha1.NetworkTopology{
+				ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{Required: []workloadv1alpha1.ServingGroupAffinityTerm{servingGroupTerm}},
+			},
+			hasPodGroupCRD:     true,
+			wantErrorSubstring: "affinity rules require spec.topologyAffinity",
+		},
+		{
+			name: "ServingGroup rule does not require subgroup support",
+			networkTopology: &workloadv1alpha1.NetworkTopology{
+				ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{Required: []workloadv1alpha1.ServingGroupAffinityTerm{servingGroupTerm}},
+			},
+			hasPodGroupCRD:      true,
+			hasTopologyAffinity: true,
+		},
+		{
+			name: "Role rule requires subgroup support",
+			networkTopology: &workloadv1alpha1.NetworkTopology{
+				RoleAntiAffinity: &workloadv1alpha1.RoleAntiAffinity{Required: []workloadv1alpha1.RoleAffinityTerm{roleTerm}},
+			},
+			hasPodGroupCRD:      true,
+			hasTopologyAffinity: true,
+			wantErrorSubstring:  "requires spec.subGroupPolicy",
+		},
+		{
+			name: "all Role capabilities available",
+			networkTopology: &workloadv1alpha1.NetworkTopology{
+				RoleAntiAffinity: &workloadv1alpha1.RoleAntiAffinity{Required: []workloadv1alpha1.RoleAffinityTerm{roleTerm}},
+			},
+			hasPodGroupCRD:      true,
+			hasSubGroupPolicy:   true,
+			hasTopologyAffinity: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &Manager{}
+			manager.hasPodGroupCRD.Store(tt.hasPodGroupCRD)
+			manager.hasSubGroupPolicy.Store(tt.hasSubGroupPolicy)
+			manager.hasTopologyAffinity.Store(tt.hasTopologyAffinity)
+			ms := &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Template: workloadv1alpha1.ServingGroup{NetworkTopology: tt.networkTopology},
+				},
+			}
+
+			err := manager.validateTopologyAffinityCapabilities(ms)
+			if tt.wantErrorSubstring == "" {
+				assert.NoError(t, err)
+				return
+			}
+			if assert.Error(t, err) {
+				assert.Contains(t, err.Error(), tt.wantErrorSubstring)
+			}
+		})
+	}
+}
+
+func TestSyncPodGroupTopologyAffinity(t *testing.T) {
+	preferredWeight := int32(70)
+	nodeTier := int32(0)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "sample", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{
+				NetworkTopology: &workloadv1alpha1.NetworkTopology{
+					ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{
+						Required:  []workloadv1alpha1.ServingGroupAffinityTerm{{TopologyTierName: "communication-domain"}},
+						Preferred: []workloadv1alpha1.ServingGroupAffinityTerm{{Weight: &preferredWeight, TopologyTier: &nodeTier}},
+					},
+					RoleAffinity: &workloadv1alpha1.RoleAffinity{
+						Required: []workloadv1alpha1.RoleAffinityTerm{{Roles: []string{"prefill", "decode"}, TopologyTierName: "rack"}},
+					},
+					RoleAntiAffinity: &workloadv1alpha1.RoleAntiAffinity{
+						Required:  []workloadv1alpha1.RoleAffinityTerm{{Roles: []string{"prefill"}, TopologyTierName: "node"}},
+						Preferred: []workloadv1alpha1.RoleAffinityTerm{{Roles: []string{"decode"}, Weight: &preferredWeight, TopologyTier: &nodeTier}},
+					},
+				},
+			},
+		},
+	}
+
+	spec := &schedulingv1beta1.PodGroupSpec{}
+	syncPodGroupTopologyAffinity(ms, spec)
+
+	if assert.NotNil(t, spec.TopologyAffinity) {
+		if assert.NotNil(t, spec.TopologyAffinity.PodGroupAntiAffinity) {
+			required := spec.TopologyAffinity.PodGroupAntiAffinity.Required
+			if assert.Len(t, required, 1) {
+				assert.Equal(t, int32(0), required[0].Weight)
+				assert.Equal(t, "communication-domain", required[0].TopologyTierName)
+				assert.Equal(t, map[string]string{workloadv1alpha1.ModelServingNameLabelKey: "sample"}, required[0].PodGroupSelector.MatchLabels)
+				assert.Nil(t, required[0].NamespaceSelector)
+			}
+			preferred := spec.TopologyAffinity.PodGroupAntiAffinity.Preferred
+			if assert.Len(t, preferred, 1) {
+				assert.Equal(t, preferredWeight, preferred[0].Weight)
+				assert.Equal(t, nodeTier, *preferred[0].TopologyTier)
+			}
+		}
+		if assert.NotNil(t, spec.TopologyAffinity.SubGroupAffinity) {
+			if assert.Len(t, spec.TopologyAffinity.SubGroupAffinity.Required, 1) {
+				assert.Equal(t, []string{"prefill", "decode"}, spec.TopologyAffinity.SubGroupAffinity.Required[0].SubGroups)
+				assert.Equal(t, "rack", spec.TopologyAffinity.SubGroupAffinity.Required[0].TopologyTierName)
+			}
+		}
+		if assert.NotNil(t, spec.TopologyAffinity.SubGroupAntiAffinity) {
+			assert.Equal(t, []string{"prefill"}, spec.TopologyAffinity.SubGroupAntiAffinity.Required[0].SubGroups)
+			assert.Equal(t, []string{"decode"}, spec.TopologyAffinity.SubGroupAntiAffinity.Preferred[0].SubGroups)
+			assert.Equal(t, preferredWeight, spec.TopologyAffinity.SubGroupAntiAffinity.Preferred[0].Weight)
+		}
+	}
+
+	ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{}
+	syncPodGroupTopologyAffinity(ms, spec)
+	assert.Nil(t, spec.TopologyAffinity, "removing only the affinity rules must clear PodGroup topologyAffinity")
+}
+
+func TestUpdatePodGroupTopologyAffinity(t *testing.T) {
+	existing := &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0", Namespace: "default"},
+		Spec: schedulingv1beta1.PodGroupSpec{
+			TopologyAffinity: &schedulingv1beta1.TopologyAffinitySpec{
+				PodGroupAntiAffinity: &schedulingv1beta1.PodGroupAntiAffinity{
+					Required: []schedulingv1beta1.PodGroupAffinityTerm{{TopologyTierName: "old-tier"}},
+				},
+			},
+		},
+	}
+	fakeVolcano := volcanofake.NewSimpleClientset(existing.DeepCopy())
+	manager := NewManager(nil, fakeVolcano, apiextfake.NewSimpleClientset(testhelper.CreatePodGroupCRDWithFeatures(false, true)), nil)
+	manager.hasPodGroupCRD.Store(true)
+	manager.hasTopologyAffinity.Store(true)
+	manager.hasSubGroupPolicy.Store(false)
+	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	assert.NoError(t, indexer.Add(existing.DeepCopy()))
+	manager.PodGroupLister = volcanoschedulerlister.NewPodGroupLister(indexer)
+
+	ms := newMinimalMS("")
+	ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{
+		ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{
+			Required: []workloadv1alpha1.ServingGroupAffinityTerm{{TopologyTierName: "communication-domain"}},
+		},
+	}
+
+	assert.NoError(t, manager.updatePodGroupIfNeeded(context.Background(), existing, ms))
+	updated, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	if assert.NotNil(t, updated.Spec.TopologyAffinity) && assert.NotNil(t, updated.Spec.TopologyAffinity.PodGroupAntiAffinity) {
+		assert.Equal(t, "communication-domain", updated.Spec.TopologyAffinity.PodGroupAntiAffinity.Required[0].TopologyTierName)
+	}
+
+	assert.NoError(t, indexer.Update(updated.DeepCopy()))
+	ms.Spec.Template.NetworkTopology = &workloadv1alpha1.NetworkTopology{
+		GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
+			Mode: schedulingv1beta1.HardNetworkTopologyMode,
+		},
+	}
+	assert.NoError(t, manager.updatePodGroupIfNeeded(context.Background(), updated, ms))
+	cleared, err := fakeVolcano.SchedulingV1beta1().PodGroups("default").Get(context.Background(), existing.Name, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.Nil(t, cleared.Spec.TopologyAffinity)
+	if assert.NotNil(t, cleared.Spec.NetworkTopology) {
+		assert.Equal(t, schedulingv1beta1.HardNetworkTopologyMode, cleared.Spec.NetworkTopology.Mode)
+	}
+}
+
+func TestPodGroupCRDTopologyAffinityDetection(t *testing.T) {
+	assert.False(t, podGroupCRDHasTopologyAffinity(nil))
+	assert.False(t, podGroupCRDHasTopologyAffinity(testhelper.CreatePodGroupCRDWithFeatures(true, false)))
+	assert.True(t, podGroupCRDHasTopologyAffinity(testhelper.CreatePodGroupCRDWithFeatures(false, true)))
+	assert.True(t, podGroupCRDHasSubGroup(testhelper.CreatePodGroupCRDWithFeatures(true, false)))
 }
 
 func TestCalculateRequiredRoleNames(t *testing.T) {
