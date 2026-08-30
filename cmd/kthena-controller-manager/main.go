@@ -183,7 +183,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 	mux := http.NewServeMux()
 
-	modelServingValidator := modelservingwebhook.NewModelServingValidator()
+	modelServingValidator := modelservingwebhook.NewModelServingValidator(kubeClient)
 	mux.HandleFunc("/validate-workload-ai-v1alpha1-modelserving", modelServingValidator.Handle)
 
 	modelValidator := modelboosterwebhook.NewModelValidator()

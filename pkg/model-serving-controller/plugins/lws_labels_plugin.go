@@ -92,6 +92,10 @@ func (p *LWSLabelsPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error 
 	return nil
 }
 
+func (p *LWSLabelsPlugin) OnServingGroupDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func getOwningLWSName(ownerRefs []metav1.OwnerReference) (string, bool) {
 	for _, ref := range ownerRefs {
 		if ref.Kind == "LeaderWorkerSet" && ref.Name != "" {

@@ -66,6 +66,14 @@ func (t *testPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnServingGroupDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "serving-group-delete-"+t.name)
+	if t.errOn == "serving-group-delete" {
+		return assertError
+	}
+	return nil
+}
+
 type pluginError string
 
 func (p pluginError) Error() string { return string(p) }

@@ -85,6 +85,18 @@ rules:
       - create
       - update
   - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - update
+      - patch
+      - delete
+  - apiGroups:
       - workload.serving.volcano.sh
     resources:
       - modelboosters

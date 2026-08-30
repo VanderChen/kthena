@@ -28,16 +28,18 @@ import (
 
 // HookRequest carries the context for plugin hook invocations.
 type HookRequest struct {
-	ModelServing  *workloadv1alpha1.ModelServing
-	ServingGroup  string
-	RoleName      string
-	RoleID        string
-	RoleIndex     int
-	Role          *workloadv1alpha1.Role
-	IsEntry       bool
-	Pod           *corev1.Pod
-	KubeClient    kubernetes.Interface
-	ServiceLister listerv1.ServiceLister
+	ModelServing    *workloadv1alpha1.ModelServing
+	ServingGroup    string
+	RoleName        string
+	RoleID          string
+	RoleIndex       int
+	Role            *workloadv1alpha1.Role
+	IsEntry         bool
+	Pod             *corev1.Pod
+	PodLister       listerv1.PodLister
+	ConfigMapLister listerv1.ConfigMapLister
+	KubeClient      kubernetes.Interface
+	ServiceLister   listerv1.ServiceLister
 }
 
 // Plugin defines the lifecycle hooks implemented by a plugin.
@@ -52,4 +54,6 @@ type Plugin interface {
 	// OnRoleDelete deletes resources associated with a Role. It must not wait for
 	// the underlying resources to disappear.
 	OnRoleDelete(ctx context.Context, req *HookRequest) error
+	// OnServingGroupDelete is invoked when a serving group is deleted.
+	OnServingGroupDelete(ctx context.Context, req *HookRequest) error
 }

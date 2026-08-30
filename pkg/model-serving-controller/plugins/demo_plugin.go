@@ -94,3 +94,8 @@ func (p *DemoPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
 func (p *DemoPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
 	return nil
 }
+
+// OnServingGroupDelete is a no-op for the demo plugin.
+func (p *DemoPlugin) OnServingGroupDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}

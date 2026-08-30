@@ -206,6 +206,21 @@ func (c *Chain) OnRoleDelete(ctx context.Context, req *HookRequest) error {
 	return nil
 }
 
+// OnServingGroupDelete executes plugins' group delete hooks in order.
+func (c *Chain) OnServingGroupDelete(ctx context.Context, req *HookRequest) error {
+	if c == nil {
+		return nil
+	}
+	for _, entry := range c.entries {
+		if !shouldRunServingGroup(req) {
+			continue
+		}
+		if err := entry.plugin.OnServingGroupDelete(ctx, req); err != nil {
+			return fmt.Errorf("plugin %s OnServingGroupDelete: %w", entry.plugin.Name(), err)
+		}
+	}
+	return nil
+}
 func matchesTarget(target workloadv1alpha1.PluginTarget, needle workloadv1alpha1.PluginTarget) bool {
 	return target == needle || target == workloadv1alpha1.PluginTargetAll
 }
@@ -241,6 +256,10 @@ func shouldRunRole(spec workloadv1alpha1.PluginSpec, req *HookRequest) bool {
 		return true
 	}
 	return len(spec.Scope.Roles) == 0 || containsRole(spec.Scope.Roles, req.RoleName)
+}
+
+func shouldRunServingGroup(req *HookRequest) bool {
+	return req != nil
 }
 
 // DecodeJSON decodes a plugin config into the provided out struct. It is a helper for built-in plugins.

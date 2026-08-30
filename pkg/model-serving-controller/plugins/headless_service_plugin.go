@@ -110,6 +110,10 @@ func (p *HeadlessServicePlugin) OnRoleDelete(ctx context.Context, req *HookReque
 	return nil
 }
 
+func (p *HeadlessServicePlugin) OnServingGroupDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *HeadlessServicePlugin) ensureService(
 	ctx context.Context,
 	req *HookRequest,
