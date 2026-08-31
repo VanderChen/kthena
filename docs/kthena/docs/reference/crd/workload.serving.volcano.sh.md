@@ -1205,3 +1205,4 @@ _Appears in:_
 | `desiredReplicas` _integer_ | DesiredReplicas is the number of replicas the controller computed from<br />metrics, before ratio enforcement. |  |  |
 | `mode` _string_ | Mode reports whether the unit is currently in "Stable" or "Panic" mode. |  |  |
 
+
