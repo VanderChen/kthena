@@ -89,11 +89,6 @@ func (p *roleRolloutGroupPolicy) role(roleName string) (roleRolloutLimits, bool)
 	return role, exists
 }
 
-func (p *roleRolloutGroupPolicy) coordinates(roleName string) bool {
-	_, coordinated := p.role(roleName)
-	return coordinated
-}
-
 // constrainRoleDeletion applies the optional cross-Role policy after the
 // existing Role rolling-update path has calculated its maxUnavailable budget.
 func (p *roleRolloutGroupPolicy) constrainRoleDeletion(

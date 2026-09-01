@@ -2669,14 +2669,15 @@ func TestScaleUpRoles(t *testing.T) {
 	}
 }
 
-func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerRevision(t *testing.T) {
+func TestPartitionProtectedServingGroupUsesHistoricalTemplateWithLatestReplicas(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
-	kthenaClient := kthenafake.NewSimpleClientset()
-	volcanoClient := volcanofake.NewSimpleClientset()
-	apiextfake := apiextfake.NewSimpleClientset()
-
-	controller, err := NewModelServingController(kubeClient, kthenaClient, volcanoClient, apiextfake)
-	assert.NoError(t, err)
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		volcanofake.NewSimpleClientset(),
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
 
 	msName := "test-partition-scaleup-roles"
 	roleName := "prefill"
@@ -2696,6 +2697,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 			Replicas:      ptr.To[int32](1),
 			SchedulerName: "volcano",
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
 				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
 					Partition: &partition,
 				},
@@ -2703,9 +2705,18 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 			Template: workloadv1alpha1.ServingGroup{
 				Roles: []workloadv1alpha1.Role{
 					{
-						Name:     roleName,
-						Replicas: ptr.To[int32](2),
+						Name:           roleName,
+						Replicas:       ptr.To[int32](2),
+						WorkerReplicas: 2,
 						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "prefill-container",
+									Image: "new-image:latest",
+								}},
+							},
+						},
+						WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
 							Spec: corev1.PodSpec{
 								Containers: []corev1.Container{{
 									Name:  "prefill-container",
@@ -2724,9 +2735,18 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 
 	oldRoles := []workloadv1alpha1.Role{
 		{
-			Name:     roleName,
-			Replicas: ptr.To[int32](1),
+			Name:           roleName,
+			Replicas:       ptr.To[int32](1),
+			WorkerReplicas: 1,
 			EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "prefill-container",
+						Image: "old-image:latest",
+					}},
+				},
+			},
+			WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Name:  "prefill-container",
@@ -2738,36 +2758,54 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 	}
 
 	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, oldRevision, oldRoles)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), groupOrdinal, oldRevision)
 	controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, 0), oldRevision, "roleTemplateHash")
 
 	err = controller.syncRoleReplicas(context.Background(), ms, newRevision, nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	roles, err := controller.store.GetRoleList(utils.GetNamespaceName(ms), groupName, roleName)
-	assert.NoError(t, err)
-	// Partition-protected ServingGroup should align to ControllerRevision replicas (1), not new spec replicas (2)
-	assert.Equal(t, 1, len(roles))
+	require.NoError(t, err)
+	assert.Len(t, roles, 2, "protected ServingGroup should follow the latest Role replica count")
+	assert.Equal(t, int32(1), *oldRoles[0].Replicas, "historical input must not be mutated")
+	for _, role := range roles {
+		assert.Equal(t, oldRevision, role.Revision)
+	}
 
 	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
-	assert.NoError(t, err)
-
-	var createdPod *corev1.Pod
+	require.NoError(t, err)
+	assert.Len(t, pods.Items, 4, "each Role must keep the historical one-worker layout")
 	for i := range pods.Items {
-		p := &pods.Items[i]
-		if p.Labels[workloadv1alpha1.RoleIDKey] == utils.GenerateRoleID(roleName, 0) && p.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry {
-			createdPod = p
-			break
-		}
+		require.NotEmpty(t, pods.Items[i].Spec.Containers)
+		assert.Equal(t, "old-image:latest", pods.Items[i].Spec.Containers[0].Image)
+		assert.Equal(t, oldRevision, pods.Items[i].Labels[workloadv1alpha1.RevisionLabelKey])
 	}
-	if assert.NotNil(t, createdPod) {
-		assert.Equal(t, oldRevision, createdPod.Labels[workloadv1alpha1.RevisionLabelKey])
-		if assert.NotEmpty(t, createdPod.Spec.Containers) {
-			assert.Equal(t, "old-image:latest", createdPod.Spec.Containers[0].Image)
-		}
+
+	for _, role := range roles {
+		require.NoError(t, controller.store.UpdateRoleStatus(
+			utils.GetNamespaceName(ms), groupName, roleName, role.Name, datastore.RoleRunning,
+		))
 	}
+	ready, err := controller.checkServingGroupReady(ms, groupName)
+	require.NoError(t, err)
+	assert.True(t, ready, "readiness must use the same historical-template/latest-replicas projection")
+
+	var podGroupRoles []workloadv1alpha1.Role
+	controller.podGroupManager = &fakePodGroupManager{
+		createOrUpdateFunc: func(_ context.Context, projected *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
+			podGroupRoles = projected.Spec.Template.Roles
+			return nil, 0
+		},
+	}
+	require.NoError(t, controller.createOrUpdatePodGroupByServingGroup(context.Background(), ms, groupName))
+	require.Len(t, podGroupRoles, 1)
+	require.NotNil(t, podGroupRoles[0].Replicas)
+	assert.Equal(t, int32(2), *podGroupRoles[0].Replicas, "PodGroup must use the latest independently scalable Role replica count")
+	assert.Equal(t, int32(1), podGroupRoles[0].WorkerReplicas, "PodGroup must use the protected historical worker layout")
+	require.NotEmpty(t, podGroupRoles[0].EntryTemplate.Spec.Containers)
+	assert.Equal(t, "old-image:latest", podGroupRoles[0].EntryTemplate.Spec.Containers[0].Image)
 }
 
 func TestManageRoleReplicas(t *testing.T) {
@@ -3120,6 +3158,14 @@ func TestHasUpdateableOutdatedRole(t *testing.T) {
 				{Name: "decode-0", RoleTemplateHash: "old-hash", Status: datastore.RoleRunning},
 				{Name: "decode-4", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
 			},
+		},
+		{
+			name: "sparse ordinal above partition is updateable",
+			roles: []datastore.Role{
+				{Name: "decode-2", RoleTemplateHash: "old-hash", Status: datastore.RoleRunning},
+				{Name: "decode-5", RoleTemplateHash: newHash, Status: datastore.RoleRunning},
+			},
+			want: true,
 		},
 		{
 			name: "all replicas updated",
@@ -3531,7 +3577,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 }
 
 // TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection.
-// Partition protects the first N existing ServingGroups in ordinal order.
+// Partition protects ServingGroups whose ordinal is less than the partition.
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -3582,20 +3628,20 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			description:            "Partition-protected replicas should never be deleted even if not ready",
 		},
 		{
-			name:            "partition=1 protects first existing group with sparse ordinals",
+			name:            "partition=1 does not protect sparse ordinals above the boundary",
 			partition:       ptr.To(intstr.FromInt32(1)),
 			existingIndices: []int{2, 5},
 			expectedCount:   1,
 			podDeletionCosts: map[int]int{
-				2: 0,   // Lowest cost but protected as the first existing group.
-				5: 100, // Higher cost but not protected.
+				2: 0,
+				5: 100,
 			},
 			groupStatuses: map[int]datastore.ServingGroupStatus{
 				2: datastore.ServingGroupRunning,
 				5: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"2"},
-			description:            "Sparse ordinals do not change the partition-protected prefix",
+			expectedRemainingNames: []string{"5"},
+			description:            "Neither ordinal is below partition, so binpack scoring decides which remains",
 		},
 		{
 			name:            "no partition, all replicas can be deleted",
@@ -3798,8 +3844,10 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted.
 			if tt.partition != nil && tt.partition.IntValue() > 0 {
 				protectedOrdinals := make(map[int]struct{})
-				for i := 0; i < tt.partition.IntValue() && i < len(tt.existingIndices); i++ {
-					protectedOrdinals[tt.existingIndices[i]] = struct{}{}
+				for _, ordinal := range tt.existingIndices {
+					if ordinal < tt.partition.IntValue() {
+						protectedOrdinals[ordinal] = struct{}{}
+					}
 				}
 				// Count how many non-protected groups remain
 				remainingNonProtectedCount := 0
@@ -8426,13 +8474,13 @@ func TestHasUpdateableOutdatedServingGroup(t *testing.T) {
 			want:      false,
 		},
 		{
-			name: "partition protects first existing group with sparse ordinals",
+			name: "sparse ordinal above partition remains updateable",
 			groups: []datastore.ServingGroup{
 				{Name: "recovery-2", Revision: "old", Status: datastore.ServingGroupRunning},
 				{Name: "recovery-5", Revision: "new", Status: datastore.ServingGroupRunning},
 			},
 			partition: 1,
-			want:      false,
+			want:      true,
 		},
 		{
 			name: "outdated group after sparse partition prefix requires surge",
@@ -8604,7 +8652,7 @@ func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
 }
 
-func TestPartitionProtectedServingGroupReadinessUsesHistoricalTemplateWithSparseOrdinals(t *testing.T) {
+func TestServingGroupReadinessUsesOrdinalPartitionWithSparseGroups(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
 	require.NoError(t, err)
@@ -8633,7 +8681,55 @@ func TestPartitionProtectedServingGroupReadinessUsesHistoricalTemplateWithSparse
 
 	ready, err := controller.checkServingGroupReady(ms, groupName)
 	require.NoError(t, err)
-	assert.True(t, ready, "protected group should be ready according to its historical revision")
+	assert.False(t, ready, "ordinal 2 is outside partition 1 and must use the latest replica count")
+}
+
+func TestCheckServingGroupReadyDefaultsNilRoleReplicas(t *testing.T) {
+	controller := &ModelServingController{store: datastore.New()}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "nil-replicas-ready", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "decode"}}},
+		},
+	}
+	key := utils.GetNamespaceName(ms)
+	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	controller.store.AddServingGroup(key, 0, "revision")
+	controller.store.AddRole(key, groupName, "decode", "decode-0", "revision", "hash")
+	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", "decode-0", datastore.RoleRunning))
+
+	ready, err := controller.checkServingGroupReady(ms, groupName)
+	require.NoError(t, err)
+	assert.True(t, ready)
+}
+
+func TestPartitionReadinessRejectsEmptyHistoricalRoles(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller := &ModelServingController{store: datastore.New(), kubeClientSet: kubeClient}
+	partition := intstr.FromInt(1)
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "empty-history", Namespace: "default", UID: types.UID("empty-history-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+					Partition: &partition,
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Name:     "decode",
+				Replicas: ptr.To[int32](1),
+			}}},
+		},
+	}
+	_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", []workloadv1alpha1.Role{})
+	require.NoError(t, err)
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "old-revision")
+
+	ready, err := controller.checkServingGroupReady(ms, utils.GenerateServingGroupName(ms.Name, 0))
+	assert.False(t, ready)
+	require.ErrorContains(t, err, "contains no Roles")
 }
 
 func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T) {
@@ -8935,7 +9031,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			},
 		},
 		{
-			name: "partition protects first outdated roles with non-continuous ordinals",
+			name: "partition protects only ordinals below its boundary",
 			roles: []workloadv1alpha1.Role{
 				func() workloadv1alpha1.Role {
 					role := newRole("prefill", "nginx:latest", 4, nil)
@@ -8953,6 +9049,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expected: []roleToDelete{
 				{roleName: "prefill", roleID: "prefill-8"},
 				{roleName: "prefill", roleID: "prefill-5"},
+				{roleName: "prefill", roleID: "prefill-3"},
 			},
 			expectedOutdated: true,
 		},
@@ -9714,101 +9811,4 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
-}
-
-func TestPartitionProtectedServingGroupReadinessUsesControllerRevision(t *testing.T) {
-	ns := "default"
-	msName := "test-model-serving"
-	groupName := utils.GenerateServingGroupName(msName, 0)
-	roleName := "prefill"
-	roleID := "prefill-0"
-	oldRevision := "old-revision"
-
-	oldRoles := []workloadv1alpha1.Role{
-		{
-			Name:           roleName,
-			Replicas:       ptr.To[int32](1),
-			WorkerReplicas: 0,
-		},
-	}
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      msName,
-			Namespace: ns,
-			UID:       types.UID("test-uid"),
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Replicas: ptr.To[int32](2),
-			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
-				Type: workloadv1alpha1.ServingGroupRollingUpdate,
-				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
-					Partition: ptr.To(intstr.FromInt32(1)),
-				},
-			},
-			Template: workloadv1alpha1.ServingGroup{
-				Roles: []workloadv1alpha1.Role{
-					{
-						Name:           roleName,
-						Replicas:       ptr.To[int32](2),
-						WorkerReplicas: 2,
-					},
-					{
-						Name:     "new-role",
-						Replicas: ptr.To[int32](1),
-					},
-				},
-			},
-		},
-		Status: workloadv1alpha1.ModelServingStatus{
-			CurrentRevision: oldRevision,
-		},
-	}
-
-	kubeClient := kubefake.NewSimpleClientset()
-	_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, oldRevision, oldRoles)
-	require.NoError(t, err)
-	informerFactory := informers.NewSharedInformerFactory(kubeClient, 0)
-	podInformer := informerFactory.Core().V1().Pods()
-	require.NoError(t, podInformer.Informer().AddIndexers(cache.Indexers{
-		GroupNameKey: utils.GroupNameIndexFunc,
-		RoleIDKey:    utils.RoleIDIndexFunc,
-	}))
-
-	store := datastore.New()
-	store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
-	store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, roleID, oldRevision, utils.CalRoleTemplateHash(oldRoles[0]))
-	require.NoError(t, store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleRunning))
-	controller := &ModelServingController{
-		kubeClientSet: kubeClient,
-		podsInformer:  podInformer.Informer(),
-		podsLister:    podInformer.Lister(),
-		store:         store,
-	}
-
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: ns,
-			Name:      "prefill-entry-0",
-			Labels: map[string]string{
-				workloadv1alpha1.GroupNameLabelKey: groupName,
-				workloadv1alpha1.RoleLabelKey:      roleName,
-				workloadv1alpha1.RoleIDKey:         roleID,
-			},
-		},
-		Status: corev1.PodStatus{
-			Phase: corev1.PodRunning,
-			Conditions: []corev1.PodCondition{
-				{Type: corev1.PodReady, Status: corev1.ConditionTrue},
-			},
-		},
-	}
-	require.NoError(t, podInformer.Informer().GetIndexer().Add(pod))
-
-	roleReady, err := controller.checkRoleReady(ms, groupName, roleName, roleID)
-	require.NoError(t, err)
-	assert.True(t, roleReady, "role readiness should use workerReplicas from the old ControllerRevision")
-
-	groupReady, err := controller.checkServingGroupReady(ms, groupName)
-	require.NoError(t, err)
-	assert.True(t, groupReady, "ServingGroup readiness should use roles and replicas from the old ControllerRevision")
 }
