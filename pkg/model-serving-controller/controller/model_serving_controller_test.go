@@ -2981,6 +2981,106 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 	assert.Len(t, pods.Items, 3)
 }
 
+func TestManageRoleReplicasCombinesMaxSurgeAndCoordinationGate(t *testing.T) {
+	tests := []struct {
+		name             string
+		allowTargetStart bool
+		expectedRoles    int
+		expectedNewRoles int
+	}{
+		{
+			name:             "dependency gate blocks surge target replica",
+			allowTargetStart: false,
+			expectedRoles:    2,
+			expectedNewRoles: 0,
+		},
+		{
+			name:             "released dependency gate permits surge target replica",
+			allowTargetStart: true,
+			expectedRoles:    3,
+			expectedNewRoles: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			controller, err := NewModelServingController(
+				kubeClient,
+				kthenafake.NewSimpleClientset(),
+				nil,
+				apiextfake.NewSimpleClientset(),
+			)
+			require.NoError(t, err)
+
+			maxUnavailable := intstr.FromInt(0)
+			maxSurge := intstr.FromInt(1)
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "coordinated-role-surge",
+					UID:       types.UID("coordinated-role-surge-uid"),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:       ptr.To[int32](1),
+					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: workloadv1alpha1.RoleRollingUpdate,
+					},
+					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+						Name:           "decode",
+						Replicas:       ptr.To[int32](2),
+						WorkerReplicas: 0,
+						RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: &maxUnavailable,
+							MaxSurge:       &maxSurge,
+						},
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "entry", Image: "new-image"}}},
+						},
+					}}},
+				},
+			}
+			key := utils.GetNamespaceName(ms)
+			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			controller.store.AddServingGroup(key, 0, "old-revision")
+			for ordinal := 0; ordinal < 2; ordinal++ {
+				controller.store.AddRole(
+					key,
+					groupName,
+					"decode",
+					utils.GenerateRoleID("decode", ordinal),
+					"old-revision",
+					"old-hash",
+				)
+			}
+
+			err = controller.manageRoleReplicasPerGroup(
+				context.Background(),
+				ms,
+				groupName,
+				ms.Spec.Template.Roles[0],
+				0,
+				"new-revision",
+				nil,
+				tt.allowTargetStart,
+			)
+			require.NoError(t, err)
+
+			roles, err := controller.store.GetRoleList(key, groupName, "decode")
+			require.NoError(t, err)
+			assert.Len(t, roles, tt.expectedRoles)
+			newRoles := 0
+			for _, role := range roles {
+				if role.Revision == "new-revision" {
+					newRoles++
+				}
+			}
+			assert.Equal(t, tt.expectedNewRoles, newRoles)
+		})
+	}
+}
+
 func TestHasUpdateableOutdatedRole(t *testing.T) {
 	controller := &ModelServingController{}
 	partition := intstr.FromInt(1)
