@@ -91,6 +91,10 @@ func (p *DemoPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (p *DemoPlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *DemoPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
 	return nil
 }

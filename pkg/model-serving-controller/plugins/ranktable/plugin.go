@@ -129,6 +129,10 @@ func (p *RanktablePlugin) OnPodReady(_ context.Context, _ *plugins.HookRequest) 
 	return nil
 }
 
+func (p *RanktablePlugin) OnPodDelete(ctx context.Context, req *plugins.HookRequest) error {
+	return p.updateRanktableFromPods(ctx, req, "OnPodDelete")
+}
+
 func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plugins.HookRequest, hookName string) error {
 	ms := req.ModelServing
 

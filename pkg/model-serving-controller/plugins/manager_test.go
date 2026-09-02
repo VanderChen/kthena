@@ -58,6 +58,14 @@ func (t *testPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "delete-"+t.name)
+	if t.errOn == "delete" {
+		return assertError
+	}
+	return nil
+}
+
 func (t *testPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
 	*t.calls = append(*t.calls, "role-sync-"+t.name)
 	if t.errOn == "role-sync" {
@@ -129,6 +137,14 @@ func TestChainOrderingAndScope(t *testing.T) {
 	}
 	if got := strings.Join(calls, ","); got != "ready-p1,ready-p2" {
 		t.Fatalf("ready run mismatch, got %s", got)
+	}
+
+	calls = calls[:0]
+	if err := chain.OnPodDelete(context.Background(), workerReq); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "delete-p1,delete-p2" {
+		t.Fatalf("delete run mismatch, got %s", got)
 	}
 }
 

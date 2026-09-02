@@ -88,6 +88,10 @@ func (p *LWSLabelsPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (p *LWSLabelsPlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *LWSLabelsPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
 	return nil
 }

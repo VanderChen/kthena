@@ -52,6 +52,18 @@ func TestOnPodRunningGeneratesRanktableBeforePodReady(t *testing.T) {
 	assert.JSONEq(t, `{"status":"Completed","servers":1}`, cm.Data["ranktable.json"])
 }
 
+func TestOnPodDeleteResetsRanktableWhenRoleBecomesIncomplete(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "default")
+
+	plugin, req, client := newRanktablePluginTest(t, RoleLevelRanktable, nil)
+	require.NoError(t, plugin.OnPodDelete(context.Background(), req))
+
+	cmName := GenerateRanktableConfigMapName(req.ModelServing.Name, req.ServingGroup+"-"+req.RoleID)
+	cm, err := client.CoreV1().ConfigMaps(req.ModelServing.Namespace).Get(context.Background(), cmName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"Initializing","servers":0}`, cm.Data["ranktable.json"])
+}
+
 func newRanktablePluginTest(
 	t *testing.T,
 	level RanktableLevel,

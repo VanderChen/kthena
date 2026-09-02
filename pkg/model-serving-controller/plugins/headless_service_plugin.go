@@ -82,6 +82,10 @@ func (p *HeadlessServicePlugin) OnPodReady(_ context.Context, _ *HookRequest) er
 	return nil
 }
 
+func (p *HeadlessServicePlugin) OnPodDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *HeadlessServicePlugin) OnRoleSync(ctx context.Context, req *HookRequest) error {
 	if req == nil || !requiresHeadlessService(req.Role) {
 		return nil

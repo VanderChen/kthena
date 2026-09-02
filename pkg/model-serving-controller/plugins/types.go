@@ -52,6 +52,8 @@ type Plugin interface {
 	OnPodRunning(ctx context.Context, req *HookRequest) error
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
 	OnPodReady(ctx context.Context, req *HookRequest) error
+	// OnPodDelete is invoked after the controller observes a Pod deletion.
+	OnPodDelete(ctx context.Context, req *HookRequest) error
 	// OnRoleSync idempotently ensures resources for an active Role.
 	OnRoleSync(ctx context.Context, req *HookRequest) error
 	// OnRoleDelete deletes resources associated with a Role. It must not wait for
