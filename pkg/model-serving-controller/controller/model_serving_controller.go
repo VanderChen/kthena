@@ -734,6 +734,10 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get servingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
+	servingGroupList, err = c.pruneDeletedServingGroups(ctx, ms, servingGroupList)
+	if err != nil {
+		return err
+	}
 	replicas := modelServingReplicas(ms)
 	expectedCount := replicas
 	isServingGroupRollingUpdate := ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
@@ -779,6 +783,25 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 		}
 	}
 	return nil
+}
+
+func (c *ModelServingController) pruneDeletedServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup) ([]datastore.ServingGroup, error) {
+	if len(servingGroupList) == 0 {
+		return servingGroupList, nil
+	}
+	kept := make([]datastore.ServingGroup, 0, len(servingGroupList))
+	for _, servingGroup := range servingGroupList {
+		if servingGroup.Status != datastore.ServingGroupDeleting || !c.isServingGroupDeleted(ms, servingGroup.Name) {
+			kept = append(kept, servingGroup)
+			continue
+		}
+		if err := c.runServingGroupDeletePlugins(ctx, ms, servingGroup.Name); err != nil {
+			return nil, fmt.Errorf("complete plugin cleanup for deleted ServingGroup %s: %w", servingGroup.Name, err)
+		}
+		klog.V(2).Infof("ServingGroup %s has been deleted, removing it from store before replica accounting", servingGroup.Name)
+		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroup.Name)
+	}
+	return kept, nil
 }
 
 // hasUpdateableOutdatedServingGroup derives the temporary capacity requirement
@@ -2425,7 +2448,34 @@ func (c *ModelServingController) isServingGroupDeleted(ms *workloadv1alpha1.Mode
 			return false
 		}
 	}
-	return len(pgs) == 0 && len(pods) == 0
+	return len(filterPodGroupsOwnedByModelServing(pgs, ms.UID)) == 0 && len(filterPodsOwnedByModelServing(pods, ms.UID)) == 0
+}
+
+func filterPodsOwnedByModelServing(pods []*corev1.Pod, uid types.UID) []*corev1.Pod {
+	owned := make([]*corev1.Pod, 0, len(pods))
+	for _, pod := range pods {
+		if isOwnedByCurrentModelServing(pod, uid) {
+			owned = append(owned, pod)
+		}
+	}
+	return owned
+}
+
+func filterPodGroupsOwnedByModelServing(podGroups []*schedulingv1beta1.PodGroup, uid types.UID) []*schedulingv1beta1.PodGroup {
+	owned := make([]*schedulingv1beta1.PodGroup, 0, len(podGroups))
+	for _, podGroup := range podGroups {
+		if isOwnedByCurrentModelServing(podGroup, uid) {
+			owned = append(owned, podGroup)
+		}
+	}
+	return owned
+}
+
+func isOwnedByCurrentModelServing(obj metav1.Object, uid types.UID) bool {
+	if uid == "" {
+		return true
+	}
+	return utils.IsOwnedByModelServingWithUID(obj, uid)
 }
 
 func (c *ModelServingController) isRoleDeleted(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {

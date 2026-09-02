@@ -8769,6 +8769,71 @@ func TestSyncServingGroupReplicasPreservesSparseOrdinals(t *testing.T) {
 	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 2), groups[1].Name)
 }
 
+func TestSyncServingGroupReplicasPrunesDeletedGroupsBeforeScaleUp(t *testing.T) {
+	kubeClient := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		kthenafake.NewSimpleClientset(),
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+
+	role := workloadv1alpha1.Role{
+		Name:           "prefill",
+		Replicas:       ptr.To[int32](1),
+		WorkerReplicas: 1,
+		EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "entry", Image: "test-image"}},
+		}},
+		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "worker", Image: "test-image"}},
+		}},
+	}
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "modelserving-test", Namespace: "default", UID: types.UID("ms-uid")},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](4),
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}},
+		},
+	}
+	nsn := utils.GetNamespaceName(ms)
+	revision := "rev-1"
+	for _, ordinal := range []int{4, 5, 6} {
+		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
+		controller.store.AddServingGroup(nsn, ordinal, revision)
+		require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, groupName, datastore.ServingGroupDeleting))
+	}
+	controller.store.AddServingGroup(nsn, 7, revision)
+	require.NoError(t, controller.store.UpdateServingGroupStatus(nsn, utils.GenerateServingGroupName(ms.Name, 7), datastore.ServingGroupRunning))
+
+	// An object left by an older same-named ModelServing must not keep the
+	// current ModelServing's deleting group in replica accounting forever.
+	stalePod := utils.GenerateEntryPod(*role.DeepCopy(), ms, utils.GenerateServingGroupName(ms.Name, 4), "prefill-0", revision, utils.CalRoleTemplateHash(role))
+	stalePod.OwnerReferences[0].UID = types.UID("old-ms-uid")
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(stalePod))
+
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, revision))
+	groups, err := controller.store.GetServingGroupByModelServing(nsn)
+	require.NoError(t, err)
+	groupNames := make([]string, 0, len(groups))
+	for _, group := range groups {
+		groupNames = append(groupNames, group.Name)
+	}
+	require.ElementsMatch(t, []string{
+		utils.GenerateServingGroupName(ms.Name, 0),
+		utils.GenerateServingGroupName(ms.Name, 1),
+		utils.GenerateServingGroupName(ms.Name, 2),
+		utils.GenerateServingGroupName(ms.Name, 7),
+	}, groupNames)
+
+	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}).String(),
+	})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 6)
+}
+
 func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
