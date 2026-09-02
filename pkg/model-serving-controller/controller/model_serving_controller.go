@@ -354,6 +354,12 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		return
 	}
 
+	if newPod.Status.Phase == corev1.PodRunning {
+		if err = c.handleRunningPod(ms, servingGroupName, newPod); err != nil {
+			klog.Errorf("handle running pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
+		}
+	}
+
 	switch {
 	case utils.IsPodRunningAndReady(newPod):
 		klog.V(4).Infof("handleReadyPod: %s/%s", newPod.Namespace, newPod.Name)
@@ -1800,6 +1806,28 @@ func selectOutdatedRolesToDelete(roleName string, outdatedRoles []datastore.Role
 		rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: role.Name})
 	}
 	return rolesToDelete, nil
+}
+
+func (c *ModelServingController) handleRunningPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {
+	chain, err := c.buildPluginChain(ms)
+	if err != nil {
+		return fmt.Errorf("build plugin chain: %w", err)
+	}
+	if chain == nil {
+		return nil
+	}
+	return chain.OnPodRunning(context.Background(), &plugins.HookRequest{
+		ModelServing:    ms,
+		ServingGroup:    servingGroupName,
+		RoleName:        utils.GetRoleName(pod),
+		RoleID:          utils.GetRoleID(pod),
+		IsEntry:         pod.Labels[workloadv1alpha1.EntryLabelKey] == utils.Entry,
+		Pod:             pod,
+		PodLister:       c.podsLister,
+		ConfigMapLister: c.configMapsLister,
+		KubeClient:      c.kubeClientSet,
+		ServiceLister:   c.servicesLister,
+	})
 }
 
 func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {

@@ -121,7 +121,15 @@ func (p *RanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequ
 	return nil
 }
 
-func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookRequest) error {
+func (p *RanktablePlugin) OnPodRunning(ctx context.Context, req *plugins.HookRequest) error {
+	return p.updateRanktableFromPods(ctx, req, "OnPodRunning")
+}
+
+func (p *RanktablePlugin) OnPodReady(_ context.Context, _ *plugins.HookRequest) error {
+	return nil
+}
+
+func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plugins.HookRequest, hookName string) error {
 	ms := req.ModelServing
 
 	template, err := p.templateManager.GetRanktableTemplate(req.ConfigMapLister, p.cfg.Template)
@@ -152,7 +160,7 @@ func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookReque
 		return err
 	}
 
-	klog.V(4).Infof("Found %d pods for ranktable generation (Level: %s, RoleID: %s)", len(pods), template.Level, req.RoleID)
+	klog.V(4).Infof("%s: found %d pods for ranktable generation (level: %s, roleID: %s)", hookName, len(pods), template.Level, req.RoleID)
 
 	// Check readiness and collect data
 	allReady := true
@@ -161,10 +169,11 @@ func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookReque
 
 	for _, pod := range pods {
 		isRunning := pod.Status.Phase == corev1.PodRunning
-		klog.V(4).Infof("Checking pod %s: Phase=%s, DeletionTimestamp=%v, Running=%v", pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
+		klog.V(4).Infof("%s: checking pod %s: phase=%s deletionTimestamp=%v running=%v", hookName, pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
 
 		// Skip pods that are deleting
 		if pod.DeletionTimestamp != nil {
+			klog.V(4).Infof("%s: skipping deleting pod %s", hookName, pod.Name)
 			continue
 		}
 		activePods++
@@ -197,7 +206,7 @@ func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookReque
 	if !allReady || len(podRanktables) == 0 {
 		status = RanktableStatusInitializing
 		podRanktables = nil // Force empty data if not ready
-		klog.V(4).Infof("Ranktable status set to Initializing. allReady: %v, podRanktables count: %d", allReady, len(podRanktables))
+		klog.V(4).Infof("%s: ranktable status set to Initializing. allReady: %v, podRanktables count: %d", hookName, allReady, len(podRanktables))
 	} else {
 		// Double check if we have enough pods
 		if template.Level == RoleLevelRanktable {
@@ -248,6 +257,7 @@ func (p *RanktablePlugin) OnPodReady(ctx context.Context, req *plugins.HookReque
 
 	ownerRef := *metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))
 
+	klog.V(2).Infof("%s: updating ranktable ConfigMap %s/%s", hookName, ms.Namespace, cmName)
 	return p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON)
 }
 

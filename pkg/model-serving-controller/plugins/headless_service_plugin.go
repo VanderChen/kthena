@@ -74,6 +74,10 @@ func (p *HeadlessServicePlugin) OnPodCreate(ctx context.Context, req *HookReques
 	return p.ensureService(ctx, req, roleIndex)
 }
 
+func (p *HeadlessServicePlugin) OnPodRunning(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *HeadlessServicePlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }

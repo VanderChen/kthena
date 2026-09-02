@@ -80,6 +80,10 @@ func (p *LWSLabelsPlugin) OnPodCreate(_ context.Context, req *HookRequest) error
 	return nil
 }
 
+func (p *LWSLabelsPlugin) OnPodRunning(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func (p *LWSLabelsPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	return nil
 }

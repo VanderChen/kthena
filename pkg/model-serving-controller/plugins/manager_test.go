@@ -42,6 +42,14 @@ func (t *testPlugin) OnPodCreate(_ context.Context, _ *HookRequest) error {
 	return nil
 }
 
+func (t *testPlugin) OnPodRunning(_ context.Context, _ *HookRequest) error {
+	*t.calls = append(*t.calls, "running-"+t.name)
+	if t.errOn == "running" {
+		return assertError
+	}
+	return nil
+}
+
 func (t *testPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
 	*t.calls = append(*t.calls, "ready-"+t.name)
 	if t.errOn == "ready" {
@@ -105,6 +113,14 @@ func TestChainOrderingAndScope(t *testing.T) {
 	}
 	if got := strings.Join(calls, ","); got != "create-p1,create-p2" {
 		t.Fatalf("worker run mismatch, got %s", got)
+	}
+
+	calls = calls[:0]
+	if err := chain.OnPodRunning(context.Background(), workerReq); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "running-p1,running-p2" {
+		t.Fatalf("running run mismatch, got %s", got)
 	}
 
 	calls = calls[:0]

@@ -47,6 +47,9 @@ type Plugin interface {
 	Name() string
 	// OnPodCreate is invoked before the controller creates the Pod. Mutations are applied in-place to req.Pod.
 	OnPodCreate(ctx context.Context, req *HookRequest) error
+	// OnPodRunning is invoked when the controller observes the Pod running, even
+	// if its containers have not become ready yet.
+	OnPodRunning(ctx context.Context, req *HookRequest) error
 	// OnPodReady is invoked when the controller observes the Pod running and ready.
 	OnPodReady(ctx context.Context, req *HookRequest) error
 	// OnRoleSync idempotently ensures resources for an active Role.
