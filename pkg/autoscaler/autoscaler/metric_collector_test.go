@@ -425,3 +425,26 @@ func TestUpdateMetricsKeepsReadyPodMetricsWhenAnotherPodIsUnready(t *testing.T) 
 	require.Equal(t, float64(40), readyMetrics["queue_depth"])
 	require.Equal(t, float64(40), readyMetrics["queue_depth_alt"])
 }
+
+func TestEvaluatePodsReadinessAllowsRecoveredRestartedPod(t *testing.T) {
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "restarted", Namespace: "default"},
+		Status: corev1.PodStatus{
+			Phase:      corev1.PodRunning,
+			Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:         "runtime",
+				Ready:        true,
+				RestartCount: 1,
+			}},
+		},
+	}
+
+	unready, failed := evaluatePodsReadiness([]*corev1.Pod{pod})
+	assert.Empty(t, unready)
+	assert.False(t, failed)
+
+	pod.Status.Phase = corev1.PodFailed
+	_, failed = evaluatePodsReadiness([]*corev1.Pod{pod})
+	assert.True(t, failed)
+}

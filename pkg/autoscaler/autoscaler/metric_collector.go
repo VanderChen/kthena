@@ -267,14 +267,15 @@ func (collector *MetricCollector) collectPodMetricsGroup(
 }
 
 // evaluatePodsReadiness counts pods that are not ready and reports whether any
-// pod has failed or restarted.
+// pod has failed. A restarted container may have recovered and remains eligible
+// for metric collection once the Pod is ready again.
 func evaluatePodsReadiness(pods []*corev1.Pod) (unreadyPods sets.Set[string], failed bool) {
 	unreadyPods = sets.New[string]()
 	for _, pod := range pods {
 		if !inferControllerUtils.IsPodRunningAndReady(pod) {
 			unreadyPods.Insert(metricPodKey(pod))
 		}
-		if util.IsPodFailed(pod) || inferControllerUtils.ContainerRestarted(pod) {
+		if util.IsPodFailed(pod) {
 			failed = true
 		}
 	}
