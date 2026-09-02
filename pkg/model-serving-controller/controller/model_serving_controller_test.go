@@ -8254,6 +8254,13 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        sgName,
 					},
+					OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+						Kind:       workloadv1alpha1.ModelServingKind.Kind,
+						Name:       ms.Name,
+						UID:        ms.UID,
+						Controller: ptr.To(true),
+					}},
 				},
 			}
 
