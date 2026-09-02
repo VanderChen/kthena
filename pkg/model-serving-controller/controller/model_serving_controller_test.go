@@ -375,6 +375,21 @@ func TestDeletePodParentListerMissRequeuesByLabel(t *testing.T) {
 	h.expectQueuedKey(namespacedKey("default", "ms"))
 }
 
+func TestPeriodicFullSyncRequeuesModelServing(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "ms", Namespace: "default", UID: types.UID("ms-uid")},
+	}
+	h := newTestController(t, ms)
+	drainWorkqueue(t, h.controller.workqueue)
+
+	h.controller.fullSyncPeriod = 10 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.controller.runPeriodicFullSync(ctx)
+
+	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+}
+
 func TestIsLabeledForModelServing(t *testing.T) {
 	tests := []struct {
 		name   string
