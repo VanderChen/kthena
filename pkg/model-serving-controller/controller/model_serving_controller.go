@@ -223,7 +223,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 			if metaObj == nil {
 				return false
 			}
-			return isOwnedByModelServing(metaObj)
+			return isOwnedByModelServing(metaObj) || isLabeledForModelServing(metaObj)
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
@@ -351,6 +351,9 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 	}
 
 	if c.shouldSkipHandling(ms, servingGroupName, newPod) {
+		// Labeled orphan Pods are included in the event handler so reconciliation
+		// can actively remove a stale object occupying a deterministic Pod name.
+		c.enqueueModelServing(ms)
 		return
 	}
 
@@ -1258,17 +1261,30 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			continue
 		}
+		ownedPods := make([]*corev1.Pod, 0, len(pods))
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-				// If the pod is not owned by the ModelServing, we do not need to handle it.
-				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s may be left from previous same-named ModelServing %s/%s (expected UID=%s, got UID=%s), re-enqueuing",
-					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID, pod.OwnerReferences[0].UID)
+				expectedName := false
+				for podIndex := 0; podIndex < expectedPods; podIndex++ {
+					if pod.Name == utils.GeneratePodName(groupName, roleObj.Name, podIndex) {
+						expectedName = true
+						break
+					}
+				}
+				if expectedName && pod.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name {
+					if err := c.deleteConflictingPod(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
+						klog.Errorf("manageRoleReplicasPerGroup: failed to delete orphan pod %s/%s: %v", pod.Namespace, pod.Name, err)
+					}
+				}
+				klog.Warningf("manageRoleReplicasPerGroup: pod %s/%s is not owned by current ModelServing %s/%s (expected UID=%s), re-enqueuing",
+					pod.Namespace, pod.Name, ms.Namespace, ms.Name, ms.UID)
 				c.enqueueModelServingAfter(ms, 1*time.Second)
-				break
+				continue
 			}
+			ownedPods = append(ownedPods, pod)
 		}
-		if len(pods) < expectedPods {
-			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(pods), expectedPods)
+		if len(ownedPods) < expectedPods {
+			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			keepCurrentRevision := (partitionConfigured && partition > 0 && roleIndex >= 0 && roleIndex < partition) || !allowTargetStart
 			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, keepCurrentRevision)
@@ -2257,6 +2273,11 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 	return false
 }
 
+func isLabeledForModelServing(metaObj metav1.Object) bool {
+	modelServingName, servingGroupName, ok := utils.GetModelServingAndGroupByLabel(metaObj.GetLabels())
+	return ok && modelServingName != "" && servingGroupName != ""
+}
+
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
 // Returns true if the resource deletion is already in progress and the caller should stop further handling.
 func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
@@ -2955,12 +2976,22 @@ func (c *ModelServingController) createPod(
 			expectedRoleTemplateHash := utils.ObjectRoleTemplateHash(pod)
 			roleTemplateHashMatches := existingRoleTemplateHash == "" || expectedRoleTemplateHash == "" || existingRoleTemplateHash == expectedRoleTemplateHash
 			identityMatches := utils.IsOwnedByModelServingWithUID(existing, ms.UID) &&
+				existing.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name &&
 				existing.Labels[workloadv1alpha1.GroupNameLabelKey] == servingGroupName &&
 				existing.Labels[workloadv1alpha1.RoleLabelKey] == roleName &&
 				existing.Labels[workloadv1alpha1.RoleIDKey] == roleID &&
 				utils.ObjectRevision(existing) == utils.ObjectRevision(pod) &&
 				roleTemplateHashMatches
 			if !identityMatches {
+				labelsMatch := existing.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name &&
+					existing.Labels[workloadv1alpha1.GroupNameLabelKey] == servingGroupName &&
+					existing.Labels[workloadv1alpha1.RoleLabelKey] == roleName &&
+					existing.Labels[workloadv1alpha1.RoleIDKey] == roleID
+				if labelsMatch && !utils.IsOwnedByModelServingWithUID(existing, ms.UID) {
+					if deleteErr := c.deleteConflictingPod(ctx, existing); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
+						return fmt.Errorf("failed to delete conflicting %s pod %s: %v", roleKind, pod.Name, deleteErr)
+					}
+				}
 				c.enqueueModelServingAfter(ms, enqueueAfter)
 				return fmt.Errorf("existing %s pod %s does not match expected identity: owner=%t group=%q/%q role=%q/%q roleID=%q/%q revision=%q/%q roleTemplateHash=%q/%q",
 					roleKind, pod.Name,
@@ -2977,6 +3008,15 @@ func (c *ModelServingController) createPod(
 	}
 
 	return nil
+}
+
+func (c *ModelServingController) deleteConflictingPod(ctx context.Context, pod *corev1.Pod) error {
+	deleteOptions := metav1.DeleteOptions{}
+	if pod.UID != "" {
+		uid := pod.UID
+		deleteOptions.Preconditions = &metav1.Preconditions{UID: &uid}
+	}
+	return c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, deleteOptions)
 }
 
 func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {

@@ -317,6 +317,41 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod, true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
 	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+	require.Eventually(t, func() bool {
+		_, getErr := h.kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), existing.Name, metav1.GetOptions{})
+		return apierrors.IsNotFound(getErr)
+	}, 2*time.Second, 10*time.Millisecond, "conflicting Pod should be deleted before retry")
+}
+
+func TestIsLabeledForModelServing(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{
+			name: "model serving and group labels",
+			labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: "ms",
+				workloadv1alpha1.GroupNameLabelKey:        "ms-0",
+			},
+			want: true,
+		},
+		{
+			name: "missing group label",
+			labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: "ms",
+			},
+		},
+		{name: "no labels"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Labels: tt.labels}}
+			assert.Equal(t, tt.want, isLabeledForModelServing(pod))
+		})
+	}
 }
 
 func TestDeletePodGroupEnqueues(t *testing.T) {
@@ -2953,6 +2988,10 @@ func TestManageRoleReplicas(t *testing.T) {
 			pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
+			if tt.mismatchOwnerUID {
+				require.Len(t, pods.Items, 1)
+				assert.True(t, utils.IsOwnedByModelServingWithUID(&pods.Items[0], ms.UID), "orphan should be replaced with a Pod owned by the current ModelServing")
+			}
 			//}
 
 			if tt.expectRequeue {
