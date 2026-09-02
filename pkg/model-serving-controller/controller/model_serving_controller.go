@@ -2285,20 +2285,8 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 				// role has been deleted, so the storage needs to be updated and need to reconcile.
 				klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
 
-				chain, err := c.buildPluginChain(ms)
-				if err != nil {
-					klog.Errorf("failed to build plugin chain: %v", err)
-				} else if chain != nil {
-					if err := chain.OnRoleDelete(context.TODO(), &plugins.HookRequest{
-						ModelServing:    ms,
-						ServingGroup:    servingGroupName,
-						RoleName:        roleName,
-						RoleID:          roleID,
-						KubeClient:      c.kubeClientSet,
-						ConfigMapLister: c.configMapsLister,
-					}); err != nil {
-						klog.Errorf("failed to execute OnRoleDelete hook: %v", err)
-					}
+				if err := c.runRoleDeletePlugins(context.TODO(), ms, servingGroupName, roleName, roleID); err != nil {
+					klog.Errorf("failed to execute OnRoleDelete hook: %v", err)
 				}
 
 				c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
@@ -2849,6 +2837,7 @@ func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *w
 		RoleIndex:       roleIndex,
 		Role:            role,
 		KubeClient:      c.kubeClientSet,
+		PodLister:       c.podsLister,
 		ConfigMapLister: c.configMapsLister,
 		ServiceLister:   c.servicesLister,
 	})

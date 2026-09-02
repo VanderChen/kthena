@@ -293,6 +293,8 @@ func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookReq
 			}
 		}
 		klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
+	} else if template.Level == GroupLevelRanktable {
+		return p.updateRanktableFromPods(ctx, req, "OnRoleDelete")
 	}
 
 	return nil
