@@ -146,6 +146,14 @@ func TestChainOrderingAndScope(t *testing.T) {
 	if got := strings.Join(calls, ","); got != "delete-p1,delete-p2" {
 		t.Fatalf("delete run mismatch, got %s", got)
 	}
+
+	calls = calls[:0]
+	if err := chain.OnServingGroupDelete(context.Background(), &HookRequest{ServingGroup: "ms-0"}); err != nil {
+		t.Fatalf("unexpected ServingGroup delete error: %v", err)
+	}
+	if got := strings.Join(calls, ","); got != "serving-group-delete-p1,serving-group-delete-p2" {
+		t.Fatalf("ServingGroup delete run mismatch, got %s", got)
+	}
 }
 
 func TestChainErrorPropagation(t *testing.T) {
