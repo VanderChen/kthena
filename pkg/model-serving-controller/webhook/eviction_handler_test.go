@@ -158,6 +158,65 @@ func TestEvictionHandlerAllowsSameTrackedServingGroup(t *testing.T) {
 	assert.Contains(t, resp3.Result.Message, "Current ready groups (2) <= minAvailable (2)")
 }
 
+func TestEvictionHandlerDoesNotCountServingGroupWithMissingRole(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(3),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+				{Name: "prefill", Replicas: int32Ptr(1)},
+				{Name: "decode", Replicas: int32Ptr(1)},
+			}},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("g0-prefill", "ms-0", "prefill", "prefill-0", true),
+		createRolePod("g1-prefill", "ms-1", "prefill", "prefill-0", true),
+		createRolePod("g1-decode", "ms-1", "decode", "decode-0", true),
+		createRolePod("g2-prefill", "ms-2", "prefill", "prefill-0", true),
+		createRolePod("g2-decode", "ms-2", "decode", "decode-0", true),
+	}
+
+	resp := handleEvictionRequest(newTestEvictionHandler(ms, pods), "g1-prefill")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "Current ready groups (2) <= minAvailable (2)")
+}
+
+func TestEvictionHandlerDoesNotCountRoleInstanceWithMissingWorker(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default"},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelRole,
+					RoleMinAvailable: map[string]intstr.IntOrString{
+						"decode": intstr.FromInt(1),
+					},
+				},
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+				{Name: "decode", Replicas: int32Ptr(2), WorkerReplicas: 1},
+			}},
+		},
+	}
+	pods := []*corev1.Pod{
+		createRolePod("decode-0-entry", "ms-0", "decode", "decode-0", true),
+		createRolePod("decode-1-entry", "ms-0", "decode", "decode-1", true),
+		createRolePod("decode-1-worker", "ms-0", "decode", "decode-1", true),
+	}
+
+	resp := handleEvictionRequest(newTestEvictionHandler(ms, pods), "decode-1-entry")
+	assert.False(t, resp.Allowed)
+	assert.Contains(t, resp.Result.Message, "ready instances (1) <= minAvailable (1)")
+}
+
 func TestEvictionHandlerAllowsNotReadyTargetServingGroupAtMinAvailable(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{

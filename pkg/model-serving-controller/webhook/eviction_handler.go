@@ -492,14 +492,60 @@ func (h *EvictionHandler) isServingGroupReady(ms *workloadv1alpha1.ModelServing,
 	if isUnitDisrupted(entries, servingGroupUnit(ms, groupName)) {
 		return false
 	}
-	return arePodsReady(pods)
+	return servingGroupHasExpectedPods(ms, pods) && arePodsReady(pods)
 }
 
 func (h *EvictionHandler) isRoleInstanceReady(ms *workloadv1alpha1.ModelServing, groupName, role, roleID string, pods []*corev1.Pod, entries disruptionEntries) bool {
 	if isUnitDisrupted(entries, roleUnit(ms, groupName, role, roleID)) {
 		return false
 	}
-	return arePodsReady(pods)
+	return roleInstanceHasExpectedPods(ms, role, pods) && arePodsReady(pods)
+}
+
+func servingGroupHasExpectedPods(ms *workloadv1alpha1.ModelServing, pods []*corev1.Pod) bool {
+	// ModelServing validation requires at least one Role. Keep the fallback for
+	// old objects and focused tests constructed without a complete template.
+	if len(ms.Spec.Template.Roles) == 0 {
+		return len(pods) > 0
+	}
+
+	for _, role := range ms.Spec.Template.Roles {
+		expectedInstances := int(replicasOrDefault(role.Replicas))
+		if expectedInstances == 0 {
+			continue
+		}
+		expectedPodsPerInstance := 1 + int(role.WorkerReplicas)
+		podsPerInstance := make(map[string]int)
+		for _, pod := range pods {
+			if pod.Labels[workloadv1alpha1.RoleLabelKey] != role.Name {
+				continue
+			}
+			roleID := pod.Labels[workloadv1alpha1.RoleIDKey]
+			if roleID != "" {
+				podsPerInstance[roleID]++
+			}
+		}
+
+		completeInstances := 0
+		for _, observedPods := range podsPerInstance {
+			if observedPods >= expectedPodsPerInstance {
+				completeInstances++
+			}
+		}
+		if completeInstances < expectedInstances {
+			return false
+		}
+	}
+	return true
+}
+
+func roleInstanceHasExpectedPods(ms *workloadv1alpha1.ModelServing, roleName string, pods []*corev1.Pod) bool {
+	for _, role := range ms.Spec.Template.Roles {
+		if role.Name == roleName {
+			return len(pods) >= 1+int(role.WorkerReplicas)
+		}
+	}
+	return len(pods) > 0
 }
 
 func arePodsReady(pods []*corev1.Pod) bool {
