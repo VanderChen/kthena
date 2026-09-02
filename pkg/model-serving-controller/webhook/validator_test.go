@@ -673,6 +673,19 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: nil,
 		},
 		{
+			name: "allows non-zero percentage maxUnavailable that rounds down",
+			args: args{ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				Replicas: &replicas,
+				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.ServingGroupRollingUpdate,
+					RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+						MaxUnavailable: ptr.To(intstr.FromString("20%")),
+					},
+				},
+			}}},
+			want: nil,
+		},
+		{
 			name: "maxUnavailable greater than replicas is allowed for scale down",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{

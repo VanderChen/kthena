@@ -246,7 +246,8 @@ spec:
                           unavailable during an update. It can be an absolute number (for example,
                           5) or a percentage (for example, 10%). A percentage is calculated from
                           ModelServing replicas for ServingGroupRollingUpdate and from the
-                          corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+                          corresponding Role's replicas for RoleRollingUpdate, then rounded down. A
+                          non-zero ServingGroup percentage has an effective minimum value of one.
                           It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
                         x-kubernetes-int-or-string: true
                       partition:
@@ -9294,7 +9295,8 @@ spec:
                             unavailable during an update. It can be an absolute number (for example,
                             5) or a percentage (for example, 10%). A percentage is calculated from
                             ModelServing replicas for ServingGroupRollingUpdate and from the
-                            corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+                            corresponding Role's replicas for RoleRollingUpdate, then rounded down. A
+                            non-zero ServingGroup percentage has an effective minimum value of one.
                             It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
                           x-kubernetes-int-or-string: true
                         name:

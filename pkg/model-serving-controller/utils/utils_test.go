@@ -277,6 +277,22 @@ func TestGetMaxUnavailable(t *testing.T) {
 			expectError:    false,
 		},
 		{
+			name: "MaxUnavailable as percentage - non-zero value rounds up to minimum one",
+			modelServing: &workloadv1alpha1.ModelServing{
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas: ptr.To[int32](3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+						Type: "ServingGroupRollingUpdate",
+						RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+							MaxUnavailable: ptr.To(intstr.FromString("20%")),
+						},
+					},
+				},
+			},
+			expectedResult: 1,
+			expectError:    false,
+		},
+		{
 			name: "MaxUnavailable as percentage - 50%",
 			modelServing: &workloadv1alpha1.ModelServing{
 				Spec: workloadv1alpha1.ModelServingSpec{

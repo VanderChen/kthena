@@ -287,7 +287,7 @@ func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field
 		budgetsValid := true
 		if maxUnavailable != nil {
 			var err error
-			maxUnavailableValue, err = intstr.GetScaledValueFromIntOrPercent(maxUnavailable, replicas, false)
+			maxUnavailableValue, err = utils.GetMaxUnavailable(ms)
 			if err != nil {
 				budgetsValid = false
 				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))

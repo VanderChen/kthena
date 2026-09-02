@@ -638,7 +638,20 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 		}
 	}
 	// Calculate maxUnavailable as absolute numbers
-	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+	resolved, err := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
+	if err != nil {
+		return 0, err
+	}
+	if replicas > 0 && resolved == 0 && maxUnavailable.Type == intstr.String {
+		configuredPercentage, percentageErr := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, 100, false)
+		if percentageErr != nil {
+			return 0, percentageErr
+		}
+		if configuredPercentage > 0 {
+			resolved = 1
+		}
+	}
+	return resolved, nil
 }
 
 // GetMaxSurge resolves the ServingGroup surge budget against the latest
