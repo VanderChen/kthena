@@ -128,7 +128,7 @@ func (collector *MetricCollector) UpdateMetrics(
 			continue
 		}
 		if failed {
-			klog.Warningf("collect pod metrics for target %s skipped because pod failed/restarted", collector.Target.TargetRef.Name)
+			klog.Warningf("collect pod metrics for target %s skipped because a pod failed", collector.Target.TargetRef.Name)
 			continue
 		}
 		for podKey := range groupUnreadyPods {
