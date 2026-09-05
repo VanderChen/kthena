@@ -30,6 +30,11 @@ import (
 
 // Store is an interface for storing and retrieving data
 type Store interface {
+	// BindModelServing isolates state across same-name ModelServing recreations.
+	BindModelServing(types.NamespacedName, types.UID)
+	ListModelServings() []types.NamespacedName
+	// CalibrateReadyPods replaces observations only, never deleting operation state.
+	CalibrateReadyPods(types.NamespacedName, map[string][]string)
 	// GetServingGroupByModelServing returns the sorted serving groups
 	GetServingGroupByModelServing(modelServingName types.NamespacedName) ([]ServingGroup, error)
 	GetServingGroupRevision(modelServingName types.NamespacedName, groupName string) (string, bool)
@@ -60,6 +65,7 @@ type store struct {
 	// ServingGroup is a map of modelServing names to their ServingGroups
 	// modelServing -> group name-> ServingGroup
 	servingGroup map[types.NamespacedName]map[string]*ServingGroup
+	owners       map[types.NamespacedName]types.UID
 }
 
 type ServingGroup struct {
@@ -75,6 +81,8 @@ type Role struct {
 	Revision         string // Revision of the ServingGroup
 	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
 	Status           RoleStatus
+	// HasRun survives temporary unavailability, but not deletion of this Role.
+	HasRun bool
 }
 
 type ServingGroupStatus string
@@ -101,6 +109,7 @@ var ErrServingGroupNotFound = errors.New("serving group not found")
 func New() Store {
 	return &store{
 		servingGroup: make(map[types.NamespacedName]map[string]*ServingGroup),
+		owners:       make(map[types.NamespacedName]types.UID),
 	}
 }
 
@@ -216,6 +225,9 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 	}
 
 	role.Status = status
+	if status == RoleRunning {
+		role.HasRun = true
+	}
 	return nil
 }
 
@@ -281,6 +293,7 @@ func (s *store) DeleteModelServing(modelServingName types.NamespacedName) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 	delete(s.servingGroup, modelServingName)
+	delete(s.owners, modelServingName)
 }
 
 // DeleteServingGroup delete ServingGroup in map
