@@ -98,6 +98,15 @@ func getPodGracePeriodKey(pod *corev1.Pod) podGracePeriodKey {
 }
 
 type ModelServingController struct {
+	// Per-reconcile views share the queue/runtime, never the informer indexers.
+	shared             *ModelServingController
+	audit              *auditRuntime
+	observation        *servingObservation
+	servingState       *servingAuditState
+	volcanoClient      volcano.Interface
+	auditPeriod        time.Duration
+	auditTimeout       time.Duration
+	reconcileContext   context.Context
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
 
@@ -168,6 +177,10 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	)
 
 	c := &ModelServingController{
+		audit:                 newAuditRuntime(),
+		volcanoClient:         volcanoClient,
+		auditPeriod:           5 * time.Minute,
+		auditTimeout:          30 * time.Second,
 		kubeClientSet:         kubeClientSet,
 		modelServingClient:    modelServingClient,
 		podGroupManager:       nil,
@@ -200,7 +213,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 			},
 			Handler: cache.ResourceEventHandlerFuncs{
 				DeleteFunc: func(obj interface{}) {
-					c.deletePodGroup(obj)
+					c.queueChildObservation(obj, true)
 				},
 			},
 		})
@@ -211,13 +224,13 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 	klog.Info("Set the ModelServing event handler")
 	_, _ = c.modelServingsInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			c.addModelServing(obj)
+			c.queueModelServingObservation(nil, obj)
 		},
 		UpdateFunc: func(oldObj, newObj interface{}) {
-			c.updateModelServing(oldObj, newObj)
+			c.queueModelServingObservation(oldObj, newObj)
 		},
 		DeleteFunc: func(obj interface{}) {
-			c.deleteModelServing(obj)
+			c.queueModelServingObservation(obj, nil)
 		},
 	})
 
@@ -231,13 +244,13 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj interface{}) {
-				c.addPod(obj)
+				c.queueChildObservation(obj, false)
 			},
 			UpdateFunc: func(oldObj, newObj interface{}) {
-				c.updatePod(oldObj, newObj)
+				c.queueChildObservation(newObj, false)
 			},
 			DeleteFunc: func(obj interface{}) {
-				c.deletePod(obj)
+				c.queueChildObservation(obj, true)
 			},
 		},
 	})
@@ -252,12 +265,12 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		},
 		Handler: cache.ResourceEventHandlerFuncs{
 			DeleteFunc: func(obj interface{}) {
-				c.deleteService(obj)
+				c.queueChildObservation(obj, true)
 			},
 		},
 	})
 
-	c.syncHandler = c.syncModelServing
+	c.syncHandler = c.reconcileModelServing
 
 	return c, nil
 }
@@ -620,6 +633,16 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err := c.persistCoordinatedRoleRevision(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to persist coordinated Role revision: %v", err)
 	}
+	if c.observation != nil {
+		if err := c.reconcileObservation(ctx, ms); err != nil {
+			// Publish unavailable membership without advancing rollout after a
+			// required lifecycle hook has failed.
+			if statusErr := c.updateModelServingStatus(ctx, ms, revision, nil); statusErr != nil {
+				klog.ErrorS(statusErr, "Failed to publish audit failure readiness")
+			}
+			return err
+		}
+	}
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
@@ -670,14 +693,18 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 		c.modelServingsInformer.HasSynced,
 	)
 
-	// sync pods first
-	c.syncAll()
+	// Startup, watch notifications and audits all enter the same worker path.
+	if err := c.enqueuePeriodicAudit(); err != nil {
+		klog.ErrorS(err, "Failed to enqueue initial ModelServing audit")
+	}
+	c.initialSync = true
 	klog.Info("initial sync has been done")
 
 	klog.Info("start modelServing controller")
 	for i := 0; i < workers; i++ {
 		go c.worker(ctx)
 	}
+	go c.runPeriodicAudit(ctx)
 	<-ctx.Done()
 	klog.Info("shut down modelServing controller")
 }
@@ -1877,7 +1904,7 @@ func (c *ModelServingController) handleRunningPod(ms *workloadv1alpha1.ModelServ
 	if chain == nil {
 		return nil
 	}
-	return chain.OnPodRunning(context.Background(), &plugins.HookRequest{
+	return chain.OnPodRunning(c.operationContext(), &plugins.HookRequest{
 		ModelServing:    ms,
 		ServingGroup:    servingGroupName,
 		RoleName:        utils.GetRoleName(pod),
@@ -2462,21 +2489,21 @@ func (c *ModelServingController) isRoleDeletedLive(ctx context.Context, ms *work
 func (c *ModelServingController) shouldLiveCheckRoleDeletion(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
 	key := roleDeletionKey(ms, servingGroupName, roleName, roleID)
 	attempts := 1
-	if value, ok := c.roleDeleteMap.Load(key); ok {
+	if value, ok := c.rootController().roleDeleteMap.Load(key); ok {
 		if previous, ok := value.(int); ok {
 			attempts = previous + 1
 		}
 	}
-	c.roleDeleteMap.Store(key, attempts)
+	c.rootController().roleDeleteMap.Store(key, attempts)
 	return attempts >= roleDeletionLiveCheckThreshold
 }
 
 func (c *ModelServingController) clearRoleDeletionProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) {
-	c.roleDeleteMap.Delete(roleDeletionKey(ms, servingGroupName, roleName, roleID))
+	c.rootController().roleDeleteMap.Delete(roleDeletionKey(ms, servingGroupName, roleName, roleID))
 }
 
 func roleDeletionKey(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%s", ms.Namespace, ms.Name, servingGroupName, roleName, roleID)
+	return fmt.Sprintf("%s/%s/%s/%s/%s/%s", ms.Namespace, ms.Name, ms.UID, servingGroupName, roleName, roleID)
 }
 
 func modelServingKeyFromChildResource(obj metav1.Object) (string, bool) {
@@ -2493,6 +2520,9 @@ func modelServingKeyFromChildResource(obj metav1.Object) (string, bool) {
 // getPodsByIndex filter pods using the informer indexer.
 func (c *ModelServingController) getPodsByIndex(indexName, indexValue string) ([]*corev1.Pod, error) {
 	indexer := c.podsInformer.GetIndexer()
+	if c.observation != nil {
+		indexer = c.observation.pods
+	}
 	if _, exists := indexer.GetIndexers()[indexName]; !exists {
 		return nil, fmt.Errorf("pod indexer %s not found", indexName)
 	}
@@ -2515,6 +2545,17 @@ func (c *ModelServingController) getPodsByIndex(indexName, indexValue string) ([
 
 // TODO: move to podgroup manager
 func (c *ModelServingController) getPodGroupsByIndex(indexName, indexValue string) ([]*schedulingv1beta1.PodGroup, error) {
+	if c.observation != nil && c.observation.podGroups != nil {
+		objects, err := c.observation.podGroups.ByIndex(indexName, indexValue)
+		if err != nil {
+			return nil, err
+		}
+		result := make([]*schedulingv1beta1.PodGroup, 0, len(objects))
+		for _, object := range objects {
+			result = append(result, object.(*schedulingv1beta1.PodGroup))
+		}
+		return result, nil
+	}
 	if c.podGroupManager == nil || !c.podGroupManager.HasPodGroupCRD() {
 		return nil, nil
 	}
@@ -2566,6 +2607,12 @@ func (c *ModelServingController) updateModelServingStatus(
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get latest modelserving from informer store
 		latestMS, getErr := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		if c.observation != nil {
+			latestMS, getErr = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			if getErr == nil && (latestMS.UID != ms.UID || !reflect.DeepEqual(latestMS.Spec, ms.Spec)) {
+				return fmt.Errorf("ModelServing changed during status update")
+			}
+		}
 		if getErr != nil {
 			return getErr
 		}
