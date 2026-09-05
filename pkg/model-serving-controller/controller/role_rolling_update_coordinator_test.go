@@ -115,8 +115,8 @@ func TestResolveRoleRolloutStateUsesPartitionAndReservesStartedSlots(t *testing.
 		// a-3 has completed deletion but has not yet been recorded as Creating.
 	}
 	controller := &ModelServingController{}
-	state := controller.resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := controller.resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		4,
@@ -144,8 +144,8 @@ func TestResolveRoleRolloutStateUsesExactRolloutOrdinalRange(t *testing.T) {
 		{Name: "a-7", RoleTemplateHash: targetHash, Status: datastore.RoleRunning}, // Scale-down excess.
 	}
 
-	state := (&ModelServingController{}).resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		4,
@@ -168,8 +168,8 @@ func TestResolveRoleRolloutStateReconstructsTerminatingOldReplica(t *testing.T) 
 		{Name: "a-0", RoleTemplateHash: targetHash, Status: datastore.RoleRunning},
 	}
 
-	state := (&ModelServingController{}).resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -194,23 +194,28 @@ func TestTerminatingRoleReplicasReadsPodInformerAfterRestart(t *testing.T) {
 	})
 	now := metav1.Now()
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		OwnerReferences:   []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing", Name: "test-ms", UID: "test-uid", Controller: ptr.To(true)}},
 		Namespace:         "default",
 		Name:              "test-ms-0-a-3-0",
 		DeletionTimestamp: &now,
 		Labels: map[string]string{
 			workloadv1alpha1.GroupNameLabelKey:        "test-ms-0",
+			workloadv1alpha1.RevisionLabelKey:         "legacy",
 			workloadv1alpha1.RoleLabelKey:             "a",
 			workloadv1alpha1.RoleIDKey:                "a-3",
 			workloadv1alpha1.RoleTemplateHashLabelKey: "old-hash",
 		},
 	}}
 	require.NoError(t, informer.GetStore().Add(pod))
-	controller := &ModelServingController{podsInformer: informer}
-	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms"}}
+	controller := &ModelServingController{podsInformer: informer, kubeClientSet: kubefake.NewSimpleClientset()}
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"}, Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "a"}}}}}
+	recordDifferentRevision(t, controller, ms, "legacy")
+	historical, err := controller.revisionHistory(context.Background(), ms).roles(context.Background(), "legacy")
+	require.NoError(t, err)
 
-	replicas := controller.terminatingRoleReplicas(ms, datastore.ServingGroup{Name: "test-ms-0"})
+	replicas := controller.terminatingRoleReplicas(context.Background(), ms, datastore.ServingGroup{Name: "test-ms-0"})
 	require.Contains(t, replicas, "a")
-	assert.Equal(t, "old-hash", replicas["a"][3])
+	assert.Equal(t, utils.CalRoleTemplateHash(historical[0]), replicas["a"][3])
 }
 
 func TestResolveRoleRolloutStateDoesNotReserveUnadmittedScaleUp(t *testing.T) {
@@ -220,8 +225,8 @@ func TestResolveRoleRolloutStateDoesNotReserveUnadmittedScaleUp(t *testing.T) {
 		{Name: "a-1", RoleTemplateHash: "old", Status: datastore.RoleRunning},
 	}
 	controller := &ModelServingController{}
-	state := controller.resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := controller.resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -276,8 +281,8 @@ func TestResolveRoleRolloutStateTracksReplacementReadyIndependentlyOfScaleUp(t *
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			state := (&ModelServingController{}).resolveRoleRolloutState(
-				&workloadv1alpha1.ModelServing{},
+			state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(),
+				&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 				datastore.ServingGroup{Name: "test-ms-0"},
 				roleSpec,
 				2,
@@ -299,8 +304,8 @@ func TestResolveRoleRolloutStateIgnoresScaleDownExcessForReadyState(t *testing.T
 	roleSpec := workloadv1alpha1.Role{Name: "a", Replicas: ptr.To[int32](2)}
 	targetHash := utils.CalRoleTemplateHash(roleSpec)
 	controller := &ModelServingController{}
-	state := controller.resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := controller.resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -318,8 +323,8 @@ func TestResolveRoleRolloutStateIgnoresScaleDownExcessForReadyState(t *testing.T
 	assert.Zero(t, state.readyCount)
 	assert.Equal(t, targetNotStarted, state.targetState)
 
-	state = controller.resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state = controller.resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -340,8 +345,8 @@ func TestResolveRoleRolloutStateIgnoresScaleDownExcessForReadyState(t *testing.T
 func TestResolveRoleRolloutStateUsesOrdinaryScaleUpForDependencyReadinessOnly(t *testing.T) {
 	roleSpec := workloadv1alpha1.Role{Name: "a", Replicas: ptr.To[int32](3)}
 	targetHash := utils.CalRoleTemplateHash(roleSpec)
-	state := (&ModelServingController{}).resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -364,8 +369,8 @@ func TestResolveRoleRolloutStateUsesOrdinaryScaleUpForDependencyReadinessOnly(t 
 func TestResolveRoleRolloutStateRetainsMissingPartitionProtectedOldSlot(t *testing.T) {
 	roleSpec := workloadv1alpha1.Role{Name: "a", Replicas: ptr.To[int32](2)}
 	targetHash := utils.CalRoleTemplateHash(roleSpec)
-	state := (&ModelServingController{}).resolveRoleRolloutState(
-		&workloadv1alpha1.ModelServing{},
+	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(),
+		&workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{roleSpec}}}},
 		datastore.ServingGroup{Name: "test-ms-0"},
 		roleSpec,
 		2,
@@ -427,7 +432,7 @@ func TestResolveRoleRolloutPolicyAppliesDependencyAndSkew(t *testing.T) {
 		}
 	}
 	t.Run("dependency blocks upstream target-version scale up", func(t *testing.T) {
-		policy, err := controller.resolveRoleRolloutPolicy(ms, "new-revision")
+		policy, err := controller.resolveRoleRolloutPolicy(context.Background(), ms, "new-revision")
 		require.NoError(t, err)
 		plan := policy.group("test-ms-0")
 		assert.False(t, plan.roles["a"].allowTargetStart)
@@ -441,7 +446,7 @@ func TestResolveRoleRolloutPolicyAppliesDependencyAndSkew(t *testing.T) {
 		controller.store.AddRole(nsn, "test-ms-0", "b", "b-0", "new-revision", bTargetHash)
 		require.NoError(t, controller.store.UpdateRoleStatus(nsn, "test-ms-0", "b", "b-0", datastore.RoleRunning))
 
-		policy, err := controller.resolveRoleRolloutPolicy(ms, "new-revision")
+		policy, err := controller.resolveRoleRolloutPolicy(context.Background(), ms, "new-revision")
 		require.NoError(t, err)
 		plan := policy.group("test-ms-0")
 		assert.True(t, plan.roles["a"].allowTargetStart)
@@ -494,7 +499,8 @@ func TestCoordinatedRoleSelectionCountsStartedReplicasOutsideEffectiveRange(t *t
 	require.NoError(t, err)
 	plan := &decision
 
-	selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(ms, datastore.ServingGroup{
+	recordDifferentRevision(t, controller, ms, "old-revision")
+	selected, hasOutdated, err := controller.rolesToDeleteForRoleRollingUpdate(context.Background(), ms, datastore.ServingGroup{
 		Name: "test-ms-0", Revision: "old-revision", Status: datastore.ServingGroupRunning,
 	}, plan)
 	require.NoError(t, err)

@@ -187,6 +187,21 @@ func TestMaxSurgeDoesNotChangeRevisionOrRoleTemplateHash(t *testing.T) {
 		ModelServingRevision(newModelServing([]workloadv1alpha1.Role{withSurge})) {
 		t.Fatal("rolling update policy must not change ModelServing revision")
 	}
+
+	baseModelServing := newModelServing([]workloadv1alpha1.Role{withoutSurge})
+	withGroupPolicy := baseModelServing.DeepCopy()
+	withGroupPolicy.Spec.Replicas = int32Ptr(7)
+	withGroupPolicy.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+		Type: workloadv1alpha1.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+			MaxUnavailable: withSurge.MaxUnavailable,
+			MaxSurge:       withSurge.MaxSurge,
+			Partition:      withSurge.Partition,
+		},
+	}
+	if ModelServingRevision(baseModelServing) != ModelServingRevision(withGroupPolicy) {
+		t.Fatal("ServingGroup replica and rolling-update policy must not change ModelServing revision")
+	}
 }
 
 func TestModelServingRevisionDoesNotMutateInput(t *testing.T) {
@@ -270,5 +285,44 @@ func TestCalRoleTemplateHashDoesNotMutateInput(t *testing.T) {
 	}
 	if *role.Replicas != replicaVal {
 		t.Errorf("role.Replicas = %d, want %d", *role.Replicas, replicaVal)
+	}
+}
+
+func TestEqualRoleTemplatesForRevision(t *testing.T) {
+	base := []workloadv1alpha1.Role{
+		newRole("prefill", int32Ptr(1), 0),
+		newRole("decode", int32Ptr(2), 1),
+	}
+	operationalChange := make([]workloadv1alpha1.Role, len(base))
+	for i := range base {
+		operationalChange[i] = *base[i].DeepCopy()
+	}
+	operationalChange[0].Replicas = int32Ptr(4)
+	maxUnavailable := intstr.FromInt(0)
+	maxSurge := intstr.FromString("25%")
+	partition := intstr.FromInt(1)
+	operationalChange[0].MaxUnavailable = &maxUnavailable
+	operationalChange[0].MaxSurge = &maxSurge
+	operationalChange[0].Partition = &partition
+	if !EqualRoleTemplatesForRevision(base, operationalChange) {
+		t.Fatal("replica and rolling-update policy changes must be revision-equivalent")
+	}
+
+	templateChange := make([]workloadv1alpha1.Role, len(base))
+	for i := range base {
+		templateChange[i] = *base[i].DeepCopy()
+	}
+	templateChange[0].EntryTemplate.Spec.Containers[0].Image = "nginx:changed"
+	if EqualRoleTemplatesForRevision(base, templateChange) {
+		t.Fatal("an entry Pod template change must not be revision-equivalent")
+	}
+
+	topologyChange := make([]workloadv1alpha1.Role, len(base))
+	for i := range base {
+		topologyChange[i] = *base[i].DeepCopy()
+	}
+	topologyChange[1].WorkerReplicas++
+	if EqualRoleTemplatesForRevision(base, topologyChange) {
+		t.Fatal("a worker topology change must not be revision-equivalent")
 	}
 }
