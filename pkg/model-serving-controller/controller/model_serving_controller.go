@@ -1225,50 +1225,16 @@ func (c *ModelServingController) scaleUpRoles(
 			if ms.Status.CurrentRevision != "" {
 				revisionToUse = ms.Status.CurrentRevision
 			}
-			// RoleRollingUpdate may advance CurrentRevision before all protected replicas are recovered.
-			if revisionToUse == newRevision {
-				crSelector := labels.SelectorFromSet(map[string]string{
-					utils.ControllerRevisionLabelKey: ms.Name,
-				})
-				if crList, listErr := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
-					LabelSelector: crSelector.String(),
-				}); listErr != nil {
-					klog.Warningf("scaleUpRoles: failed to list ControllerRevisions for ModelServing %s/%s: %v", ms.Namespace, ms.Name, listErr)
-				} else {
-					for i := range crList.Items {
-						rev := crList.Items[i].Labels[utils.ControllerRevisionRevisionLabelKey]
-						if rev != "" && rev != newRevision {
-							revisionToUse = rev
-							break
-						}
-					}
-				}
-			}
 			klog.V(4).Infof("scaleUpRoles: ordinal %d missing (partition-protected), revisionToUse=%s, currentRevision=%s",
 				ordinal, revisionToUse, ms.Status.CurrentRevision)
 
-			// For ordinal < partition, we should use the old template from the revision
-			// Two cases:
-			// 1. First startup: use targetRole (which corresponds to CurrentRevision)
-			// 2. During recovery: use template from ControllerRevision retrieved by revision
-			roleToApply := targetRole
-			cr, _ := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revisionToUse)
-			if cr != nil {
-				// Case 2: Recovery scenario - use template from ControllerRevision
-				if roles, err := utils.GetRolesFromControllerRevision(cr); err != nil {
-					klog.Warningf("scaleUpRoles: failed to get roles from ControllerRevision for revision %s (ordinal %d): %v, falling back to current role template", revisionToUse, ordinal, err)
-				} else {
-					for _, oldRole := range roles {
-						if oldRole.Name == targetRole.Name {
-							roleToApply = oldRole
-							break
-						}
-					}
-					klog.V(4).Infof("Recovering role %s at ordinal %d with revision %s using template from ControllerRevision (partition=%d)", targetRole.Name, ordinal, revisionToUse, partition)
-				}
-			} else {
-				// Case 1: First startup - ControllerRevision not found, use current role template
-				klog.V(4).Infof("Creating missing role %s at ordinal %d with revision %s using current role template (partition=%d, first startup)", targetRole.Name, ordinal, revisionToUse, partition)
+			// The reconcile entry has already persisted the initial snapshot.
+			// Never select an arbitrary earlier revision from history: independent
+			// Roles can legitimately keep several different revisions alive.
+			roleToApply, err := c.revisionHistory(ctx, ms).role(ctx, revisionToUse, targetRole.Name)
+			if err != nil {
+				scaleUpErr = fmt.Errorf("resolve protected Role %s/%d at revision %s: %w", targetRole.Name, ordinal, revisionToUse, err)
+				return false
 			}
 			hashToUse := utils.CalRoleTemplateHash(roleToApply)
 			if err := createRole(ordinal, revisionToUse, roleToApply, hashToUse); err != nil {
@@ -1376,7 +1342,10 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			keepCurrentRevision := (partitionConfigured && partition > 0 && roleIndex >= 0 && roleIndex < partition) || !allowTargetStart
-			roleToApply, revisionToUse, hashToUse := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, keepCurrentRevision)
+			roleToApply, revisionToUse, hashToUse, err := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, keepCurrentRevision)
+			if err != nil {
+				return fmt.Errorf("resolve recovery template for Role %s/%s: %w", groupName, roleObj.Name, err)
+			}
 			if err := c.CreatePodsByRole(ctx, *roleToApply.DeepCopy(), ms, roleIndex, servingGroupOrdinal, revisionToUse, hashToUse); err != nil {
 				klog.Errorf("manageRoleReplicasPerGroup: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			}
@@ -1455,12 +1424,12 @@ func (c *ModelServingController) roleTemplateForReplica(
 	roleObj datastore.Role,
 	newRevision string,
 	keepCurrentRevision bool,
-) (workloadv1alpha1.Role, string, string) {
+) (workloadv1alpha1.Role, string, string, error) {
 	roleToApply := targetRole
 	revisionToUse := newRevision
 	hashToUse := ""
 	if !keepCurrentRevision {
-		return roleToApply, revisionToUse, utils.CalRoleTemplateHash(roleToApply)
+		return roleToApply, revisionToUse, utils.CalRoleTemplateHash(roleToApply), nil
 	}
 
 	revisionToUse = roleObj.Revision
@@ -1468,32 +1437,15 @@ func (c *ModelServingController) roleTemplateForReplica(
 		revisionToUse = ms.Status.CurrentRevision
 	}
 	hashToUse = roleObj.RoleTemplateHash
-	if revisionToUse == "" {
-		if hashToUse == "" {
-			hashToUse = utils.CalRoleTemplateHash(roleToApply)
-		}
-		return roleToApply, revisionToUse, hashToUse
-	}
-
-	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revisionToUse)
+	var err error
+	roleToApply, err = c.revisionHistory(ctx, ms).role(ctx, revisionToUse, targetRole.Name)
 	if err != nil {
-		klog.Warningf("roleTemplateForReplica: failed to get ControllerRevision %s for current-revision role %s: %v", revisionToUse, roleObj.Name, err)
-	} else if cr != nil {
-		if oldRoles, err := utils.GetRolesFromControllerRevision(cr); err != nil {
-			klog.Warningf("roleTemplateForReplica: failed to get roles from ControllerRevision %s for current-revision role %s: %v", revisionToUse, roleObj.Name, err)
-		} else {
-			for _, oldRole := range oldRoles {
-				if oldRole.Name == targetRole.Name {
-					roleToApply = oldRole
-					break
-				}
-			}
-		}
+		return workloadv1alpha1.Role{}, "", "", err
 	}
 	if hashToUse == "" {
 		hashToUse = utils.CalRoleTemplateHash(roleToApply)
 	}
-	return roleToApply, revisionToUse, hashToUse
+	return roleToApply, revisionToUse, hashToUse, nil
 }
 
 // emitRoleStatusEvent emits a Kubernetes Event for a role-related status change.
@@ -1612,6 +1564,9 @@ func (c *ModelServingController) manageRollingUpdate(
 ) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil {
+		if errors.Is(err, datastore.ErrServingGroupNotFound) {
+			return nil
+		}
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
 	}
 
@@ -2638,31 +2593,7 @@ func (c *ModelServingController) updateModelServingStatus(
 
 		// Calculate status based on latestMS
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
-		if err != nil {
-			// If no groups exist, handle gracefully by setting revisions to the new revision
-			if errors.Is(err, datastore.ErrServingGroupNotFound) {
-				copy := latestMS.DeepCopy()
-				selectorSet := labels.Set{
-					workloadv1alpha1.ModelServingNameLabelKey: latestMS.Name,
-					workloadv1alpha1.EntryLabelKey:            utils.Entry,
-				}
-				if len(latestMS.Spec.Template.Roles) > 0 {
-					roleName := latestMS.Spec.Template.Roles[0].Name
-					selectorSet[workloadv1alpha1.RoleLabelKey] = roleName
-					selectorSet[workloadv1alpha1.RoleIDKey] = utils.GenerateRoleID(roleName, 0)
-				}
-				selector := selectorSet.String()
-				conditionChanged, _ := rolloutPolicy.setCondition(copy)
-				needsUpdate := copy.Status.CurrentRevision != revision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector || conditionChanged
-				if needsUpdate {
-					copy.Status.CurrentRevision = revision
-					copy.Status.UpdateRevision = revision
-					copy.Status.LabelSelector = selector
-					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
-					return updateErr
-				}
-				return nil
-			}
+		if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 			return err
 		}
 
@@ -2803,10 +2734,8 @@ func (c *ModelServingController) updateModelServingStatus(
 			copy.Status.CurrentReplicas = int32(current)
 		}
 
-		revisionUpdated := false
 		if copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != updateRevision {
 			shouldUpdate = true
-			revisionUpdated = true
 			copy.Status.CurrentRevision = currentRevision
 			copy.Status.UpdateRevision = updateRevision
 		}
@@ -2814,9 +2743,9 @@ func (c *ModelServingController) updateModelServingStatus(
 		if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
 			// if not set spec.RolloutStrategy.RollingUpdateConfiguration.Partition,
 			// should set currentReplicas = updatedReplicas when rolling update is over.
-			if copy.Status.UpdatedReplicas == *copy.Spec.Replicas &&
-				copy.Status.AvailableReplicas == *copy.Spec.Replicas &&
-				copy.Status.Replicas == *copy.Spec.Replicas {
+			if copy.Status.UpdatedReplicas == int32(replicas) &&
+				copy.Status.AvailableReplicas == int32(replicas) &&
+				copy.Status.Replicas == int32(replicas) {
 				shouldUpdate = true
 				copy.Status.CurrentReplicas = copy.Status.UpdatedReplicas
 			}
@@ -2860,15 +2789,11 @@ func (c *ModelServingController) updateModelServingStatus(
 				}
 				c.emitRoleStatusEvent(latestMS, eventType, coordinationCondition.Reason, coordinationCondition.Message)
 			}
-			// Clean up old revisions only after roles have been updated (revision status changed)
-			if revisionUpdated {
-				if cleanupErr := utils.CleanupOldControllerRevisions(context.TODO(), c.kubeClientSet, copy, referencedRevisions...); cleanupErr != nil {
-					klog.Warningf("Failed to cleanup old ControllerRevisions after updating revision status for ModelServing %s/%s: %v", copy.Namespace, copy.Name, cleanupErr)
-				}
-			}
 		}
 
-		return nil
+		// Retry cleanup even when status has already converged. The last Pod
+		// reference may disappear later, or a previous cleanup may have failed.
+		return utils.CleanupOldControllerRevisions(ctx, c.kubeClientSet, copy, referencedRevisions...)
 	})
 }
 

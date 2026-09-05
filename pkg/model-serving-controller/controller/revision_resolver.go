@@ -107,6 +107,21 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 	return snapshot.roles, snapshot.err
 }
 
+// role resolves a replica's recorded template. Missing history must not turn
+// into permission to render the current spec under an older revision label.
+func (h *revisionHistory) role(ctx context.Context, revision, name string) (workloadv1alpha1.Role, error) {
+	roles, err := h.roles(ctx, revision)
+	if err != nil {
+		return workloadv1alpha1.Role{}, err
+	}
+	for _, role := range roles {
+		if role.Name == name {
+			return *role.DeepCopy(), nil
+		}
+	}
+	return workloadv1alpha1.Role{}, fmt.Errorf("Role %s not found in ControllerRevision %s", name, revision)
+}
+
 // desiredRevision keeps an existing identity when its immutable template is
 // equivalent, even if a newer binary calculates a different hash. The current
 // status wins deterministically; otherwise use the newest equivalent history.
@@ -161,7 +176,11 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("persist desired ControllerRevision: %w", err)
 	}
-	h.snapshots[revision] = h.decode(cr)
+	snapshot := h.decode(cr)
+	if snapshot.err != nil {
+		return "", fmt.Errorf("resolve persisted desired ControllerRevision: %w", snapshot.err)
+	}
+	h.snapshots[revision] = snapshot
 	return revision, nil
 }
 
