@@ -19,7 +19,9 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -61,8 +63,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 
 	// Check if ControllerRevision already exists
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
-	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
-	if err == nil {
+	validateExisting := func(existing *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
 		if !metav1.IsControlledBy(existing, ms) {
 			return nil, fmt.Errorf("ControllerRevision %s/%s is not controlled by the current ModelServing UID", ms.Namespace, controllerRevisionName)
 		}
@@ -83,8 +84,12 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 			return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, controllerRevisionName)
 		}
 		return existing, nil
+	}
+	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
+	if err == nil {
+		return validateExisting(existing)
 	} else if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("failed to get ControllerRevision: %v", err)
+		return nil, fmt.Errorf("failed to get ControllerRevision: %w", err)
 	}
 
 	// Create ControllerRevision
@@ -108,8 +113,17 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 
 	// Create ControllerRevision
 	created, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		// A previous request may have succeeded before its response was lost, or
+		// another reconcile may have created it. Apply the same immutable checks.
+		existing, getErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, fmt.Errorf("get concurrently created ControllerRevision: %w", getErr)
+		}
+		return validateExisting(existing)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ControllerRevision: %v", err)
+		return nil, fmt.Errorf("failed to create ControllerRevision: %w", err)
 	}
 
 	klog.V(4).Infof("Created ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
@@ -131,6 +145,9 @@ func GetControllerRevision(
 			return nil, nil
 		}
 		return nil, err
+	}
+	if !metav1.IsControlledBy(cr, ms) {
+		return nil, fmt.Errorf("ControllerRevision %s/%s is not controlled by the current ModelServing UID", ms.Namespace, cr.Name)
 	}
 	return cr, nil
 }
@@ -163,8 +180,8 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 }
 
 // CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
-// In ModelServing, we typically have at most two revisions (CurrentRevision and UpdateRevision),
-// so this cleanup removes all revisions except CurrentRevision and UpdateRevision.
+// Preserve status, datastore and live Pod references, including mixed Role revisions
+// and terminating Pods. Only history controlled by this ModelServing can be deleted.
 func CleanupOldControllerRevisions(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -203,19 +220,47 @@ func CleanupOldControllerRevisions(
 			preservedRevisionNames[GenerateControllerRevisionName(ms.Name, referencedRevision)] = struct{}{}
 		}
 	}
+	// List history before Pods: a snapshot created after this history list is
+	// not a deletion candidate. Live reads also cover Pods not yet in the store.
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return fmt.Errorf("list Pods before cleaning ControllerRevisions: %w", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if revision := ObjectRevision(pod); metav1.IsControlledBy(pod, ms) && revision != "" {
+			preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
+		}
+	}
 
-	// Delete all revisions except CurrentRevision and UpdateRevision
-	deletedCount := 0
+	// Live references do not count toward the API's non-live history limit.
+	historyLimit := 10
+	if ms.Spec.RevisionHistoryLimit != nil {
+		historyLimit = max(0, int(*ms.Spec.RevisionHistoryLimit))
+	}
+	var unused []*appsv1.ControllerRevision
 	for i := range list.Items {
 		revision := &list.Items[i]
+		if !metav1.IsControlledBy(revision, ms) {
+			continue
+		}
 		// Skip if this revision must be preserved
 		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
 			continue
 		}
+		unused = append(unused, revision)
+	}
+	sort.Slice(unused, func(i, j int) bool { return controllerRevisionLess(unused[i], unused[j]) })
 
-		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{})
+	deletedCount := 0
+	var deletionErrors []error
+	for _, revision := range unused[:max(0, len(unused)-historyLimit)] {
+		uid := revision.UID
+		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{
+			Preconditions: &metav1.Preconditions{UID: &uid},
+		})
 		if err != nil && !apierrors.IsNotFound(err) {
-			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)
+			deletionErrors = append(deletionErrors, fmt.Errorf("delete ControllerRevision %s/%s: %w", ms.Namespace, revision.Name, err))
 		} else {
 			deletedCount++
 			klog.V(4).Infof("Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
@@ -227,5 +272,5 @@ func CleanupOldControllerRevisions(
 			deletedCount, ms.Namespace, ms.Name, ms.Status.CurrentRevision, ms.Status.UpdateRevision)
 	}
 
-	return nil
+	return errors.Join(deletionErrors...)
 }
