@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -33,14 +34,15 @@ import (
 )
 
 const (
+	// defaultControllerRevisionHistoryLimit matches the Kubernetes workload default.
+	defaultControllerRevisionHistoryLimit = 10
 	// ControllerRevisionLabelKey is the label key for ModelServing name
 	ControllerRevisionLabelKey = workloadv1alpha1.ModelServingNameLabelKey
 	// ControllerRevisionRevisionLabelKey is the label key for revision
 	ControllerRevisionRevisionLabelKey = workloadv1alpha1.RevisionLabelKey
 )
 
-// CreateControllerRevision creates or retrieves a ControllerRevision for a specific revision.
-// In ModelServing, we typically have at most two revisions: CurrentRevision and UpdateRevision.
+// CreateControllerRevision creates or retrieves a ControllerRevision for a specific template revision.
 func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string, templateData interface{}) (*appsv1.ControllerRevision, error) {
 	// Serialize template data
 	// Wrap data in a map to ensure it's a valid JSON object (Kubernetes requirement for RawExtension)
@@ -74,6 +76,22 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		return nil, fmt.Errorf("failed to get ControllerRevision: %v", err)
 	}
 
+	selector := labels.SelectorFromSet(map[string]string{
+		ControllerRevisionLabelKey: ms.Name,
+	})
+	revisions, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ControllerRevisions: %v", err)
+	}
+	nextRevision := int64(1)
+	for i := range revisions.Items {
+		if metav1.IsControlledBy(&revisions.Items[i], ms) && revisions.Items[i].Revision >= nextRevision {
+			nextRevision = revisions.Items[i].Revision + 1
+		}
+	}
+
 	// Create ControllerRevision
 	cr := &appsv1.ControllerRevision{
 		ObjectMeta: metav1.ObjectMeta{
@@ -87,7 +105,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 				newModelServingOwnerRef(ms),
 			},
 		},
-		Revision: 1, // ControllerRevision revision number
+		Revision: nextRevision,
 		Data: runtime.RawExtension{
 			Raw: data,
 		},
@@ -149,9 +167,8 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 	return roles, nil
 }
 
-// CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
-// In ModelServing, we typically have at most two revisions (CurrentRevision and UpdateRevision),
-// so this cleanup removes all revisions except CurrentRevision and UpdateRevision.
+// CleanupOldControllerRevisions preserves live revisions and the newest ten
+// non-live revisions, matching the default Kubernetes workload history limit.
 func CleanupOldControllerRevisions(
 	ctx context.Context,
 	client kubernetes.Interface,
@@ -169,25 +186,56 @@ func CleanupOldControllerRevisions(
 		return fmt.Errorf("failed to list ControllerRevisions: %v", err)
 	}
 
-	// Get the revision names that must be preserved (CurrentRevision and UpdateRevision)
-	var currentRevisionName, updateRevisionName string
+	// CurrentRevision, UpdateRevision, and revisions referenced by live or
+	// terminating Pods must never count against the history limit.
+	liveRevisionNames := make(map[string]struct{})
 	if ms.Status.CurrentRevision != "" {
-		currentRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.CurrentRevision)
+		liveRevisionNames[GenerateControllerRevisionName(ms.Name, ms.Status.CurrentRevision)] = struct{}{}
 	}
 	if ms.Status.UpdateRevision != "" {
-		updateRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.UpdateRevision)
+		liveRevisionNames[GenerateControllerRevisionName(ms.Name, ms.Status.UpdateRevision)] = struct{}{}
 	}
 
-	// Delete all revisions except CurrentRevision and UpdateRevision
-	deletedCount := 0
+	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector.String(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list Pods for ControllerRevision cleanup: %v", err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		if revision := ObjectRevision(pod); revision != "" && metav1.IsControlledBy(pod, ms) {
+			liveRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
+		}
+	}
+
+	history := make([]*appsv1.ControllerRevision, 0, len(list.Items))
 	for i := range list.Items {
 		revision := &list.Items[i]
-		// Skip if this revision must be preserved
-		if (currentRevisionName != "" && revision.Name == currentRevisionName) ||
-			(updateRevisionName != "" && revision.Name == updateRevisionName) {
+		if !metav1.IsControlledBy(revision, ms) {
 			continue
 		}
+		if _, live := liveRevisionNames[revision.Name]; live {
+			continue
+		}
+		history = append(history, revision)
+	}
+	if len(history) <= defaultControllerRevisionHistoryLimit {
+		return nil
+	}
+	sort.Slice(history, func(i, j int) bool {
+		if history[i].Revision != history[j].Revision {
+			return history[i].Revision < history[j].Revision
+		}
+		if !history[i].CreationTimestamp.Time.Equal(history[j].CreationTimestamp.Time) {
+			return history[i].CreationTimestamp.Before(&history[j].CreationTimestamp)
+		}
+		return history[i].Name < history[j].Name
+	})
 
+	// Delete only the oldest non-live history exceeding the built-in limit.
+	deletedCount := 0
+	for _, revision := range history[:len(history)-defaultControllerRevisionHistoryLimit] {
 		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{})
 		if err != nil && !apierrors.IsNotFound(err) {
 			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)

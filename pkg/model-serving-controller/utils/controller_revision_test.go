@@ -18,9 +18,12 @@ package utils
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -63,6 +66,11 @@ func TestCreateControllerRevision(t *testing.T) {
 	assert.Equal(t, "default", cr.Namespace)
 	assert.Equal(t, "test-ms", cr.Labels[ControllerRevisionLabelKey])
 	assert.Equal(t, "revision-v1", cr.Labels[ControllerRevisionRevisionLabelKey])
+	assert.Equal(t, int64(1), cr.Revision)
+
+	next, err := CreateControllerRevision(ctx, client, ms, "revision-v2", templateData)
+	assert.NoError(t, err)
+	assert.Equal(t, int64(2), next.Revision)
 }
 
 func TestGetControllerRevision(t *testing.T) {
@@ -107,9 +115,9 @@ func TestGetControllerRevision(t *testing.T) {
 	assert.Equal(t, "revision-v2", cr.Labels[ControllerRevisionRevisionLabelKey])
 }
 
-// TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions tests that
-// CleanupOldControllerRevisions always preserves CurrentRevision and UpdateRevision
-func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *testing.T) {
+// TestCleanupOldControllerRevisionsRetainsHistoryWithinLimit verifies that
+// convergence does not immediately remove traceable history.
+func TestCleanupOldControllerRevisionsRetainsHistoryWithinLimit(t *testing.T) {
 	ctx := context.Background()
 	client := kubefake.NewSimpleClientset()
 
@@ -141,8 +149,7 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 
 	templateData := ms.Spec.Template.Roles
 
-	// Create a few revisions to test cleanup
-	// The revisions that are not CurrentRevision or UpdateRevision should be deleted
+	// All five revisions fit within the ten-entry non-live history limit.
 	revisions := []string{"revision-v1", "revision-v2", "revision-v3", "revision-v4", "revision-v5"}
 	for _, rev := range revisions {
 		_, err := CreateControllerRevision(ctx, client, ms, rev, templateData)
@@ -185,12 +192,81 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 	assert.True(t, remainingRevisionNames[updateRevisionName],
 		"UpdateRevision %s should be in remaining revisions", updateRevisionName)
 
-	// Verify other revisions (not CurrentRevision or UpdateRevision) are deleted
-	assert.False(t, remainingRevisionNames["revision-v2"], "revision-v2 should be deleted")
-	assert.False(t, remainingRevisionNames["revision-v3"], "revision-v3 should be deleted")
-	assert.False(t, remainingRevisionNames["revision-v4"], "revision-v4 should be deleted")
+	assert.True(t, remainingRevisionNames["test-ms-revision-v2"])
+	assert.True(t, remainingRevisionNames["test-ms-revision-v3"])
+	assert.True(t, remainingRevisionNames["test-ms-revision-v4"])
+	assert.Equal(t, 5, len(list.Items))
+}
 
-	// The total number of preserved revisions should be exactly 2 (CurrentRevision and UpdateRevision)
-	assert.Equal(t, 2, len(list.Items),
-		"Should preserve exactly CurrentRevision and UpdateRevision")
+func TestCleanupOldControllerRevisionsTruncatesOldestNonLiveHistory(t *testing.T) {
+	ctx := context.Background()
+	client := kubefake.NewSimpleClientset()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       "test-uid",
+		},
+		Status: workloadv1alpha1.ModelServingStatus{
+			CurrentRevision: "revision-v12",
+			UpdateRevision:  "revision-v13",
+		},
+	}
+
+	for i := 1; i <= 13; i++ {
+		created, err := CreateControllerRevision(ctx, client, ms, fmt.Sprintf("revision-v%d", i), []string{fmt.Sprintf("v%d", i)})
+		require.NoError(t, err)
+		assert.Equal(t, int64(i), created.Revision)
+	}
+
+	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+	oldest, err := GetControllerRevision(ctx, client, ms, "revision-v1")
+	require.NoError(t, err)
+	assert.Nil(t, oldest)
+
+	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: labels.SelectorFromSet(map[string]string{ControllerRevisionLabelKey: ms.Name}).String(),
+	})
+	require.NoError(t, err)
+	assert.Len(t, list.Items, defaultControllerRevisionHistoryLimit+2)
+}
+
+func TestCleanupOldControllerRevisionsPreservesTerminatingPodRevision(t *testing.T) {
+	ctx := context.Background()
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       "test-uid",
+		},
+		Status: workloadv1alpha1.ModelServingStatus{
+			CurrentRevision: "revision-v13",
+			UpdateRevision:  "revision-v13",
+		},
+	}
+	deletionTimestamp := metav1.Now()
+	client := kubefake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "terminating-old-revision",
+		Namespace: ms.Namespace,
+		Labels: map[string]string{
+			ControllerRevisionLabelKey:         ms.Name,
+			ControllerRevisionRevisionLabelKey: "revision-v1",
+		},
+		OwnerReferences:   []metav1.OwnerReference{newModelServingOwnerRef(ms)},
+		DeletionTimestamp: &deletionTimestamp,
+		Finalizers:        []string{"test.finalizer"},
+	}})
+
+	for i := 1; i <= 13; i++ {
+		_, err := CreateControllerRevision(ctx, client, ms, fmt.Sprintf("revision-v%d", i), []string{fmt.Sprintf("v%d", i)})
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, CleanupOldControllerRevisions(ctx, client, ms))
+	protected, err := GetControllerRevision(ctx, client, ms, "revision-v1")
+	require.NoError(t, err)
+	assert.NotNil(t, protected)
+	deleted, err := GetControllerRevision(ctx, client, ms, "revision-v2")
+	require.NoError(t, err)
+	assert.Nil(t, deleted)
 }

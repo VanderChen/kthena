@@ -6625,6 +6625,234 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
+func TestDeleteOutdatedResourcesUsesServingGroupStrategyByDefault(t *testing.T) {
+	tests := []struct {
+		name                string
+		rolloutStrategy     *workloadv1alpha1.RolloutStrategy
+		expectedUpdateCount int
+	}{
+		{
+			name:                "nil strategy defaults to ServingGroupRollingUpdate",
+			expectedUpdateCount: 1,
+		},
+		{
+			name: "explicit ServingGroupRollingUpdate",
+			rolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.ServingGroupRollingUpdate,
+			},
+			expectedUpdateCount: 1,
+		},
+		{
+			name: "explicit RoleRollingUpdate",
+			rolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.RoleRollingUpdate,
+			},
+			expectedUpdateCount: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kubeClient := kubefake.NewSimpleClientset()
+			controller, err := NewModelServingController(
+				kubeClient,
+				kthenafake.NewSimpleClientset(),
+				nil,
+				apiextfake.NewSimpleClientset(),
+			)
+			require.NoError(t, err)
+
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-model-serving",
+					Namespace: "default",
+					UID:       types.UID("test-model-serving-uid"),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{RolloutStrategy: tt.rolloutStrategy},
+			}
+			groups := []datastore.ServingGroup{
+				{
+					Name:     "test-model-serving-0",
+					Status:   datastore.ServingGroupRunning,
+					Revision: "old-revision",
+				},
+				{
+					Name:     "test-model-serving-1",
+					Status:   datastore.ServingGroupRunning,
+					Revision: "old-revision",
+				},
+			}
+			for ordinal, group := range groups {
+				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, group.Revision)
+				require.NoError(t, controller.store.UpdateServingGroupStatus(
+					utils.GetNamespaceName(ms), group.Name, group.Status))
+			}
+
+			updateCount, err := controller.deleteOutdatedResourcesForRollingUpdate(
+				context.Background(), ms, 1, nil, groups, "new-revision")
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedUpdateCount, updateCount)
+		})
+	}
+}
+
+func TestEnsureControllerRevision(t *testing.T) {
+	newModelServing := func(strategy *workloadv1alpha1.RolloutStrategy, replicas int32) *workloadv1alpha1.ModelServing {
+		return &workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-model-serving",
+				Namespace: "default",
+				UID:       types.UID("test-model-serving-uid"),
+			},
+			Spec: workloadv1alpha1.ModelServingSpec{
+				RolloutStrategy: strategy,
+				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+					{
+						Name:     "decode",
+						Replicas: ptr.To(replicas),
+						EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "decode", Image: "image:v2"}},
+						}},
+					},
+				}},
+			},
+		}
+	}
+
+	t.Run("all rollout strategies create history", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			strategy *workloadv1alpha1.RolloutStrategy
+		}{
+			{name: "nil strategy"},
+			{
+				name: "ServingGroupRollingUpdate",
+				strategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				},
+			},
+			{
+				name: "RoleRollingUpdate",
+				strategy: &workloadv1alpha1.RolloutStrategy{
+					Type: workloadv1alpha1.RoleRollingUpdate,
+				},
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				kubeClient := kubefake.NewSimpleClientset()
+				controller, err := NewModelServingController(
+					kubeClient,
+					kthenafake.NewSimpleClientset(),
+					nil,
+					apiextfake.NewSimpleClientset(),
+				)
+				require.NoError(t, err)
+				ms := newModelServing(tt.strategy, 1)
+
+				require.NoError(t, controller.ensureControllerRevision(
+					context.Background(), ms, "target-revision"))
+				controllerRevision, err := utils.GetControllerRevision(
+					context.Background(), kubeClient, ms, "target-revision")
+				require.NoError(t, err)
+				require.NotNil(t, controllerRevision)
+				roles, err := utils.GetRolesFromControllerRevision(controllerRevision)
+				require.NoError(t, err)
+				assert.Equal(t, ms.Spec.Template.Roles, roles)
+			})
+		}
+	})
+
+	t.Run("existing revision is not rewritten by replica-only change", func(t *testing.T) {
+		kubeClient := kubefake.NewSimpleClientset()
+		controller, err := NewModelServingController(
+			kubeClient,
+			kthenafake.NewSimpleClientset(),
+			nil,
+			apiextfake.NewSimpleClientset(),
+		)
+		require.NoError(t, err)
+		strategy := &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+		original := newModelServing(strategy, 1)
+		created, err := utils.CreateControllerRevision(
+			context.Background(), kubeClient, original, "target-revision", original.Spec.Template.Roles)
+		require.NoError(t, err)
+		originalData := append([]byte(nil), created.Data.Raw...)
+		originalNumber := created.Revision
+
+		scaled := newModelServing(strategy, 3)
+		require.NoError(t, controller.ensureControllerRevision(
+			context.Background(), scaled, "target-revision"))
+
+		got, err := utils.GetControllerRevision(context.Background(), kubeClient, scaled, "target-revision")
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, originalData, got.Data.Raw)
+		assert.Equal(t, originalNumber, got.Revision)
+	})
+}
+
+func TestSyncModelServingStopsBeforeMutationWhenRevisionCreationFails(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-model-serving",
+			Namespace: "default",
+			UID:       types.UID("test-model-serving-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: ptr.To[int32](1),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				Type: workloadv1alpha1.RoleRollingUpdate,
+			},
+			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+				{
+					Name:     "decode",
+					Replicas: ptr.To[int32](1),
+					EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "decode", Image: "image:v2"}},
+					}},
+				},
+			}},
+		},
+	}
+	kubeClient := kubefake.NewSimpleClientset(&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      "sentinel",
+		Namespace: ms.Namespace,
+	}})
+	kubeClient.PrependReactor("create", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected ControllerRevision creation failure")
+	})
+	modelServingClient := kthenafake.NewSimpleClientset()
+	controller, err := NewModelServingController(
+		kubeClient,
+		modelServingClient,
+		nil,
+		apiextfake.NewSimpleClientset(),
+	)
+	require.NoError(t, err)
+	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
+	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "old-revision")
+	require.NoError(t, controller.store.UpdateServingGroupStatus(
+		utils.GetNamespaceName(ms), "test-model-serving-0", datastore.ServingGroupRunning))
+
+	err = controller.syncModelServing(context.Background(), namespacedKey(ms.Namespace, ms.Name))
+	require.ErrorContains(t, err, "injected ControllerRevision creation failure")
+	assert.Equal(t, datastore.ServingGroupRunning,
+		controller.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "test-model-serving-0"))
+	_, err = kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), "sentinel", metav1.GetOptions{})
+	require.NoError(t, err)
+	for _, action := range kubeClient.Actions() {
+		assert.False(t, action.Matches("delete", "pods") || action.Matches("delete-collection", "pods"),
+			"Pod deletion must not occur after ControllerRevision creation failure: %#v", action)
+	}
+	for _, action := range modelServingClient.Actions() {
+		assert.False(t, action.Matches("update", "modelservings/status"),
+			"status must not be promoted after ControllerRevision creation failure: %#v", action)
+	}
+}
+
 func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"

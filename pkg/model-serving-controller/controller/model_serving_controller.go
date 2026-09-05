@@ -548,6 +548,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
 	revision := utils.Revision(copy.Spec.Template.Roles)
+	if err := c.ensureControllerRevision(ctx, ms, revision); err != nil {
+		return fmt.Errorf("cannot ensure ControllerRevision: %v", err)
+	}
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
 	}
@@ -568,6 +571,29 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
 	}
 
+	return nil
+}
+
+// ensureControllerRevision persists the target Role template before workload
+// mutation, independent of rollout strategy. Reuse an existing revision without
+// rewriting its data because Role replica counts are excluded from the revision
+// hash but are present in the stored template.
+func (c *ModelServingController) ensureControllerRevision(
+	ctx context.Context,
+	ms *workloadv1alpha1.ModelServing,
+	revision string,
+) error {
+	existing, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, revision)
+	if err != nil {
+		return fmt.Errorf("failed to get ControllerRevision %s: %v", revision, err)
+	}
+	if existing != nil {
+		return nil
+	}
+
+	if _, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, revision, ms.Spec.Template.Roles); err != nil {
+		return fmt.Errorf("failed to create ControllerRevision %s: %v", revision, err)
+	}
 	return nil
 }
 
@@ -1165,7 +1191,7 @@ func (c *ModelServingController) deleteOutdatedResourcesForRollingUpdate(
 	// Therefore, servingGroups in notRunning status should be placed at the end.
 	allOutdatedGroups := append(runningOutdatedGroups, notRunningOutdatedGroups...)
 
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
 		return c.deleteOutdatedServingGroupsForServingGroupRollingUpdate(ctx, ms, maxScaleDown, allOutdatedGroups)
 	}
 
