@@ -308,7 +308,7 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
 	if oldms.Spec.Template.NetworkTopology != nil && curms.Spec.Template.NetworkTopology == nil {
 		if curms.Spec.Template.GangPolicy == nil || len(curms.Spec.Template.GangPolicy.MinRoleReplicas) == 0 {
-			if err := c.podGroupManager.CleanupPodGroups(context.TODO(), curms); err != nil {
+			if err := c.podGroupManager.CleanupPodGroups(c.operationContext(), curms); err != nil {
 				klog.Errorf("failed to clean up PodGroups for ModelServing %s/%s: %v", curms.Namespace, curms.Name, err)
 			}
 		}
@@ -445,7 +445,7 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	if err != nil {
 		klog.Errorf("failed to build plugin chain for deleted pod %s/%s: %v", pod.Namespace, pod.Name, err)
 	} else if chain != nil {
-		if err := chain.OnPodDelete(context.Background(), &plugins.HookRequest{
+		if err := chain.OnPodDelete(c.operationContext(), &plugins.HookRequest{
 			ModelServing:    ms,
 			ServingGroup:    servingGroupName,
 			RoleName:        roleName,
@@ -1483,7 +1483,7 @@ func (c *ModelServingController) getModelServingAndResourceDetails(resource meta
 	ms, servingGroupName, err := c.getModelServingByChildResource(resource)
 	if apierrors.IsNotFound(err) {
 		modelServingName, groupName, _ := utils.GetModelServingAndGroupByLabel(resource.GetLabels())
-		ms, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(resource.GetNamespace()).Get(context.TODO(), modelServingName, metav1.GetOptions{})
+		ms, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(resource.GetNamespace()).Get(c.operationContext(), modelServingName, metav1.GetOptions{})
 		servingGroupName = groupName
 	}
 	if err != nil {
@@ -1947,7 +1947,7 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		return fmt.Errorf("build plugin chain: %w", err)
 	}
 	if chain != nil {
-		if err := chain.OnPodReady(context.Background(), &plugins.HookRequest{
+		if err := chain.OnPodReady(c.operationContext(), &plugins.HookRequest{
 			ModelServing:    ms,
 			ServingGroup:    servingGroupName,
 			RoleName:        utils.GetRoleName(newPod),
@@ -2102,7 +2102,7 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		if !utils.IsPodRunningAndReady(newPod) {
 			// pod has not recovered after the grace period, needs to be rebuilt
 			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
+			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(c.operationContext(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
 			if err != nil {
 				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
 				return
@@ -2113,7 +2113,7 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
 		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
 
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
+		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(c.operationContext(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
 		if err != nil {
 			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
 			return
@@ -2264,12 +2264,12 @@ func (c *ModelServingController) rolesForServingGroupReadiness(ms *workloadv1alp
 	}
 	revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName)
 	if ok {
-		revision = c.revisionForServingGroup(context.Background(), ms, datastore.ServingGroup{Name: servingGroupName, Revision: revision})
+		revision = c.revisionForServingGroup(c.operationContext(), ms, datastore.ServingGroup{Name: servingGroupName, Revision: revision})
 	}
 	if !ok || revision == "" || revision == utils.ModelServingRevision(ms) {
 		return ms.Spec.Template.Roles, nil
 	}
-	lookupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	lookupCtx, cancel := context.WithTimeout(c.operationContext(), 5*time.Second)
 	defer cancel()
 	cr, err := utils.GetControllerRevision(lookupCtx, c.kubeClientSet, ms, revision)
 	if err != nil {
@@ -2368,7 +2368,7 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
 			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
 
-			if err := c.runServingGroupDeletePlugins(context.TODO(), ms, servingGroupName); err != nil {
+			if err := c.runServingGroupDeletePlugins(c.operationContext(), ms, servingGroupName); err != nil {
 				klog.Errorf("failed to execute OnServingGroupDelete hook: %v", err)
 			}
 
@@ -2381,7 +2381,7 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 	if roleName != "" && roleID != "" {
 		// check role status
 		if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
-			c.reconcileDeletingRole(context.TODO(), ms, servingGroupName, roleName, roleID)
+			c.reconcileDeletingRole(c.operationContext(), ms, servingGroupName, roleName, roleID)
 			return true
 		}
 	}
@@ -2638,7 +2638,7 @@ func (c *ModelServingController) getPodGroupsByIndex(indexName, indexValue strin
 
 // UpdateModelServingStatus update replicas in modelServing status.
 func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.ModelServing, revision string) error {
-	ctx := c.withRevisionHistory(context.Background(), ms)
+	ctx := c.withRevisionHistory(c.operationContext(), ms)
 	rolloutPolicy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
 	if err != nil {
 		return err
@@ -2852,7 +2852,7 @@ func (c *ModelServingController) updateModelServingStatus(
 		}
 
 		if shouldUpdate {
-			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(c.operationContext(), copy, metav1.UpdateOptions{})
 			if err != nil {
 				return err
 			}
