@@ -262,8 +262,10 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	h := newTestController(t, ms)
-	controller := h.controller
+	// This test exercises the AlreadyExists branch, not watch delivery. Seed a
+	// deterministic read view so a late informer Add cannot refill a drained
+	// queue between the setup barrier and the create operation being asserted.
+	controller, kubeClient := auditController(t, ms)
 
 	existing := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -286,24 +288,10 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 		},
 	}
 
-	_, err := h.kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
+	_, err := kubeClient.CoreV1().Pods("default").Create(context.Background(), existing, metav1.CreateOptions{})
 	assert.NoError(t, err)
-	require.Eventually(t, func() bool {
-		_, err := controller.podsLister.Pods("default").Get(existing.Name)
-		return err == nil
-	}, 2*time.Second, 10*time.Millisecond)
-	drainQueue := func() {
-		for controller.workqueue.Len() > 0 {
-			item, shutdown := controller.workqueue.Get()
-			require.False(t, shutdown)
-			controller.workqueue.Done(item)
-			controller.workqueue.Forget(item)
-		}
-	}
-	drainQueue()
-	require.Eventually(t, func() bool {
-		return controller.workqueue.Len() == 0
-	}, 2*time.Second, 10*time.Millisecond)
+	require.NoError(t, controller.podsInformer.GetIndexer().Add(existing))
+	assertQueueEmpty(t, controller.workqueue)
 
 	newPod := existing.DeepCopy()
 	newPod.OwnerReferences = []metav1.OwnerReference{
@@ -316,9 +304,10 @@ func TestCreatePodAlreadyExistsRequeues(t *testing.T) {
 
 	err = controller.createPod(context.Background(), ms, "ms-0", "role", "role-0", nil, newPod, true, nil, "entry")
 	assert.ErrorContains(t, err, "does not match expected identity")
-	h.expectQueuedKey(namespacedKey(ms.Namespace, ms.Name))
+	require.Eventually(t, func() bool { return controller.workqueue.Len() > 0 }, 2*time.Second, 10*time.Millisecond)
+	assertQueuedKey(t, controller.workqueue, namespacedKey(ms.Namespace, ms.Name))
 	require.Eventually(t, func() bool {
-		_, getErr := h.kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), existing.Name, metav1.GetOptions{})
+		_, getErr := kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), existing.Name, metav1.GetOptions{})
 		return apierrors.IsNotFound(getErr)
 	}, 2*time.Second, 10*time.Millisecond, "conflicting Pod should be deleted before retry")
 }
