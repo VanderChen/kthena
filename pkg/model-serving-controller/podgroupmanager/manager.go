@@ -251,7 +251,7 @@ func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alph
 		return nil, 0
 	}
 
-	podGroupLister := m.GetPodGroupLister()
+	podGroupLister := m.observationLister(ctx)
 	if podGroupLister == nil {
 		return fmt.Errorf("PodGroup informer is not initialized"), enqueueAfter
 	}
@@ -423,7 +423,7 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 	})
 
-	if podGroupLister := m.GetPodGroupLister(); podGroupLister != nil {
+	if podGroupLister := m.observationLister(ctx); podGroupLister != nil {
 		podGroups, err := podGroupLister.PodGroups(ms.Namespace).List(selector)
 		if err != nil {
 			return nil, err
@@ -457,9 +457,12 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get latest podgroup from informer store
-		currentPodGroup, getErr := m.PodGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
+		currentPodGroup, getErr := m.volcanoClient.SchedulingV1beta1().PodGroups(existing.Namespace).Get(ctx, existing.Name, metav1.GetOptions{})
 		if getErr != nil {
 			return getErr
+		}
+		if currentPodGroup.UID != existing.UID || !utils.IsOwnedByModelServingWithUID(currentPodGroup, ms.UID) {
+			return fmt.Errorf("PodGroup %s identity changed during update", existing.Name)
 		}
 
 		// Calculate current requirements

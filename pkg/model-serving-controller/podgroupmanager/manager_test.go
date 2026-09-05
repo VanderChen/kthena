@@ -930,7 +930,7 @@ func TestSyncPodGroupTopologyAffinity(t *testing.T) {
 
 func TestUpdatePodGroupTopologyAffinity(t *testing.T) {
 	existing := &schedulingv1beta1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{Name: "test-ms-0", Namespace: "default", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(newMinimalMS(""), workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))}},
 		Spec: schedulingv1beta1.PodGroupSpec{
 			TopologyAffinity: &schedulingv1beta1.TopologyAffinitySpec{
 				PodGroupAntiAffinity: &schedulingv1beta1.PodGroupAntiAffinity{
@@ -1622,8 +1622,9 @@ func TestUpdatePodGroupQueueBehavior(t *testing.T) {
 	buildExistingPG := func(queue string) *schedulingv1beta1.PodGroup {
 		return &schedulingv1beta1.PodGroup{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-pg",
-				Namespace: "default",
+				Name:            "test-pg",
+				Namespace:       "default",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(newMinimalMS(""), workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 			},
 			Spec: schedulingv1beta1.PodGroupSpec{
 				MinMember: 1,
@@ -1707,8 +1708,9 @@ func TestUpdatePodGroupNetworkTopologyBehavior(t *testing.T) {
 	buildExistingPG := func(topology *schedulingv1beta1.NetworkTopologySpec) *schedulingv1beta1.PodGroup {
 		return &schedulingv1beta1.PodGroup{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      "test-pg",
-				Namespace: "default",
+				Name:            "test-pg",
+				Namespace:       "default",
+				OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(newMinimalMS(""), workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 			},
 			Spec: schedulingv1beta1.PodGroupSpec{
 				MinMember:       1,
