@@ -16,6 +16,8 @@ limitations under the License.
 
 package controller
 
+import "time"
+
 type Config struct {
 	EnableLeaderElection         bool
 	Workers                      int
@@ -26,4 +28,6 @@ type Config struct {
 	KubeAPIBurst                 int
 	DebugPort                    int
 	AutoscalingSyncPeriodSeconds int
+	ModelServingAuditPeriod      time.Duration
+	ModelServingAuditTimeout     time.Duration
 }

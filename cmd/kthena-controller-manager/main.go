@@ -91,9 +91,14 @@ func main() {
 	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
+	pflag.DurationVar(&cc.ModelServingAuditPeriod, "modelserving-audit-period", 5*time.Minute, "Interval for scoped ModelServing live audits. 0 disables periodic audits, not event processing or targeted live verification.")
+	pflag.DurationVar(&cc.ModelServingAuditTimeout, "modelserving-audit-timeout", 30*time.Second, "Timeout for one ModelServing reconciliation, including live observation and actions.")
 	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
 		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
 	pflag.Parse()
+	if cc.ModelServingAuditPeriod < 0 || cc.ModelServingAuditTimeout <= 0 {
+		klog.Fatal("modelserving-audit-period must be non-negative and modelserving-audit-timeout must be positive")
+	}
 
 	cc.Controllers = parseControllers(controllers)
 

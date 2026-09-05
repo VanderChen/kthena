@@ -89,6 +89,12 @@ func SetupController(ctx context.Context, cc Config) {
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controller: %v", err)
 				}
+				// An all-zero programmatic Config retains constructor defaults.
+				if cc.ModelServingAuditTimeout != 0 || cc.ModelServingAuditPeriod != 0 {
+					if err := msc.ConfigureAudit(cc.ModelServingAuditPeriod, cc.ModelServingAuditTimeout); err != nil {
+						klog.Fatalf("invalid ModelServing audit configuration: %v", err)
+					}
+				}
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)
