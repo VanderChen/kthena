@@ -52,6 +52,29 @@ func (c *auditCoreClient) Pods(namespace string) typedcore.PodInterface {
 	return &auditPodClient{c.CoreV1Interface.Pods(namespace), c.owner, namespace}
 }
 
+func (c *auditPodClient) Delete(ctx context.Context, name string, options metav1.DeleteOptions) error {
+	if c.namespace != c.owner.ms.Namespace {
+		return fmt.Errorf("Pod deletion outside ModelServing namespace")
+	}
+	if err := c.owner.controller.validateCurrentModelServing(ctx, c.owner.ms); err != nil {
+		return err
+	}
+	if options.Preconditions == nil || options.Preconditions.UID == nil {
+		pod, err := c.PodInterface.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !utils.IsOwnedByModelServingWithUID(pod, c.owner.ms.UID) {
+			return fmt.Errorf("refuse unguarded deletion of a foreign Pod")
+		}
+		options.Preconditions = &metav1.Preconditions{UID: &pod.UID}
+		if pod.ResourceVersion != "" {
+			options.Preconditions.ResourceVersion = &pod.ResourceVersion
+		}
+	}
+	return c.PodInterface.Delete(ctx, name, options)
+}
+
 func (c *auditPodClient) DeleteCollection(ctx context.Context, options metav1.DeleteOptions, listOptions metav1.ListOptions) error {
 	if c.namespace != c.owner.ms.Namespace {
 		return fmt.Errorf("Pod deletion outside ModelServing namespace")

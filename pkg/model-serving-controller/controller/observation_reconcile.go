@@ -93,6 +93,11 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 			delete(state.completedDeletes, uid)
 		}
 	}
+	// Pod-delete hooks run before Role/Group cleanup, so a plugin cannot
+	// recreate a retired Role's artifacts after final cleanup has succeeded.
+	if err := c.resumeObservedDeletions(ctx, ms); err != nil {
+		return err
+	}
 	// This happens before readiness is downgraded, and HasRun persists after a
 	// downgrade. An initial incomplete Role is not a failed running Role.
 	if err := c.recoverMissingObservedRoles(ctx, ms); err != nil {
@@ -230,6 +235,17 @@ func (c *ModelServingController) observedRoleReady(ctx context.Context, ms *work
 		if pod.DeletionTimestamp != nil || !utils.IsPodRunningAndReady(pod) || progress == nil || !progress.ready || progress.pod.UID != pod.UID {
 			return false, nil
 		}
+		template, err := c.revisionHistory(ctx, ms).role(ctx, utils.ObjectRevision(pod), name)
+		if err != nil {
+			return false, err
+		}
+		baseline, err := c.revisionHistory(ctx, ms).role(ctx, role.Revision, name)
+		if err != nil {
+			return false, err
+		}
+		if !utils.EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{template}, []workloadv1alpha1.Role{baseline}) {
+			return false, nil
+		}
 	}
 	return true, nil
 }
@@ -296,12 +312,31 @@ func (c *ModelServingController) runObservedPodReady(ctx context.Context, ms *wo
 		return err
 	}
 	if chain != nil {
-		return chain.OnPodReady(ctx, c.podHookRequest(ms, pod))
+		req, err := c.observedPodHookRequest(ctx, ms, pod)
+		if err != nil {
+			return err
+		}
+		return chain.OnPodReady(ctx, req)
 	}
 	return nil
 }
 
+func (c *ModelServingController) observedPodHookRequest(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) (*plugins.HookRequest, error) {
+	req := c.podHookRequest(ms, pod)
+	role, err := c.revisionHistory(ctx, ms).role(ctx, utils.ObjectRevision(pod), req.RoleName)
+	if err != nil {
+		return nil, err
+	}
+	req.Role = &role
+	return req, nil
+}
+
 func (c *ModelServingController) runObservedPodDelete(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) error {
+	// A late tombstone must not run side effects for a new identity already
+	// adopted at this name. Missing unobserved history is not reconstructed.
+	if previous := c.servingState.pods[pod.Name]; previous != nil && previous.pod.UID != pod.UID {
+		return nil
+	}
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return err

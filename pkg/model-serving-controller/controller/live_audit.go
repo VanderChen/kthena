@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -47,6 +48,7 @@ type auditRuntime struct {
 	mutex    sync.Mutex
 	requests map[string]*auditRequest
 	states   sync.Map // key: namespace/name; value: *servingAuditState, worker-owned
+	metrics  *auditMetrics
 }
 
 type auditRequest struct {
@@ -70,7 +72,12 @@ type servingAuditState struct {
 	deleted          map[types.UID]*corev1.Pod
 	completedDeletes map[types.UID]time.Time
 	grace            map[types.UID]time.Time
+	roleDeletes      map[roleCleanupKey]struct{}
+	groupDeletes     map[string]struct{}
+	pendingSince     time.Time
 }
+
+type roleCleanupKey struct{ group, role, id string }
 
 type servingObservation struct {
 	pods      cache.Indexer
@@ -80,12 +87,13 @@ type servingObservation struct {
 }
 
 func newAuditRuntime() *auditRuntime {
-	return &auditRuntime{requests: make(map[string]*auditRequest)}
+	return &auditRuntime{requests: make(map[string]*auditRequest), metrics: newAuditMetrics()}
 }
 
 func newServingAuditState(ms *workloadv1alpha1.ModelServing) *servingAuditState {
 	return &servingAuditState{uid: ms.UID, ms: ms.DeepCopy(), pods: make(map[string]*podHookProgress),
-		deleted: make(map[types.UID]*corev1.Pod), completedDeletes: make(map[types.UID]time.Time), grace: make(map[types.UID]time.Time)}
+		deleted: make(map[types.UID]*corev1.Pod), completedDeletes: make(map[types.UID]time.Time), grace: make(map[types.UID]time.Time),
+		roleDeletes: make(map[roleCleanupKey]struct{}), groupDeletes: make(map[string]struct{})}
 }
 
 // ConfigureAudit must be called before Run. Zero disables periodic auditing,
@@ -124,6 +132,11 @@ func (c *ModelServingController) requestAudit(key string, update func(*auditRequ
 		c.audit.requests[key] = r
 	}
 	update(r)
+	mode := "cache"
+	if r.live {
+		mode = "live"
+	}
+	c.audit.metrics.triggers.WithLabelValues(mode).Inc()
 	c.audit.mutex.Unlock()
 	c.workqueue.Add(key)
 }
@@ -225,6 +238,12 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 		state = value.(*servingAuditState)
 	}
 	live := r.live || r.deletedMS != nil || state != nil && state.live
+	started := time.Now()
+	defer func() {
+		if live {
+			c.audit.metrics.finish(started, resultErr, state)
+		}
+	}()
 	// Preserve live intent on all failures, including a partial paginated List.
 	defer func() {
 		if resultErr != nil {
@@ -248,6 +267,7 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 	ms, err := c.modelServingLister.ModelServings(namespace).Get(name)
 	if live || apierrors.IsNotFound(err) {
 		live = true
+		c.audit.metrics.reads.WithLabelValues("modelservings").Inc()
 		ms, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(namespace).Get(ctx, name, metav1.GetOptions{})
 	}
 	if apierrors.IsNotFound(err) {
@@ -256,13 +276,8 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 			old = state.ms
 		}
 		if old != nil {
-			// Owner references handle Kubernetes GC. Hooks must finish before
-			// dropping the last known operation/identity information.
-			groups, _ := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(old))
-			for _, group := range groups {
-				if err := c.runServingGroupDeletePlugins(ctx, old, group.Name); err != nil {
-					return err
-				}
+			if err := c.cleanupRetiredModelServing(ctx, old, state); err != nil {
+				return err
 			}
 		}
 		c.store.DeleteModelServing(types.NamespacedName{Namespace: namespace, Name: name})
@@ -276,12 +291,31 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 	if err != nil {
 		return err
 	}
+	if state != nil && state.uid != ms.UID {
+		if err := c.cleanupRetiredModelServing(ctx, state.ms, state); err != nil {
+			return err
+		}
+		live = true
+		observation, err = c.readObservation(ctx, ms, true)
+		if err != nil {
+			return err
+		}
+	}
 	if state == nil || state.uid != ms.UID {
 		state = newServingAuditState(ms)
 		c.audit.states.Store(key, state)
 	}
+	if !reflect.DeepEqual(state.ms.Spec.Plugins, ms.Spec.Plugins) || !reflect.DeepEqual(state.ms.Annotations, ms.Annotations) {
+		for _, progress := range state.pods {
+			progress.runningVersion = ""
+			progress.ready = false
+		}
+	}
 	state.ms = ms.DeepCopy()
 	state.live = live && !c.cacheMatchesObservation(ms, observation)
+	if state.live {
+		c.audit.metrics.drift.Inc()
+	}
 	for uid, pod := range r.deletedPods {
 		if utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 			state.deleted[uid] = pod
@@ -299,6 +333,9 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 	}
 	start := time.Now()
 	err = view.syncModelServing(ctx, key)
+	if errors.Is(err, errAuditRequeue) {
+		err = nil
+	}
 	if live {
 		klog.V(2).InfoS("Audited ModelServing from API server", "modelServing", key, "uid", ms.UID, "duration", time.Since(start), "cacheDrift", state.live, "error", err)
 	}
@@ -338,6 +375,7 @@ func (c *ModelServingController) readObservation(ctx context.Context, ms *worklo
 	var services []*corev1.Service
 	if live {
 		items, err := listAuditPages(ctx, options, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Pod, string, error) {
+			c.audit.metrics.reads.WithLabelValues("pods").Inc()
 			list, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, opts)
 			if err != nil {
 				return nil, "", err
@@ -351,6 +389,7 @@ func (c *ModelServingController) readObservation(ctx context.Context, ms *worklo
 			pods = append(pods, &items[i])
 		}
 		svcs, err := listAuditPages(ctx, options, func(ctx context.Context, opts metav1.ListOptions) ([]corev1.Service, string, error) {
+			c.audit.metrics.reads.WithLabelValues("services").Inc()
 			list, err := c.kubeClientSet.CoreV1().Services(ms.Namespace).List(ctx, opts)
 			if err != nil {
 				return nil, "", err
@@ -388,6 +427,7 @@ func (c *ModelServingController) readObservation(ctx context.Context, ms *worklo
 		o.podGroups = newObservationIndexer()
 		if live {
 			pgs, err := listAuditPages(ctx, options, func(ctx context.Context, opts metav1.ListOptions) ([]schedulingv1beta1.PodGroup, string, error) {
+				c.audit.metrics.reads.WithLabelValues("podgroups").Inc()
 				list, err := c.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).List(ctx, opts)
 				if err != nil {
 					return nil, "", err

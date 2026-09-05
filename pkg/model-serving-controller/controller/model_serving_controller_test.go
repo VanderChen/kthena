@@ -204,7 +204,7 @@ func TestNewTestController_HasSyncedQueueAndStores(t *testing.T) {
 	require.True(t, h.controller.podsInformer.HasSynced())
 	require.True(t, h.controller.servicesInformer.HasSynced())
 	require.True(t, h.controller.modelServingsInformer.HasSynced())
-	require.True(t, h.controller.initialSync)
+	require.True(t, h.controller.initialSync.Load())
 }
 
 func TestCreateOrUpdatePodGroupByServingGroupRequeue(t *testing.T) {
@@ -6499,7 +6499,7 @@ func TestServingGroupDeletePluginsRunOnFastDeletionPath(t *testing.T) {
 		groupName = "production-ms-0"
 	)
 	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-ms", Namespace: namespace},
+		ObjectMeta: metav1.ObjectMeta{Name: "production-ms", Namespace: namespace, UID: "production-ms-uid"},
 		Spec: workloadv1alpha1.ModelServingSpec{Plugins: []workloadv1alpha1.PluginSpec{{
 			Name:   ranktable.PluginName,
 			Type:   workloadv1alpha1.PluginTypeBuiltIn,
@@ -6507,8 +6507,9 @@ func TestServingGroupDeletePluginsRunOnFastDeletionPath(t *testing.T) {
 		}}},
 	}
 	ranktableCM := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
-		Name:      ranktable.GenerateRanktableConfigMapName(ms.Name, groupName),
-		Namespace: namespace,
+		Name:            ranktable.GenerateRanktableConfigMapName(ms.Name, groupName),
+		Namespace:       namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)},
 		Labels: map[string]string{
 			workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 			workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -6732,13 +6733,13 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	startActions := len(kubeClient.Actions())
 
 	// Verify initialSync is false before syncAll
-	assert.False(t, controller.initialSync, "initialSync should be false before syncAll")
+	assert.False(t, controller.initialSync.Load(), "initialSync should be false before syncAll")
 
 	// Call syncAll - this should handle the failed pod properly after the fix
 	controller.syncAll()
 
 	// Verify initialSync is true after syncAll
-	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
 
 	assertPodDeleted(t, kubeClient, startActions, failedPod.Name, "Failed pod should be deleted after syncAll processes it")
 }
@@ -6992,7 +6993,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	controller.syncAll()
 
 	// Verify initialSync is true
-	assert.True(t, controller.initialSync, "initialSync should be true after syncAll")
+	assert.True(t, controller.initialSync.Load(), "initialSync should be true after syncAll")
 
 	// Verify running pod is NOT in graceMap (it's healthy)
 	_, runningInGraceMap := controller.graceMap.Load(getPodGracePeriodKey(runningPod))
@@ -7349,7 +7350,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	startActions := len(kubeClient.Actions())
 
 	// Verify before syncAll, initialSync is false
-	assert.False(t, controller.initialSync)
+	assert.False(t, controller.initialSync.Load())
 
 	// The key test: Before the fix, calling addPod directly with initialSync=false
 	// for a failed pod would return early without processing.
@@ -8292,6 +8293,10 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 
 			startAction := len(client.Actions())
 			startVolcanoAction := len(volcanoClient.Actions())
+			_, err = volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Create(context.Background(), &schedulingv1beta1.PodGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: sgName, Namespace: ms.Namespace, UID: "owned-podgroup", OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)}},
+			}, metav1.CreateOptions{})
+			require.NoError(t, err)
 
 			err = controller.deleteServingGroup(context.Background(), ms, sgName)
 			if tt.expectError {

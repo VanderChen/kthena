@@ -501,7 +501,17 @@ func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return nil
 	}
 
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
+	pg, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, servingGroupName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !utils.IsOwnedByModelServingWithUID(pg, ms.UID) {
+		return nil
+	}
+	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, *metav1.NewPreconditionDeleteOptions(string(pg.UID))); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
@@ -517,7 +527,7 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.Mod
 	}
 
 	for _, podGroup := range existingPodGroups {
-		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
+		err := m.DeletePodGroup(ctx, ms, podGroup.Name)
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}
