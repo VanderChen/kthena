@@ -63,10 +63,23 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
+		if !metav1.IsControlledBy(existing, ms) {
+			return nil, fmt.Errorf("ControllerRevision %s/%s is not controlled by the current ModelServing UID", ms.Namespace, controllerRevisionName)
+		}
 		// A revision name identifies immutable historical template data. Never
 		// overwrite it: doing so would make stable ordinal recovery use a
 		// template different from the one referenced by live resources.
 		if string(existing.Data.Raw) != string(data) {
+			// Replica counts and rollout policy are intentionally excluded from
+			// revision identity. Reuse an immutable snapshot when those are the
+			// only differences, just as Kubernetes reuses a semantically equal
+			// ReplicaSet while ignoring its template hash label.
+			if desiredRoles, ok := templateData.([]workloadv1alpha1.Role); ok {
+				existingRoles, decodeErr := GetRolesFromControllerRevision(existing)
+				if decodeErr == nil && EqualRoleTemplatesForRevision(existingRoles, desiredRoles) {
+					return existing, nil
+				}
+			}
 			return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, controllerRevisionName)
 		}
 		return existing, nil
