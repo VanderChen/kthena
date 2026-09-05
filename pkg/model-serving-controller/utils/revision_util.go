@@ -17,12 +17,28 @@ import (
 	"fmt"
 	"hash"
 	"hash/fnv"
+	"sort"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
+
+// roleTemplateRevision contains only fields that define the workload rendered
+// for one Role. Replica counts and rolling-update policy control how an existing
+// workload is managed; they do not define the workload template itself.
+//
+// Keep this explicit projection instead of hashing workloadv1alpha1.Role
+// directly. Adding another operational field to the public Role API must not
+// silently change every existing workload's revision.
+type roleTemplateRevision struct {
+	Name           string
+	EntryTemplate  workloadv1alpha1.PodTemplateSpec
+	WorkerReplicas int32
+	WorkerTemplate *workloadv1alpha1.PodTemplateSpec
+}
 
 // Revision calculates the revision of an object using FNV hashing.
 func Revision(obj interface{}) string {
@@ -39,33 +55,42 @@ func DeepHashObject(hasher hash.Hash, objectToWrite interface{}) {
 	fmt.Fprintf(hasher, "%v", dump.ForHash(objectToWrite))
 }
 
-// removeRoleReplicasForRevision removes fields that do not change rendered pods when calculating modelServing revision hash.
-func removeRoleReplicasForRevision(ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.ModelServing {
-	copy := ms.DeepCopy()
-	for i := range copy.Spec.Template.Roles {
-		copy.Spec.Template.Roles[i].Replicas = nil
-		copy.Spec.Template.Roles[i].RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
+func projectRoleTemplateForRevision(role workloadv1alpha1.Role) roleTemplateRevision {
+	return roleTemplateRevision{
+		Name:           role.Name,
+		EntryTemplate:  *role.EntryTemplate.DeepCopy(),
+		WorkerReplicas: role.WorkerReplicas,
+		WorkerTemplate: role.WorkerTemplate.DeepCopy(),
 	}
+}
 
-	return copy
+func projectRoleTemplatesForRevision(roles []workloadv1alpha1.Role) []roleTemplateRevision {
+	projected := make([]roleTemplateRevision, len(roles))
+	for i := range roles {
+		projected[i] = projectRoleTemplateForRevision(roles[i])
+	}
+	sort.Slice(projected, func(i, j int) bool { return projected[i].Name < projected[j].Name })
+	return projected
 }
 
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
-	roles := removeRoleReplicasForRevision(ms).Spec.Template.Roles
-	return Revision(roles)
-}
-
-// removeRoleReplicasForRoleTemplateHash removes fields that do not change rendered pods when calculating role template hash.
-func removeRoleReplicasForRoleTemplateHash(role workloadv1alpha1.Role) workloadv1alpha1.Role {
-	copy := role
-	copy.Replicas = nil
-	copy.RollingUpdateConfiguration = workloadv1alpha1.RollingUpdateConfiguration{}
-	return copy
+	return Revision(projectRoleTemplatesForRevision(ms.Spec.Template.Roles))
 }
 
 // CalRoleTemplateHash calculates the revision hash for a Role template.
 func CalRoleTemplateHash(role workloadv1alpha1.Role) string {
-	copy := removeRoleReplicasForRoleTemplateHash(role)
-	return Revision(copy)
+	return Revision(projectRoleTemplateForRevision(role))
+}
+
+// EqualRoleTemplatesForRevision reports whether two Role collections render
+// the same workload templates. It intentionally ignores Role replica counts and
+// rolling-update policy, matching ModelServingRevision and CalRoleTemplateHash.
+// This semantic comparison, rather than hash equality, is authoritative across
+// controller/API upgrades where the hash representation may change.
+func EqualRoleTemplatesForRevision(left, right []workloadv1alpha1.Role) bool {
+	return apiequality.Semantic.DeepEqual(
+		projectRoleTemplatesForRevision(left),
+		projectRoleTemplatesForRevision(right),
+	)
 }

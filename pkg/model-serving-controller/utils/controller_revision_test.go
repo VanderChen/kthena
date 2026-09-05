@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -63,6 +64,19 @@ func TestCreateControllerRevision(t *testing.T) {
 	assert.Equal(t, "default", cr.Namespace)
 	assert.Equal(t, "test-ms", cr.Labels[ControllerRevisionLabelKey])
 	assert.Equal(t, "revision-v1", cr.Labels[ControllerRevisionRevisionLabelKey])
+
+	// Operational settings are not part of revision identity, so they must not
+	// turn an existing immutable snapshot into a false hash collision.
+	operationallyChanged := []workloadv1alpha1.Role{*templateData[0].DeepCopy()}
+	replicas := int32(4)
+	maxSurge := intstr.FromString("25%")
+	partition := intstr.FromInt(1)
+	operationallyChanged[0].Replicas = &replicas
+	operationallyChanged[0].MaxSurge = &maxSurge
+	operationallyChanged[0].Partition = &partition
+	reused, err := CreateControllerRevision(ctx, client, ms, "revision-v1", operationallyChanged)
+	assert.NoError(t, err)
+	assert.Equal(t, cr.Name, reused.Name)
 
 	// A hash collision or corrupted historical snapshot must never be repaired
 	// by overwriting data referenced by live stable or surge resources.

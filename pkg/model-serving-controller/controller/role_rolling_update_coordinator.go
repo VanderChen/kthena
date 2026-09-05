@@ -309,8 +309,8 @@ func (c *ModelServingController) roleSpecsFromRevision(
 	if err != nil {
 		return nil, err
 	}
-	if controllerRevision == nil {
-		return nil, fmt.Errorf("controller revision %s not found", revision)
+	if controllerRevision == nil || !metav1.IsControlledBy(controllerRevision, ms) {
+		return nil, fmt.Errorf("controller revision %s is missing or not controlled by the current ModelServing UID", revision)
 	}
 	oldRoles, err := utils.GetRolesFromControllerRevision(controllerRevision)
 	if err != nil {
@@ -335,6 +335,7 @@ func (c *ModelServingController) roleSpecsFromRevision(
 }
 
 func (c *ModelServingController) resolveRoleRolloutState(
+	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	servingGroup datastore.ServingGroup,
 	roleSpec workloadv1alpha1.Role,
@@ -359,7 +360,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 			continue
 		}
 		inStableRange := ordinal >= partition && ordinal < stableEnd
-		observedHash, resolved := c.resolveRoleTemplateHashForComparison(ms, servingGroup, roleSpec.Name, role)
+		observedHash, resolved := c.resolveRoleTemplateHashForComparison(ctx, ms, servingGroup, roleSpec.Name, role)
 		oldVersion := !resolved || observedHash != expectedHash
 		if oldVersion {
 			hasOldVersion = true
@@ -419,6 +420,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 }
 
 func (c *ModelServingController) terminatingRoleReplicas(
+	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	servingGroup datastore.ServingGroup,
 ) map[string]map[int]string {
@@ -442,7 +444,12 @@ func (c *ModelServingController) terminatingRoleReplicas(
 		if roleName == "" || ordinal < 0 {
 			continue
 		}
-		hash := c.resolveRoleTemplateHash(ms, roleName, pod)
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		hash, _ := c.resolveRoleTemplateHashForComparison(ctx, ms, servingGroup, roleName, datastore.Role{
+			Revision: utils.ObjectRevision(pod), RoleTemplateHash: utils.ObjectRoleTemplateHash(pod),
+		})
 		if result[roleName] == nil {
 			result[roleName] = make(map[int]string)
 		}
@@ -457,6 +464,7 @@ func (c *ModelServingController) terminatingRoleReplicas(
 }
 
 func (c *ModelServingController) resolveRoleRolloutPolicy(
+	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	newRevision string,
 ) (*roleRolloutPolicy, error) {
@@ -476,22 +484,39 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 	}
 	oldRolesByRevision := make(map[string]map[string]workloadv1alpha1.Role)
 	for _, servingGroup := range servingGroups {
-		if servingGroup.Status == datastore.ServingGroupDeleting || servingGroup.Revision == "" || servingGroup.Revision == newRevision {
+		if servingGroup.Status == datastore.ServingGroupDeleting || servingGroup.Revision == "" {
+			continue
+		}
+		if ms.Status.CurrentRevision == newRevision && c.compareServingGroupTemplate(ctx, ms, servingGroup, newRevision) == templateEquivalent {
 			continue
 		}
 		_, servingGroupOrdinal := utils.GetParentNameAndOrdinal(servingGroup.Name)
 		if servingGroupOrdinal >= 0 && servingGroupOrdinal < groupPartition {
 			continue
 		}
-		oldRoleByName, cached := oldRolesByRevision[servingGroup.Revision]
+		// The group retains its observed identity after independent Role
+		// updates. The completed ModelServing revision is the baseline for a
+		// subsequent rollout, not a stale group-level label.
+		baselineRevision := servingGroup.Revision
+		if ms.Status.CurrentRevision != "" && ms.Status.CurrentRevision != newRevision {
+			baselineRevision = ms.Status.CurrentRevision
+		}
+		oldRoleByName, cached := oldRolesByRevision[baselineRevision]
 		if !cached {
-			oldRoleByName, err = c.roleSpecsFromRevision(ms, servingGroup.Revision)
+			oldRoleByName, err = c.roleSpecsFromRevision(ms, baselineRevision)
 			if err != nil {
 				return nil, fmt.Errorf("failed to resolve Role specs from ControllerRevision %s for ServingGroup %s: %w", servingGroup.Revision, servingGroup.Name, err)
 			}
-			oldRolesByRevision[servingGroup.Revision] = oldRoleByName
+			oldRolesByRevision[baselineRevision] = oldRoleByName
 		}
-		terminatingByRole := c.terminatingRoleReplicas(ms, servingGroup)
+		oldRoles := make([]workloadv1alpha1.Role, 0, len(oldRoleByName))
+		for _, role := range oldRoleByName {
+			oldRoles = append(oldRoles, role)
+		}
+		if utils.EqualRoleTemplatesForRevision(oldRoles, ms.Spec.Template.Roles) {
+			continue
+		}
+		terminatingByRole := c.terminatingRoleReplicas(ctx, ms, servingGroup)
 		states := make([]coordinatedRoleState, 0, len(coordinatedNames))
 		for _, roleSpec := range ms.Spec.Template.Roles {
 			if _, coordinated := coordinatedNames[roleSpec.Name]; !coordinated {
@@ -509,7 +534,7 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 			if oldRole, existed := oldRoleByName[roleSpec.Name]; existed {
 				previousDesired = roleReplicas(oldRole)
 			}
-			states = append(states, c.resolveRoleRolloutState(
+			states = append(states, c.resolveRoleRolloutState(ctx,
 				ms,
 				servingGroup,
 				roleSpec,
