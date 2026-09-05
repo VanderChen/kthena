@@ -19,6 +19,7 @@ package ranktable
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +29,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 const PluginName = "ranktable"
@@ -172,6 +174,9 @@ func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plug
 	activePods := 0
 
 	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
 		isRunning := pod.Status.Phase == corev1.PodRunning
 		klog.V(4).Infof("%s: checking pod %s: phase=%s deletionTimestamp=%v running=%v", hookName, pod.Name, pod.Status.Phase, pod.DeletionTimestamp, isRunning)
 
@@ -216,7 +221,11 @@ func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plug
 		if template.Level == RoleLevelRanktable {
 			var roleReplicas int32
 			found := false
-			for _, r := range ms.Spec.Template.Roles {
+			roles := ms.Spec.Template.Roles
+			if req.Role != nil {
+				roles = []workloadv1alpha1.Role{*req.Role}
+			}
+			for _, r := range roles {
 				if r.Name == req.RoleName {
 					// For a specific RoleID (Role Instance), expected count is 1 (entry) + WorkerReplicas
 					roleReplicas = 1 + r.WorkerReplicas
@@ -235,6 +244,24 @@ func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plug
 	}
 
 	templateData := p.templateManager.BuildRanktableTemplateData(status, podRanktables)
+	// Reconciliation is level-triggered. A wall-clock render timestamp would
+	// rewrite templates using .Timestamp even when no input state changed.
+	// Use the latest observable lifecycle transition as a stable timestamp.
+	observedAt := ms.CreationTimestamp.Time
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		if pod.CreationTimestamp.Time.After(observedAt) {
+			observedAt = pod.CreationTimestamp.Time
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.LastTransitionTime.Time.After(observedAt) {
+				observedAt = condition.LastTransitionTime.Time
+			}
+		}
+	}
+	templateData.Timestamp = observedAt.UTC().Format(time.RFC3339)
 	ranktableJSON, err := p.templateManager.RenderRanktable(template.RanktableTemplate, templateData)
 	if err != nil {
 		return fmt.Errorf("failed to render ranktable: %w", err)
@@ -265,8 +292,8 @@ func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plug
 	return p.templateManager.EnsureRanktableConfigMap(ctx, req.KubeClient, ms.Namespace, cmName, []metav1.OwnerReference{ownerRef}, cmLabels, template.Filename, ranktableJSON)
 }
 
-func (p *RanktablePlugin) OnRoleSync(_ context.Context, _ *plugins.HookRequest) error {
-	return nil
+func (p *RanktablePlugin) OnRoleSync(ctx context.Context, req *plugins.HookRequest) error {
+	return p.updateRanktableFromPods(ctx, req, "OnRoleSync")
 }
 
 func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookRequest) error {
@@ -287,7 +314,17 @@ func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookReq
 
 	if template.Level == RoleLevelRanktable {
 		cmName := GenerateRanktableConfigMapName(ms.Name, fmt.Sprintf("%s-%s", req.ServingGroup, req.RoleID))
-		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cmName, metav1.DeleteOptions{}); err != nil {
+		cm, err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, cmName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !utils.IsOwnedByModelServingWithUID(cm, ms.UID) {
+			return nil
+		}
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cmName, *metav1.NewPreconditionDeleteOptions(string(cm.UID))); err != nil {
 			if !apierrors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete ranktable configmap %s: %w", cmName, err)
 			}
@@ -320,9 +357,12 @@ func (p *RanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins
 	}
 
 	for _, cm := range cms.Items {
-		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil {
+		if !utils.IsOwnedByModelServingWithUID(&cm, ms.UID) {
+			continue
+		}
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cm.Name, *metav1.NewPreconditionDeleteOptions(string(cm.UID))); err != nil {
 			if !apierrors.IsNotFound(err) {
-				klog.Errorf("failed to delete ranktable configmap %s/%s: %v", ms.Namespace, cm.Name, err)
+				return fmt.Errorf("failed to delete ranktable configmap %s/%s: %w", ms.Namespace, cm.Name, err)
 			}
 		} else {
 			klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)

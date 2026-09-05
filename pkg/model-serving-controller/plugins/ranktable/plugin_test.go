@@ -18,21 +18,79 @@ package ranktable
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
+	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
+
+func TestRoleSyncRepairsRanktableWithoutLifecycleReplay(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "default")
+	pod := ranktableTestPod("test-ms-0", "worker", "worker-0", "pod-0")
+	pod.Status.Phase = corev1.PodRunning
+	pod.Annotations = map[string]string{PodRanktableAnnotation: `{}`}
+	p, req, client := newRanktablePluginTest(t, RoleLevelRanktable, []*corev1.Pod{pod})
+	require.NoError(t, p.OnRoleSync(context.Background(), req))
+	name := GenerateRanktableConfigMapName(req.ModelServing.Name, req.ServingGroup+"-"+req.RoleID)
+	cm, err := client.CoreV1().ConfigMaps("default").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"Completed","servers":1}`, cm.Data["ranktable.json"])
+	client.ClearActions()
+	require.NoError(t, p.OnRoleSync(context.Background(), req))
+	for _, action := range client.Actions() {
+		require.False(t, action.Matches("create", "configmaps") || action.Matches("update", "configmaps"))
+	}
+	cm.Data["ranktable.json"] = `{}`
+	_, err = client.CoreV1().ConfigMaps("default").Update(context.Background(), cm, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, p.OnRoleSync(context.Background(), req))
+	cm, err = client.CoreV1().ConfigMaps("default").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"status":"Completed","servers":1}`, cm.Data["ranktable.json"])
+}
+
+func TestRanktableCleanupRetriesAndProtectsNewOwner(t *testing.T) {
+	t.Setenv("POD_NAMESPACE", "default")
+	p, req, client := newRanktablePluginTest(t, RoleLevelRanktable, nil)
+	require.NoError(t, p.OnRoleSync(context.Background(), req))
+	name := GenerateRanktableConfigMapName(req.ModelServing.Name, req.ServingGroup+"-"+req.RoleID)
+	cm, err := client.CoreV1().ConfigMaps("default").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+	cm.UID = "ranktable-uid"
+	_, err = client.CoreV1().ConfigMaps("default").Update(context.Background(), cm, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	fail := true
+	client.PrependReactor("delete", "configmaps", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		require.Equal(t, cm.UID, *action.(kubetesting.DeleteAction).GetDeleteOptions().Preconditions.UID)
+		if fail {
+			return true, nil, fmt.Errorf("delete unavailable")
+		}
+		return false, nil, nil
+	})
+	require.ErrorContains(t, p.OnServingGroupDelete(context.Background(), req), "delete unavailable")
+	fail = false
+	require.NoError(t, p.OnServingGroupDelete(context.Background(), req))
+	cm.OwnerReferences[0].UID = "new-modelserving"
+	_, err = client.CoreV1().ConfigMaps("default").Create(context.Background(), cm, metav1.CreateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, p.OnRoleDelete(context.Background(), req))
+	require.ErrorContains(t, p.OnRoleSync(context.Background(), req), "owned by another object")
+	_, err = client.CoreV1().ConfigMaps("default").Get(context.Background(), name, metav1.GetOptions{})
+	require.NoError(t, err)
+}
 
 func TestOnPodRunningGeneratesRanktableBeforePodReady(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "default")
@@ -143,8 +201,9 @@ devices:
 
 func ranktableTestPod(groupName, roleName, roleID, name string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
-		Name:      name,
-		Namespace: "default",
+		Name:            name,
+		Namespace:       "default",
+		OwnerReferences: []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing", Name: "test-ms", UID: "test-ms-uid", Controller: ptr.To(true)}},
 		Labels: map[string]string{
 			workloadv1alpha1.ModelServingNameLabelKey: "test-ms",
 			workloadv1alpha1.GroupNameLabelKey:        groupName,

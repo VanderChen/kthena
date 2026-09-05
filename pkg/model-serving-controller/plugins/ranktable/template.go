@@ -261,6 +261,12 @@ func (tm *TemplateManager) EnsureRanktableConfigMap(
 		return fmt.Errorf("failed to get ranktable ConfigMap %s/%s: %w", namespace, name, err)
 	}
 
+	if expected := metav1.GetControllerOf(cm); expected != nil {
+		actual := metav1.GetControllerOf(existingCM)
+		if actual == nil || actual.UID != expected.UID || actual.Kind != expected.Kind || actual.APIVersion != expected.APIVersion {
+			return fmt.Errorf("ranktable ConfigMap %s/%s is owned by another object", namespace, name)
+		}
+	}
 	// Check if update is needed
 	if existingCM.Data != nil && existingCM.Data[filename] == content && len(existingCM.Data) == 1 {
 		klog.V(4).Infof("Ranktable ConfigMap %s/%s is up to date, skipping update", namespace, name)
