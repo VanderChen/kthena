@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -333,7 +332,7 @@ func (c *ModelServingController) reconcileModelServing(ctx context.Context, key 
 	}
 	start := time.Now()
 	err = view.syncModelServing(ctx, key)
-	if errors.Is(err, errAuditRequeue) {
+	if err == errAuditRequeue {
 		err = nil
 	}
 	if live {

@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -36,8 +37,15 @@ import (
 
 // reconcileObservation calibrates membership while preserving operation intent.
 // Its state belongs to the same namespace/name workqueue key as normal rollout.
-func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing) (resultErr error) {
 	state := c.servingState
+	defer func() {
+		if resultErr != nil {
+			if err := c.calibrateFailedObservation(ctx, ms); err != nil {
+				resultErr = errors.Join(resultErr, err)
+			}
+		}
+	}()
 	pods, err := c.podsLister.Pods(ms.Namespace).List(labels.Everything())
 	if err != nil {
 		return err
@@ -195,6 +203,61 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 		}
 	}
 	return hookErr
+}
+
+// A failed delete hook or cleanup request must retain its operation checkpoint,
+// not the availability of a Pod that no longer exists. HasRun survives these
+// downgrades so retry still applies the original recovery policy.
+func (c *ModelServingController) calibrateFailedObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	key := utils.GetNamespaceName(ms)
+	readyByGroup := make(map[string][]string)
+	for _, object := range c.observation.pods.List() {
+		pod := object.(*corev1.Pod)
+		progress := c.servingState.pods[pod.Name]
+		if progress != nil && progress.ready && progress.pod.UID == pod.UID && pod.DeletionTimestamp == nil && utils.IsPodRunningAndReady(pod) && utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+			if c.store.GetServingGroupStatus(key, group) != datastore.ServingGroupDeleting && c.store.GetRoleStatus(key, group, utils.GetRoleName(pod), utils.GetRoleID(pod)) != datastore.RoleDeleting {
+				readyByGroup[group] = append(readyByGroup[group], pod.Name)
+			}
+		}
+	}
+	c.store.CalibrateReadyPods(key, readyByGroup)
+	groups, err := c.store.GetServingGroupByModelServing(key)
+	if err == datastore.ErrServingGroupNotFound {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, group := range groups {
+		if group.Status == datastore.ServingGroupDeleting {
+			continue
+		}
+		roles, err := c.store.GetRolesByGroup(key, group.Name)
+		if err != nil {
+			return err
+		}
+		for name, instances := range roles {
+			for id, role := range instances {
+				if role.Status == datastore.RoleDeleting {
+					continue
+				}
+				ready, lookupErr := c.observedRoleReady(ctx, ms, group.Name, name, *role, c.servingState)
+				if !ready || lookupErr != nil {
+					if err := c.store.UpdateRoleStatus(key, group.Name, name, id, datastore.RoleCreating); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		ready, lookupErr := c.checkServingGroupReady(ms, group.Name)
+		if !ready || lookupErr != nil {
+			if err := c.store.UpdateServingGroupStatus(key, group.Name, datastore.ServingGroupCreating); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *ModelServingController) observedRolePods(ctx context.Context, ms *workloadv1alpha1.ModelServing, group, name string, role datastore.Role) ([]*corev1.Pod, int, error) {

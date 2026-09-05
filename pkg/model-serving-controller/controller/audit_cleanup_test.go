@@ -34,15 +34,49 @@ import (
 
 type auditCleanupPlugin struct {
 	plugins.DemoPlugin
-	fail  bool
-	calls []string
+	fail    bool
+	failPod bool
+	calls   []string
 }
 
 func (p *auditCleanupPlugin) Name() string                                           { return "audit-cleanup" }
 func (p *auditCleanupPlugin) OnRoleSync(context.Context, *plugins.HookRequest) error { return nil }
 func (p *auditCleanupPlugin) OnPodDelete(context.Context, *plugins.HookRequest) error {
 	p.calls = append(p.calls, "pod")
+	if p.failPod {
+		return fmt.Errorf("Pod cleanup unavailable")
+	}
 	return nil
+}
+
+func TestAuditFailedDeleteHookDoesNotKeepMissingPodAvailable(t *testing.T) {
+	ms, pods := auditFixture(workloadv1alpha1.RoleRecreate, 1)
+	ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "audit-cleanup", Type: workloadv1alpha1.PluginTypeBuiltIn}}
+	for _, pod := range pods {
+		pod.Labels[workloadv1alpha1.RevisionLabelKey] = utils.ModelServingRevision(ms)
+	}
+	c, kube := auditController(t, ms, pods...)
+	p := &auditCleanupPlugin{failPod: true}
+	c.pluginsRegistry = plugins.NewRegistry()
+	c.pluginsRegistry.Register(p.Name(), func(workloadv1alpha1.PluginSpec) (plugins.Plugin, error) { return p, nil })
+	runAudit(t, c, ms)
+	require.NoError(t, kube.CoreV1().Pods(ms.Namespace).Delete(context.Background(), pods[1].Name, metav1.DeleteOptions{}))
+	c.requestAudit(utils.GetNamespaceName(ms).String(), func(r *auditRequest) { r.live = true })
+	require.ErrorContains(t, c.reconcileModelServing(context.Background(), utils.GetNamespaceName(ms).String()), "Pod cleanup unavailable")
+	require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "ms-0"))
+	ready, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), "ms-0")
+	require.NoError(t, err)
+	require.Equal(t, 1, ready)
+	p.failPod = false
+	kube.ClearActions()
+	runAudit(t, c, ms)
+	deletedEntry := false
+	for _, action := range kube.Actions() {
+		if action.Matches("delete", "pods") && action.(kubetesting.DeleteAction).GetName() == pods[0].Name {
+			deletedEntry = true
+		}
+	}
+	require.True(t, deletedEntry, "failed-hook retry must retain running recovery history")
 }
 func (p *auditCleanupPlugin) OnRoleDelete(context.Context, *plugins.HookRequest) error {
 	p.calls = append(p.calls, "role")
