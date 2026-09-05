@@ -163,6 +163,9 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 		},
 	}
 
+	// Explicitly request no unused history; live revisions must still survive.
+	zero := int32(0)
+	ms.Spec.RevisionHistoryLimit = &zero
 	templateData := ms.Spec.Template.Roles
 
 	// Create a few revisions to test cleanup
