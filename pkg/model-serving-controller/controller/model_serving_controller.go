@@ -69,8 +69,10 @@ const (
 	// narrowly scoped live lookup after repeated stale cache observations.
 	roleDeletionRecheckDelay       = 1 * time.Second
 	roleDeletionLiveCheckThreshold = 2
-	GroupNameKey                   = "GroupName"
-	RoleIDKey                      = "RoleID"
+	modelServingFullSyncPeriod     = 5 * time.Minute
+
+	GroupNameKey = "GroupName"
+	RoleIDKey    = "RoleID"
 )
 
 // PodGroupManager is the interface for managing PodGroups.
@@ -128,6 +130,7 @@ type ModelServingController struct {
 	graceMap        sync.Map    // key: podGracePeriodKey, value:time
 	roleDeleteMap   sync.Map    // key: namespace/name/group/role/roleID, value:int
 	initialSync     atomic.Bool // indicates whether initial keys have been enqueued
+	fullSyncPeriod  time.Duration
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
 }
@@ -196,6 +199,7 @@ func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingC
 		// nolint
 		workqueue:       workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "ModelServings"),
 		store:           store,
+		fullSyncPeriod:  modelServingFullSyncPeriod,
 		pluginsRegistry: plugins.DefaultRegistry,
 		recorder:        recorder,
 	}
@@ -708,8 +712,26 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 		go c.worker(ctx)
 	}
 	go c.runPeriodicAudit(ctx)
+	go c.runPeriodicFullSync(ctx)
 	<-ctx.Done()
 	klog.Info("shut down modelServing controller")
+}
+
+func (c *ModelServingController) runPeriodicFullSync(ctx context.Context) {
+	if c.fullSyncPeriod <= 0 {
+		return
+	}
+	ticker := time.NewTicker(c.fullSyncPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			klog.V(4).Info("running periodic ModelServing full sync")
+			c.syncAll()
+		}
+	}
 }
 
 func (c *ModelServingController) syncAll() {
