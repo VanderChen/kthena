@@ -1635,6 +1635,7 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 		return false, fmt.Errorf("failed to get pods for role %s/%s: %v", roleName, roleID, err)
 	}
 	if len(pods) == 0 {
+		klog.V(4).Infof("Role %s is not ready: no pods found", roleIDValue)
 		return false, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1653,25 +1654,48 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	}
 	template, revision, _, err := history.instanceTemplate(ctx, servingGroupName, roleName, observed, pods)
 	if err != nil {
+		klog.V(4).Infof("Role %s readiness is unresolved: cannot resolve its template: %v", roleIDValue, err)
 		return false, err
 	}
-	if len(pods) != 1+int(template.WorkerReplicas) {
-		return false, nil
-	}
+	// Each Role replica has one entry Pod and the workers from its own revision.
+	expectedPods := 1 + int(template.WorkerReplicas)
 	byName := make(map[string]*corev1.Pod, len(pods))
+	runningPods := 0
 	for _, pod := range pods {
 		byName[pod.Name] = pod
+		if utils.IsPodRunningAndReady(pod) {
+			runningPods++
+		}
+	}
+	if len(pods) != expectedPods {
+		klog.V(4).Infof("Role %s at revision %s: %d/%d pods running and ready; pod count mismatch (found=%d, expected=%d)",
+			roleIDValue, revision, runningPods, expectedPods, len(pods), expectedPods)
+		return false, nil
 	}
 	for i := 0; i <= int(template.WorkerReplicas); i++ {
-		pod := byName[utils.GeneratePodName(servingGroupName, roleID, i)]
-		if pod == nil || pod.DeletionTimestamp != nil || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) || !utils.IsPodRunningAndReady(pod) {
+		podName := utils.GeneratePodName(servingGroupName, roleID, i)
+		pod := byName[podName]
+		if pod == nil {
+			klog.V(4).Infof("Role %s at revision %s is not ready: expected pod %s is missing", roleIDValue, revision, podName)
+			return false, nil
+		}
+		owned := utils.IsOwnedByModelServingWithUID(pod, ms.UID)
+		if pod.DeletionTimestamp != nil || !owned || !utils.IsPodRunningAndReady(pod) {
+			klog.V(4).Infof("Role %s at revision %s: %d/%d pods running and ready; pod %s is not available (phase=%s, deleting=%t, owned=%t)",
+				roleIDValue, revision, runningPods, expectedPods, pod.Name, pod.Status.Phase, pod.DeletionTimestamp != nil, owned)
 			return false, nil
 		}
 		matches, err := history.podMatchesTemplate(ctx, pod, template, revision)
-		if err != nil || !matches {
+		if err != nil {
+			klog.V(4).Infof("Role %s at revision %s readiness is unresolved: cannot verify pod %s template: %v", roleIDValue, revision, pod.Name, err)
 			return false, err
 		}
+		if !matches {
+			klog.V(4).Infof("Role %s at revision %s is not ready: pod %s at revision %s has a different template", roleIDValue, revision, pod.Name, utils.ObjectRevision(pod))
+			return false, nil
+		}
 	}
+	klog.V(4).Infof("Role %s at revision %s: all %d pods are running and ready", roleIDValue, revision, expectedPods)
 	return true, nil
 }
 
