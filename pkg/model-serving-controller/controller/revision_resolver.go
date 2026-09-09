@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -97,6 +98,7 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 	}
 	h.snapshots[revision] = snapshot
 	if snapshot.err != nil {
+		h.controller.enqueueModelServingAfter(h.ms, 5*time.Second)
 		klog.Warningf("Cannot resolve revision %q for ModelServing %s/%s; template-driven deletion is paused for affected replicas: %v",
 			revision, h.ms.Namespace, h.ms.Name, snapshot.err)
 		if h.controller.recorder != nil {

@@ -633,7 +633,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	ctx = c.withRevisionHistory(ctx, ms)
 	revision, err := c.revisionHistory(ctx, ms).desiredRevision(ctx)
 	if err != nil {
-		return fmt.Errorf("resolve desired revision: %w", err)
+		return errors.Join(fmt.Errorf("resolve desired revision: %w", err), c.scaleDownOnRevisionError(ctx, ms))
 	}
 	if err := c.persistCoordinatedRoleRevision(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to persist coordinated Role revision: %v", err)
