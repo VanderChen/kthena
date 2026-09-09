@@ -552,7 +552,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	ctx = context.WithValue(ctx, revisionTemplatesKey{}, history)
 	revision = history.desiredRevision(ctx, revision)
 	if err := c.ensureControllerRevision(ctx, ms, revision); err != nil {
-		return fmt.Errorf("cannot ensure ControllerRevision: %w", err)
+		// Decreasing replica counts does not need a new Pod template. Keep that
+		// path available while history validation blocks creation and rollout.
+		return errors.Join(fmt.Errorf("cannot ensure ControllerRevision: %w", err), c.scaleDownOnRevisionError(ctx, ms, revision))
 	}
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
@@ -819,7 +821,27 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	return nil
 }
 
+func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, ms *workloadv1alpha1.ModelServing, revision string) error {
+	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	if errors.Is(err, datastore.ErrServingGroupNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if ms.Spec.Replicas != nil && len(groups) > int(*ms.Spec.Replicas) {
+		if err := c.scaleDownServingGroups(ctx, ms, groups, int(*ms.Spec.Replicas)); err != nil {
+			return err
+		}
+	}
+	return c.manageRoles(ctx, ms, revision, true)
+}
+
 func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string) error {
+	return c.manageRoles(ctx, ms, newRevision, false)
+}
+
+func (c *ModelServingController) manageRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, newRevision string, scaleDownOnly bool) error {
 	servingGroupList, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil && !errors.Is(err, datastore.ErrServingGroupNotFound) {
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
@@ -863,6 +885,16 @@ func (c *ModelServingController) manageRole(ctx context.Context, ms *workloadv1a
 		}
 
 		for _, targetRole := range rolesToManage {
+			if scaleDownOnly {
+				roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), servingGroup.Name, targetRole.Name)
+				if err != nil {
+					return err
+				}
+				if targetRole.Replicas != nil && len(roles) > int(*targetRole.Replicas) {
+					c.scaleDownRoles(ctx, ms, servingGroup.Name, targetRole, roles, int(*targetRole.Replicas))
+				}
+				continue
+			}
 			c.manageRoleReplicas(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse)
 		}
 	}

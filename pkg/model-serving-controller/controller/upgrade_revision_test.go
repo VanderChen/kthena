@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -32,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/workqueue"
+	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 )
 
@@ -330,4 +333,95 @@ func TestUpgradeHistoryFailurePreventsWorkloadMutation(t *testing.T) {
 	for _, action := range client.Actions() {
 		require.NotEqual(t, "pods", action.GetResource().Resource)
 	}
+}
+
+func TestRevisionFailureStillAllowsScaleDown(t *testing.T) {
+	for _, groupLevel := range []bool{true, false} {
+		for _, after := range []int32{0, 1, 3} {
+			for _, fault := range []string{"different-template", "foreign-owner", "malformed"} {
+				t.Run(fmt.Sprintf("group=%v/after=%d/%s", groupLevel, after, fault), func(t *testing.T) {
+					old := createStandardModelServing("scale-history", 1, 1)
+					old.UID = "owner"
+					if groupLevel {
+						old.Spec.Replicas = ptr.To[int32](2)
+					} else {
+						old.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+					}
+					ms := old.DeepCopy()
+					if groupLevel {
+						ms.Spec.Replicas = ptr.To(after)
+					} else {
+						ms.Spec.Template.Roles[0].Replicas = ptr.To(after)
+					}
+					revision := utils.Revision(utils.RemoveRoleReplicasForRevision(ms).Spec.Template.Roles)
+					ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+					c := newUpgradeController(t, ms)
+					defer c.workqueue.ShutDown()
+					owner := ms.DeepCopy()
+					data := interface{}(ms.Spec.Template.Roles)
+					switch fault {
+					case "different-template":
+						owner.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "wrong-history"
+						data = owner.Spec.Template.Roles
+					case "foreign-owner":
+						owner.UID = "previous-owner"
+					case "malformed":
+						data = "not-roles"
+					}
+					history, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, owner, revision, data)
+					require.NoError(t, err)
+					for group := 0; group < int(*old.Spec.Replicas); group++ {
+						for role := 0; role < int(*old.Spec.Template.Roles[0].Replicas); role++ {
+							addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], group, revision, role)
+						}
+					}
+					client := c.kubeClientSet.(*kubefake.Clientset)
+					client.ClearActions()
+					require.ErrorContains(t, c.syncModelServing(context.Background(), ms.Namespace+"/"+ms.Name), "cannot ensure ControllerRevision")
+					deletes := 0
+					for _, action := range client.Actions() {
+						if action.GetResource().Resource == "pods" {
+							require.NotContains(t, []string{"create", "patch", "update"}, action.GetVerb())
+							if action.GetVerb() == "delete-collection" {
+								deletes++
+							}
+						}
+					}
+					require.Equal(t, max(0, 2-int(after)), deletes)
+					retained, err := utils.GetControllerRevision(context.Background(), client, ms, revision)
+					require.NoError(t, err)
+					require.Equal(t, history, retained)
+				})
+			}
+		}
+	}
+}
+
+func TestUnresolvedRevisionRetriesAfterHistoryRecovery(t *testing.T) {
+	ms := createStandardModelServing("retry-history", 1, 1)
+	ms.UID = "owner"
+	old := ms.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "updated-image"
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "legacy", "legacy"
+	c := newUpgradeController(t, ms)
+	c.workqueue.ShutDown()
+	clock := clocktesting.NewFakeClock(time.Now())
+	c.workqueue = workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Clock: clock})
+	defer c.workqueue.ShutDown()
+	addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], 0, "legacy")
+	require.NoError(t, c.syncModelServing(context.Background(), ms.Namespace+"/"+ms.Name))
+	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "retry-history-0"))
+	// Restoring history emits no ModelServing/Pod event. The delayed retry must
+	// make progress without an external workload change or controller restart.
+	_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, "legacy", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		clock.Step(time.Second)
+		return c.workqueue.Len() > 0
+	}, time.Second, 10*time.Millisecond)
+	key, quit := c.workqueue.Get()
+	require.False(t, quit)
+	defer c.workqueue.Done(key)
+	require.NoError(t, c.syncModelServing(context.Background(), key.(string)))
+	require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "retry-history-0"))
 }

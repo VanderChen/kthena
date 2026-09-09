@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,10 +33,17 @@ import (
 // revisionTemplates is a read-only history snapshot for one reconciliation.
 // Never cache across reconciliations or infer history from the current template.
 type revisionTemplates struct {
-	c      *ModelServingController
-	ms     *workloadv1alpha1.ModelServing
-	roles  map[string][]workloadv1alpha1.Role
-	errors map[string]error
+	c                     *ModelServingController
+	ms                    *workloadv1alpha1.ModelServing
+	roles                 map[string][]workloadv1alpha1.Role
+	errors                map[string]error
+	roleHashes            map[string]string
+	roleMatchesByRevision map[roleRevision]bool
+}
+
+type roleRevision struct {
+	revision string
+	name     string
 }
 
 type revisionTemplatesKey struct{}
@@ -44,7 +52,8 @@ func (c *ModelServingController) templates(ctx context.Context, ms *workloadv1al
 	if history, ok := ctx.Value(revisionTemplatesKey{}).(*revisionTemplates); ok && history.ms == ms {
 		return history
 	}
-	return &revisionTemplates{c: c, ms: ms, roles: make(map[string][]workloadv1alpha1.Role), errors: make(map[string]error)}
+	return &revisionTemplates{c: c, ms: ms, roles: make(map[string][]workloadv1alpha1.Role), errors: make(map[string]error),
+		roleHashes: make(map[string]string), roleMatchesByRevision: make(map[roleRevision]bool)}
 }
 
 func (h *revisionTemplates) get(ctx context.Context, revision string) ([]workloadv1alpha1.Role, error) {
@@ -100,12 +109,21 @@ func (h *revisionTemplates) desiredRevision(ctx context.Context, computed string
 }
 
 func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision string, observed datastore.Role, desired workloadv1alpha1.Role) (bool, error) {
-	if observed.RoleTemplateHash == utils.CalRoleTemplateHash(desired) {
+	expectedHash, ok := h.roleHashes[desired.Name]
+	if !ok {
+		expectedHash = utils.CalRoleTemplateHash(desired)
+		h.roleHashes[desired.Name] = expectedHash
+	}
+	if observed.RoleTemplateHash == expectedHash {
 		return true, nil
 	}
 	revision := observed.Revision
 	if revision == "" {
 		revision = groupRevision
+	}
+	key := roleRevision{revision: revision, name: desired.Name}
+	if matches, ok := h.roleMatchesByRevision[key]; ok {
+		return matches, nil
 	}
 	roles, err := h.get(ctx, revision)
 	if err != nil {
@@ -113,7 +131,9 @@ func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision strin
 	}
 	for _, role := range roles {
 		if role.Name == desired.Name {
-			return utils.EqualRoleTemplate(role, desired), nil
+			matches := utils.EqualRoleTemplate(role, desired)
+			h.roleMatchesByRevision[key] = matches
+			return matches, nil
 		}
 	}
 	return false, fmt.Errorf("role %s is missing from ControllerRevision %s", desired.Name, revision)
@@ -147,6 +167,11 @@ func (h *revisionTemplates) groupMatches(ctx context.Context, group datastore.Se
 }
 
 func (c *ModelServingController) reportRevisionUnresolved(ms *workloadv1alpha1.ModelServing, group string, err error) {
+	// History is read directly, without an informer. Retry even if no workload
+	// event follows a transient read failure or a repaired historical revision.
+	if c.workqueue != nil {
+		c.enqueueModelServingAfter(ms, 5*time.Second)
+	}
 	klog.Warningf("Skipping template update for ModelServing %s/%s, ServingGroup %s: %v", ms.Namespace, ms.Name, group, err)
 	if c.recorder != nil {
 		c.recorder.Eventf(ms, corev1.EventTypeWarning, "RevisionUnresolved", "Cannot verify historical template for ServingGroup %s: %v", group, err)
