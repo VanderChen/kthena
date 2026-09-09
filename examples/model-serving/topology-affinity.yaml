@@ -1,0 +1,56 @@
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: topology-affinity-sample
+  namespace: default
+spec:
+  schedulerName: volcano
+  replicas: 3
+  template:
+    networkTopology:
+      groupPolicy:
+        mode: hard
+        highestTierName: communication-domain
+      rolePolicy:
+        mode: hard
+        highestTierName: node
+      servingGroupAntiAffinity:
+        required:
+          - topologyTierName: communication-domain
+      roleAffinity:
+        required:
+          - roles:
+              - prefill
+              - decode
+            topologyTierName: rack
+      roleAntiAffinity:
+        required:
+          - roles:
+              - prefill
+            topologyTierName: node
+          - roles:
+              - decode
+            topologyTierName: node
+    roles:
+      - name: prefill
+        replicas: 2
+        entryTemplate:
+          spec:
+            containers:
+              - name: prefill
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 100m
+        workerReplicas: 0
+      - name: decode
+        replicas: 2
+        entryTemplate:
+          spec:
+            containers:
+              - name: decode
+                image: nginx:latest
+                resources:
+                  requests:
+                    cpu: 100m
+        workerReplicas: 0

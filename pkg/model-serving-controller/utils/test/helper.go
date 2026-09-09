@@ -22,6 +22,18 @@ import (
 )
 
 func CreatePodGroupCRD() *apiextv1.CustomResourceDefinition {
+	return CreatePodGroupCRDWithFeatures(false, false)
+}
+
+func CreatePodGroupCRDWithFeatures(hasSubGroupPolicy, hasTopologyAffinity bool) *apiextv1.CustomResourceDefinition {
+	specProperties := make(map[string]apiextv1.JSONSchemaProps)
+	if hasSubGroupPolicy {
+		specProperties["subGroupPolicy"] = apiextv1.JSONSchemaProps{Type: "array"}
+	}
+	if hasTopologyAffinity {
+		specProperties["topologyAffinity"] = apiextv1.JSONSchemaProps{Type: "object"}
+	}
+
 	return &apiextv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "podgroups.scheduling.volcano.sh",
@@ -43,6 +55,12 @@ func CreatePodGroupCRD() *apiextv1.CustomResourceDefinition {
 					Schema: &apiextv1.CustomResourceValidation{
 						OpenAPIV3Schema: &apiextv1.JSONSchemaProps{
 							Type: "object",
+							Properties: map[string]apiextv1.JSONSchemaProps{
+								"spec": {
+									Type:       "object",
+									Properties: specProperties,
+								},
+							},
 						},
 					},
 				},

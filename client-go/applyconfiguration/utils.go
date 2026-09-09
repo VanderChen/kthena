@@ -128,12 +128,22 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.PodTemplateSpecApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Role"):
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleAffinity"):
+		return &applyconfigurationworkloadv1alpha1.RoleAffinityApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleAffinityTerm"):
+		return &applyconfigurationworkloadv1alpha1.RoleAffinityTermApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleAntiAffinity"):
+		return &applyconfigurationworkloadv1alpha1.RoleAntiAffinityApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RollingUpdateConfiguration"):
 		return &applyconfigurationworkloadv1alpha1.RollingUpdateConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutStrategy"):
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupAffinityTerm"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupAffinityTermApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupAntiAffinity"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupAntiAffinityApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("SubTarget"):
 		return &applyconfigurationworkloadv1alpha1.SubTargetApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Target"):
