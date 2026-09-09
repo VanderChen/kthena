@@ -18,6 +18,7 @@ import (
 	"hash"
 	"hash/fnv"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/rand"
 
@@ -54,4 +55,26 @@ func RemoveRoleReplicasForRoleTemplateHash(role workloadv1alpha1.Role) workloadv
 	copy := role
 	copy.Replicas = nil
 	return copy
+}
+
+// EqualRoleTemplates compares exactly the fields used by the v0.4 revision hash.
+// Role order and every Role field except Replicas remain significant. Kubernetes
+// semantic equality ignores representation differences, such as Quantity caches.
+func EqualRoleTemplates(a, b []workloadv1alpha1.Role) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !EqualRoleTemplate(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func EqualRoleTemplate(a, b workloadv1alpha1.Role) bool {
+	return apiequality.Semantic.DeepEqual(
+		RemoveRoleReplicasForRoleTemplateHash(*a.DeepCopy()),
+		RemoveRoleReplicasForRoleTemplateHash(*b.DeepCopy()),
+	)
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package utils
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,7 +43,8 @@ const (
 	ControllerRevisionRevisionLabelKey = workloadv1alpha1.RevisionLabelKey
 )
 
-// CreateControllerRevision creates or retrieves a ControllerRevision for a specific template revision.
+// CreateControllerRevision creates or retrieves a ControllerRevision for a specific revision.
+// An existing revision's template is immutable, including when its hash is reused.
 func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, revision string, templateData interface{}) (*appsv1.ControllerRevision, error) {
 	// Serialize template data
 	// Wrap data in a map to ensure it's a valid JSON object (Kubernetes requirement for RawExtension)
@@ -53,25 +55,26 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal template data: %v", err)
 	}
+	validateExisting := func(existing *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
+		if !metav1.IsControlledBy(existing, ms) {
+			return nil, fmt.Errorf("ControllerRevision %s has a different owner", existing.Name)
+		}
+		if bytes.Equal(existing.Data.Raw, data) {
+			return existing, nil
+		}
+		oldRoles, oldErr := GetRolesFromControllerRevision(existing)
+		newRoles, newErr := GetRolesFromControllerRevision(&appsv1.ControllerRevision{Data: runtime.RawExtension{Raw: data}})
+		if oldErr == nil && newErr == nil && len(oldRoles) > 0 && EqualRoleTemplates(oldRoles, newRoles) {
+			return existing, nil
+		}
+		return nil, fmt.Errorf("ControllerRevision %s already records a different template", existing.Name)
+	}
 
 	// Check if ControllerRevision already exists
 	controllerRevisionName := GenerateControllerRevisionName(ms.Name, revision)
 	existing, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err == nil {
-		// If already exists, check if data has changed
-		if string(existing.Data.Raw) != string(data) {
-			existing.Data = runtime.RawExtension{
-				Raw: data,
-			}
-			existing.Revision++
-			updated, updateErr := client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, existing, metav1.UpdateOptions{})
-			if updateErr != nil {
-				return nil, fmt.Errorf("failed to update ControllerRevision: %v", updateErr)
-			}
-			klog.V(4).Infof("Updated ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
-			return updated, nil
-		}
-		return existing, nil
+		return validateExisting(existing)
 	} else if !apierrors.IsNotFound(err) {
 		return nil, fmt.Errorf("failed to get ControllerRevision: %v", err)
 	}
@@ -113,6 +116,13 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 
 	// Create ControllerRevision
 	created, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		existing, getErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
+		if getErr != nil {
+			return nil, getErr
+		}
+		return validateExisting(existing)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ControllerRevision: %v", err)
 	}

@@ -3513,7 +3513,9 @@ func TestModelServingVersionControl(t *testing.T) {
 			// Create ControllerRevision for historical revision if partition is set
 			// This simulates the scenario where a partition-protected group was deleted and its revision was recorded
 			if tt.partition != nil {
-				_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.initialRevision, ms.Spec.Template.Roles)
+				oldRoles := ms.DeepCopy().Spec.Template.Roles
+				oldRoles[0].EntryTemplate.Spec.Containers[0].Image = "test-image:old"
+				_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.initialRevision, oldRoles)
 				assert.NoError(t, err, "Failed to create ControllerRevision for initial revision")
 			}
 
@@ -7192,10 +7194,12 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 
 			// Create fake store
 			store := datastore.New()
+			kubeClient := kubefake.NewSimpleClientset()
 
 			// Setup store with serving groups and roles
 			for _, sg := range tt.servingGroups {
-				store.AddServingGroup(types.NamespacedName{Namespace: ns, Name: msName}, 0, sg.Revision)
+				_, ordinal := utils.GetParentNameAndOrdinal(sg.Name)
+				store.AddServingGroup(types.NamespacedName{Namespace: ns, Name: msName}, ordinal, sg.Revision)
 				_ = store.UpdateServingGroupStatus(
 					types.NamespacedName{Namespace: ns, Name: msName},
 					sg.Name,
@@ -7213,12 +7217,24 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 							roleTemplateHashToUse = expectedRoleTemplateHashes[roleName]
 						}
 
+						observedRevision := oldRevision
+						if roleTemplateHashToUse != expectedRoleTemplateHashes[roleName] {
+							observedRevision = sgName + "-" + role.Name + "-history"
+							historical := ms.DeepCopy().Spec.Template.Roles
+							for i := range historical {
+								if historical[i].Name == roleName {
+									historical[i].EntryTemplate.Spec.Containers[0].Image = "old-image"
+								}
+							}
+							_, err := utils.CreateControllerRevision(context.Background(), kubeClient, ms, observedRevision, historical)
+							require.NoError(t, err)
+						}
 						store.AddRole(
 							types.NamespacedName{Namespace: ns, Name: msName},
 							sgName,
 							roleName,
 							role.Name,
-							oldRevision,
+							observedRevision,
 							roleTemplateHashToUse,
 						)
 						_ = store.UpdateRoleStatus(
@@ -7234,7 +7250,8 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 
 			// Create controller
 			controller := &ModelServingController{
-				store: store,
+				store:         store,
+				kubeClientSet: kubeClient,
 			}
 
 			// Call the function
