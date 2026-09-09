@@ -18,11 +18,16 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -30,15 +35,18 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
-// revisionTemplates is a read-only history snapshot for one reconciliation.
+const rolloutFromRevisionsAnnotation = "modelserving.volcano.sh/rollout-from-revisions"
+
+// revisionTemplates holds a history snapshot for one reconciliation.
 // Never cache across reconciliations or infer history from the current template.
 type revisionTemplates struct {
-	c                     *ModelServingController
-	ms                    *workloadv1alpha1.ModelServing
-	roles                 map[string][]workloadv1alpha1.Role
-	errors                map[string]error
-	roleHashes            map[string]string
-	roleMatchesByRevision map[roleRevision]bool
+	c                       *ModelServingController
+	ms                      *workloadv1alpha1.ModelServing
+	roles                   map[string][]workloadv1alpha1.Role
+	errors                  map[string]error
+	roleHashes              map[string]string
+	roleMatchesByRevision   map[roleRevision]bool
+	missingRolloutRevisions map[string]bool
 }
 
 type roleRevision struct {
@@ -72,7 +80,7 @@ func (h *revisionTemplates) get(ctx context.Context, revision string) ([]workloa
 		if getErr != nil {
 			err = getErr
 		} else if cr == nil {
-			err = fmt.Errorf("ControllerRevision %s is missing", revision)
+			err = apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "controllerrevisions"}, utils.GenerateControllerRevisionName(h.ms.Name, revision))
 		} else if !metav1.IsControlledBy(cr, h.ms) {
 			err = fmt.Errorf("ControllerRevision %s has a different owner", revision)
 		} else {
@@ -127,6 +135,9 @@ func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision strin
 	}
 	roles, err := h.get(ctx, revision)
 	if err != nil {
+		if apierrors.IsNotFound(err) && h.canReplaceMissingRevision(ctx, revision) {
+			return false, nil
+		}
 		return false, err
 	}
 	for _, role := range roles {
@@ -143,6 +154,9 @@ func (h *revisionTemplates) groupMatches(ctx context.Context, group datastore.Se
 	if group.Revision != desiredRevision {
 		roles, err := h.get(ctx, group.Revision)
 		if err != nil {
+			if apierrors.IsNotFound(err) && h.canReplaceMissingRevision(ctx, group.Revision) {
+				return false, nil
+			}
 			return false, err
 		}
 		if !utils.EqualRoleTemplates(roles, h.ms.Spec.Template.Roles) {
@@ -164,6 +178,101 @@ func (h *revisionTemplates) groupMatches(ctx context.Context, group datastore.Se
 		}
 	}
 	return true, nil
+}
+
+// Record only missing revisions observed when a persisted previous target proves
+// a real template change. Save before advancing status so retries and restarts
+// retain that decision. Never fabricate the missing revision's template.
+func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, target string) error {
+	previous := h.ms.Status.UpdateRevision
+	if previous == "" || previous == target {
+		return nil
+	}
+	oldRoles, err := h.get(ctx, previous)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if utils.EqualRoleTemplates(oldRoles, h.ms.Spec.Template.Roles) {
+		return nil
+	}
+	groups, err := h.c.store.GetServingGroupByModelServing(utils.GetNamespaceName(h.ms))
+	if errors.Is(err, datastore.ErrServingGroupNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	missing := map[string]bool{}
+	for _, group := range groups {
+		revisions := []string{group.Revision}
+		roles, err := h.c.store.GetRolesByGroup(utils.GetNamespaceName(h.ms), group.Name)
+		if err != nil {
+			return err
+		}
+		for _, instances := range roles {
+			for _, role := range instances {
+				revisions = append(revisions, role.Revision)
+			}
+		}
+		for _, revision := range revisions {
+			if revision != "" {
+				if _, err := h.get(ctx, revision); apierrors.IsNotFound(err) {
+					missing[revision] = true
+				} else if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	cr, err := utils.CreateControllerRevision(ctx, h.c.kubeClientSet, h.ms, target, h.ms.Spec.Template.Roles)
+	if err != nil {
+		return err
+	}
+	for _, revision := range strings.Split(cr.Annotations[rolloutFromRevisionsAnnotation], ",") {
+		if revision != "" {
+			missing[revision] = true
+		}
+	}
+	revisions := make([]string, 0, len(missing))
+	for revision := range missing {
+		revisions = append(revisions, revision)
+	}
+	slices.Sort(revisions)
+	value := strings.Join(revisions, ",")
+	if cr.Annotations[rolloutFromRevisionsAnnotation] == value {
+		return nil
+	}
+	if cr.Annotations == nil {
+		cr.Annotations = map[string]string{}
+	}
+	cr.Annotations[rolloutFromRevisionsAnnotation] = value
+	_, err = h.c.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
+	return err
+}
+
+func (h *revisionTemplates) canReplaceMissingRevision(ctx context.Context, revision string) bool {
+	if h.missingRolloutRevisions == nil {
+		h.missingRolloutRevisions = map[string]bool{}
+		target := h.desiredRevision(ctx, utils.Revision(utils.RemoveRoleReplicasForRevision(h.ms).Spec.Template.Roles))
+		cr, err := utils.GetControllerRevision(ctx, h.c.kubeClientSet, h.ms, target)
+		if err != nil || cr == nil || !metav1.IsControlledBy(cr, h.ms) {
+			return false
+		}
+		roles, err := utils.GetRolesFromControllerRevision(cr)
+		if err != nil || !utils.EqualRoleTemplates(roles, h.ms.Spec.Template.Roles) {
+			return false
+		}
+		for _, previous := range strings.Split(cr.Annotations[rolloutFromRevisionsAnnotation], ",") {
+			h.missingRolloutRevisions[previous] = true
+		}
+	}
+	return h.missingRolloutRevisions[revision]
 }
 
 func (c *ModelServingController) reportRevisionUnresolved(ms *workloadv1alpha1.ModelServing, group string, err error) {

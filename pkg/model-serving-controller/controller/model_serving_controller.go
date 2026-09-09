@@ -544,6 +544,10 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
+	if err := c.restoreObservedRevision(ctx, ms); err != nil {
+		return errors.Join(err, c.scaleDownOnRevisionError(ctx, ms, ms.Status.UpdateRevision))
+	}
+
 	// only fields in roles can be modified in rolling updates.
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
@@ -555,6 +559,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		// Decreasing replica counts does not need a new Pod template. Keep that
 		// path available while history validation blocks creation and rollout.
 		return errors.Join(fmt.Errorf("cannot ensure ControllerRevision: %w", err), c.scaleDownOnRevisionError(ctx, ms, revision))
+	}
+	if err := history.recordMissingRevisionRollout(ctx, revision); err != nil {
+		return errors.Join(fmt.Errorf("cannot record template rollout: %w", err), c.scaleDownOnRevisionError(ctx, ms, revision))
 	}
 	if err := c.manageServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("cannot manage ServingGroup replicas: %v", err)
@@ -594,6 +601,20 @@ func (c *ModelServingController) ensureControllerRevision(
 		return fmt.Errorf("failed to create ControllerRevision %s: %v", revision, err)
 	}
 	return nil
+}
+
+// The last observed target belongs to this spec only while its generation is
+// unchanged. Recover a deleted snapshot before an upgraded hash can replace its
+// identity. CurrentRevision may describe an older template during a rollout.
+func (c *ModelServingController) restoreObservedRevision(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	if ms.Generation == 0 || ms.Status.ObservedGeneration != ms.Generation || ms.Status.UpdateRevision == "" {
+		return nil
+	}
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, ms.Status.UpdateRevision)
+	if err != nil || cr != nil {
+		return err
+	}
+	return c.ensureControllerRevision(ctx, ms, ms.Status.UpdateRevision)
 }
 
 func (c *ModelServingController) Run(ctx context.Context, workers int) {
@@ -695,7 +716,7 @@ func (c *ModelServingController) manageServingGroupReplicas(ctx context.Context,
 }
 
 // scaleUpServingGroups scales up the ServingGroups to the expected count.
-// When partition is set, it fills missing ordinals in [0, partition) using CurrentRevision.
+// When the protected set is incomplete, it restores old groups using CurrentRevision.
 // Otherwise, it creates new ServingGroups with increasing indices starting from the current max index + 1.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
 	partition := c.getPartition(ms)
@@ -737,11 +758,20 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		return nil
 	}
 
-	if partition > 0 {
+	// Rolling updates protect a sorted prefix, whose ordinals need not start at
+	// zero after earlier rollouts. Do not insert an old group ahead of an already
+	// sufficient protected set: that would move an existing protected group out.
+	protectedCount := 0
+	for _, group := range servingGroupList {
+		if group.Revision != newRevision || ms.Status.CurrentRevision == newRevision {
+			protectedCount++
+		}
+	}
+	if partition > protectedCount {
 		klog.V(4).Infof("scaleUpServingGroups: partition=%d set, filling missing ordinals in [0, %d) for modelServing=%s",
 			partition, partition, utils.GetNamespaceName(ms))
 		// When partition is set, fill missing ordinals in [0, partition) using CurrentRevision
-		for ordinal := 0; ordinal < partition && ordinal < expectedCount; ordinal++ {
+		for ordinal := 0; ordinal < partition && protectedCount < partition && len(existingOrdinals) < expectedCount; ordinal++ {
 			if existingOrdinals[ordinal] {
 				klog.V(4).Infof("scaleUpServingGroups: ordinal %d already exists, skipping", ordinal)
 				continue
@@ -784,6 +814,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 			}
 			// Update existingOrdinals and maxOrdinal
 			existingOrdinals[ordinal] = true
+			protectedCount++
 			if ordinal > maxOrdinal {
 				maxOrdinal = ordinal
 			}
@@ -1788,6 +1819,9 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 		latestMS, getErr := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
 		if getErr != nil {
 			return getErr
+		}
+		if latestMS.Generation != ms.Generation {
+			return fmt.Errorf("ModelServing generation changed while reconciling")
 		}
 
 		// Calculate status based on latestMS

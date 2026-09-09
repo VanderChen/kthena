@@ -27,6 +27,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -37,6 +38,195 @@ import (
 	clocktesting "k8s.io/utils/clock/testing"
 	"k8s.io/utils/ptr"
 )
+
+func podDeletionSelectors(c *ModelServingController) []string {
+	var selectors []string
+	for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
+		if action.GetResource().Resource == "pods" && action.GetVerb() == "delete-collection" {
+			selectors = append(selectors, action.(kubetesting.DeleteCollectionAction).GetListRestrictions().Labels.String())
+		}
+	}
+	return selectors
+}
+
+func TestMissingHistoryRecordFailureRetainsPreviousTarget(t *testing.T) {
+	for _, fail := range []string{"read", "write"} {
+		t.Run(fail, func(t *testing.T) {
+			ctx := context.Background()
+			old := createStandardModelServing("record-failure", 3, 1)
+			old.UID = "owner"
+			ms := old.DeepCopy()
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = "lost", "previous"
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+			c := newUpgradeController(t, ms)
+			defer c.workqueue.ShutDown()
+			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "previous", old.Spec.Template.Roles)
+			require.NoError(t, err)
+			for i := 0; i < 3; i++ {
+				addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], i, "lost")
+			}
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			client.PrependReactor("*", "controllerrevisions", func(a kubetesting.Action) (bool, runtime.Object, error) {
+				if fail == "write" && a.GetVerb() == "update" {
+					return true, nil, fmt.Errorf("injected write failure")
+				}
+				if fail == "read" && a.GetVerb() == "get" && a.(kubetesting.GetAction).GetName() == "record-failure-previous" {
+					return true, nil, fmt.Errorf("injected read failure")
+				}
+				return false, nil, nil
+			})
+			require.Error(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+			require.Empty(t, podDeletionSelectors(c))
+			stored, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, "previous", stored.Status.UpdateRevision)
+		})
+	}
+}
+
+func TestRestoreRevisionDoesNotLabelUnobservedSpecAsHistory(t *testing.T) {
+	ctx := context.Background()
+	ms := createStandardModelServing("unobserved", 3, 1)
+	ms.UID, ms.Generation = "owner", 2
+	ms.Status.ObservedGeneration = 1
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "old", "old"
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	require.NoError(t, c.restoreObservedRevision(ctx, ms))
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "old")
+	require.NoError(t, err)
+	require.Nil(t, cr)
+	stale := ms.DeepCopy()
+	stale.Generation = 1
+	require.ErrorContains(t, c.UpdateModelServingStatus(stale, "old"), "generation changed")
+}
+
+func TestPartitionRecreatesMissingProtectedTemplate(t *testing.T) {
+	ctx := context.Background()
+	old := createStandardModelServing("protected", 3, 1)
+	old.UID = "owner"
+	ms := old.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "old", "new"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate, RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(1))}}
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "old", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	for _, ordinal := range []int{1, 2} {
+		addUpgradePod(t, c, ms, ms.Spec.Template.Roles[0], ordinal, "new")
+	}
+	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.NoError(t, c.scaleUpServingGroups(ctx, ms, groups, 3, "new"))
+	created, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, utils.GeneratePodName("protected-0", "prefill-0", 0), metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, created.Spec.Containers[0].Image)
+}
+
+func TestDeletedObservedRevisionRecoveredBeforeUpgrade(t *testing.T) {
+	ctx := context.Background()
+	ms := createStandardModelServing("deleted", 3, 1)
+	ms.UID, ms.Generation = "owner", 3
+	ms.Status.ObservedGeneration = 3
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "legacy", "legacy"
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	for i := 0; i < 3; i++ {
+		addUpgradePod(t, c, ms, ms.Spec.Template.Roles[0], i, "legacy")
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	require.Empty(t, podDeletionSelectors(c), "restoring deleted history must not roll Pods on upgrade")
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "legacy")
+	require.NoError(t, err)
+	require.NotNil(t, cr)
+	roles, err := utils.GetRolesFromControllerRevision(cr)
+	require.NoError(t, err)
+	require.True(t, utils.EqualRoleTemplates(roles, ms.Spec.Template.Roles))
+
+	changed, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	changed.Generation++
+	changed.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(changed))
+	c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	require.Len(t, podDeletionSelectors(c), 1, "a later real update must roll")
+}
+
+func TestMissingHistoryRolloutSurvivesRestartAndPartition(t *testing.T) {
+	ctx := context.Background()
+	old := createStandardModelServing("missing", 3, 1)
+	old.UID = "owner"
+	ms := old.DeepCopy()
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "lost", "before-change"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(1))}}
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "before-change", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], i, "lost")
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	require.Len(t, podDeletionSelectors(c), 1)
+	target := utils.Revision(utils.RemoveRoleReplicasForRevision(ms).Spec.Template.Roles)
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, target)
+	require.NoError(t, err)
+	require.Equal(t, "lost", cr.Annotations[rolloutFromRevisionsAnnotation])
+
+	// A new controller has only persisted history and the next observed Pod set.
+	ms.Status.UpdateRevision = target
+	restarted := newUpgradeController(t, ms)
+	defer restarted.workqueue.ShutDown()
+	_, err = restarted.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr.DeepCopy(), metav1.CreateOptions{})
+	require.NoError(t, err)
+	for i := 0; i < 2; i++ {
+		addUpgradePod(t, restarted, ms, old.Spec.Template.Roles[0], i, "lost")
+	}
+	addUpgradePod(t, restarted, ms, ms.Spec.Template.Roles[0], 2, target)
+	require.NoError(t, restarted.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	deletes := podDeletionSelectors(restarted)
+	require.Len(t, deletes, 1)
+	require.Contains(t, deletes[0], "missing-1")
+	require.NotContains(t, deletes[0], "missing-0")
+	// An unrelated missing revision is not covered by the persisted decision.
+	h := restarted.templates(ctx, ms)
+	_, err = h.groupMatches(ctx, datastore.ServingGroup{Name: "missing-0", Revision: "unrelated"}, target)
+	require.True(t, apierrors.IsNotFound(err))
+}
+
+func TestReplicaAndPartitionChangesDoNotAuthorizeMissingHistory(t *testing.T) {
+	for _, change := range []string{"none", "servinggroup-replicas", "role-replicas", "partition"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			old := createStandardModelServing("unchanged", 3, 1)
+			old.UID = "owner"
+			ms := old.DeepCopy()
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = "lost", "observed"
+			switch change {
+			case "servinggroup-replicas":
+				ms.Spec.Replicas = ptr.To(int32(4))
+			case "role-replicas":
+				ms.Spec.Template.Roles[0].Replicas = ptr.To(int32(2))
+			case "partition":
+				ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate, RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(1))}}
+			}
+			c := newUpgradeController(t, ms)
+			defer c.workqueue.ShutDown()
+			_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "observed", old.Spec.Template.Roles)
+			require.NoError(t, err)
+			addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], 0, "lost")
+			h := c.templates(ctx, ms)
+			target := h.desiredRevision(ctx, utils.Revision(utils.RemoveRoleReplicasForRevision(ms).Spec.Template.Roles))
+			require.NoError(t, c.ensureControllerRevision(ctx, ms, target))
+			require.NoError(t, h.recordMissingRevisionRollout(ctx, target))
+			require.False(t, h.canReplaceMissingRevision(ctx, "lost"))
+		})
+	}
+}
 
 func newUpgradeController(t *testing.T, ms *workloadv1alpha1.ModelServing) *ModelServingController {
 	t.Helper()

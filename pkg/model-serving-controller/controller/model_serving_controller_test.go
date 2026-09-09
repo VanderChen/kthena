@@ -3418,15 +3418,15 @@ func TestModelServingVersionControl(t *testing.T) {
 			expectedUpdateRevision:  "revision-v2",
 		},
 		{
-			name:            "partition=2, recreate protected group should use historical revision",
+			name:            "partition=2, retain existing protected prefix with sparse ordinals",
 			partition:       ptr.To(intstr.FromInt32(2)),
-			initialReplicas: 3, // R-0, R-1, R-2 (R-0, R-1 < partition=2, R-2 >= partition=2)
+			initialReplicas: 3,
 			initialRevision: "revision-v1",
 			existingGroups:  []int{0, 2}, // R-1 was deleted, needs to be recreated
-			scaleUpTo:       4,           // Recreate R-1 and create R-3
+			scaleUpTo:       4,           // Keep the existing prefix and append R-3 and R-4.
 			expectedRecreatedRevs: map[int]string{
-				1: "revision-v1", // Should use historical revision (ordinal < partition, protected)
-				3: "revision-v2", // Should use new revision (ordinal >= partition, new group)
+				3: "revision-v2", // Existing groups 0 and 2 already form the protected prefix.
+				4: "revision-v2",
 			},
 			expectedCurrentRevision: "revision-v1",
 			expectedUpdateRevision:  "revision-v2",
@@ -3445,15 +3445,15 @@ func TestModelServingVersionControl(t *testing.T) {
 			expectedUpdateRevision:  "revision-v2",
 		},
 		{
-			name:            "partition=3, recreate multiple groups below partition",
+			name:            "partition=3, retain three existing protected groups",
 			partition:       ptr.To(intstr.FromInt32(3)),
 			initialReplicas: 5,
 			initialRevision: "revision-v1",
 			existingGroups:  []int{0, 3, 4}, // R-1 and R-2 were deleted
-			scaleUpTo:       5,              // Recreate R-1 and R-2
+			scaleUpTo:       5,              // Keep the existing prefix and append R-5 and R-6.
 			expectedRecreatedRevs: map[int]string{
-				1: "revision-v1", // Should use historical revision
-				2: "revision-v1", // Should use historical revision
+				5: "revision-v2", // Existing groups 0, 3 and 4 remain protected.
+				6: "revision-v2",
 			},
 			expectedCurrentRevision: "revision-v1",
 			expectedUpdateRevision:  "revision-v2",
