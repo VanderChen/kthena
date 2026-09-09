@@ -2632,6 +2632,8 @@ func TestManageRoleReplicasReturnsPodCreateError(t *testing.T) {
 			}},
 		},
 	}
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "revision-current", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	groupName := utils.GenerateServingGroupName(ms.Name, 0)
 	controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "revision-current")
 
@@ -2749,6 +2751,8 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
 			revision := "rev-1"
+			_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, revision, ms.Spec.Template.Roles)
+			require.NoError(t, err)
 			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
 			for _, roleID := range tt.initialRoleIDs {
 				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, roleName, utils.GenerateRoleID(roleName, roleID), revision, "test-")
@@ -4933,6 +4937,7 @@ func TestCheckRoleReady(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-model-serving",
+			UID:       "owner",
 			Namespace: "default",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
@@ -5012,19 +5017,25 @@ func TestCheckRoleReady(t *testing.T) {
 			assert.NoError(t, err)
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			hash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "current")
+			controller.store.AddRole(utils.GetNamespaceName(ms), groupName, tt.roleName, tt.roleID, "current", hash)
 
 			// Create pods for the role
 			podIndexer := controller.podsInformer.GetIndexer()
 			for i := 0; i < tt.podCount; i++ {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: ms.Namespace,
-						Name:      fmt.Sprintf("%s-%s-%d", tt.roleID, tt.roleName, i),
+						Namespace:       ms.Namespace,
+						Name:            utils.GeneratePodName(groupName, tt.roleID, i),
+						OwnerReferences: []metav1.OwnerReference{{APIVersion: workloadv1alpha1.GroupVersion.String(), Kind: "ModelServing", Name: ms.Name, UID: ms.UID, Controller: ptr.To(true)}},
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
 							workloadv1alpha1.RoleLabelKey:             tt.roleName,
 							workloadv1alpha1.RoleIDKey:                tt.roleID,
+							workloadv1alpha1.RevisionLabelKey:         "current",
+							workloadv1alpha1.RoleTemplateHashLabelKey: hash,
 						},
 					},
 				}
@@ -5517,6 +5528,14 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 
 	// Setup fake clients
 	kubeClient := kubefake.NewSimpleClientset()
+	// Keep asynchronous deletion in flight while checking graceMap. A fast
+	// fake NotFound response otherwise removes the entry before these assertions.
+	releaseDeletes := make(chan struct{})
+	t.Cleanup(func() { close(releaseDeletes) })
+	kubeClient.PrependReactor("delete", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+		<-releaseDeletes
+		return false, nil, nil
+	})
 	kthenaClient := kthenafake.NewSimpleClientset()
 	volcanoClient := volcanofake.NewSimpleClientset()
 	apiextClient := apiextfake.NewSimpleClientset()
@@ -6109,7 +6128,6 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	roleName := "prefill"
 	roleID := "prefill-0"
 	revision := "hash123"
-	roleTemplateHash := "rolehash123"
 
 	tests := []struct {
 		description    string
@@ -6165,7 +6183,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				isEntry  bool
 				workerID int
 			}{
-				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
+				{name: utils.GeneratePodName(groupName, roleID, 0), isReady: true, isEntry: true, workerID: 0},
 				{name: groupName + "-" + roleName + "-1", isReady: true, isEntry: false, workerID: 1},
 			},
 			newPodIsEntry:      false,
@@ -6182,7 +6200,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				isEntry  bool
 				workerID int
 			}{
-				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
+				{name: utils.GeneratePodName(groupName, roleID, 0), isReady: true, isEntry: true, workerID: 0},
 			},
 			newPodIsEntry:      false,
 			newPodWorkerID:     1,
@@ -6226,7 +6244,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				isEntry  bool
 				workerID int
 			}{
-				{name: groupName + "-" + roleName + "-0", isReady: true, isEntry: true, workerID: 0},
+				{name: utils.GeneratePodName(groupName, roleID, 0), isReady: true, isEntry: true, workerID: 0},
 				{name: groupName + "-" + roleName + "-1", isReady: true, isEntry: false, workerID: 1},
 				{name: groupName + "-" + roleName + "-3", isReady: false, isEntry: false, workerID: 3}, // not ready
 			},
@@ -6288,6 +6306,8 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				},
 			}
 
+			roleTemplateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+
 			// Create controller with workqueue
 			controller := &ModelServingController{
 				kubeClientSet:    kubeClient,
@@ -6312,7 +6332,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ns,
-						Name:      existingPod.name,
+						Name:      utils.GeneratePodName(groupName, roleID, existingPod.workerID),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -6369,9 +6389,9 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			// Create the new pod that triggers handleReadyPod
 			var newPodName string
 			if tt.newPodIsEntry {
-				newPodName = groupName + "-" + roleName + "-0"
+				newPodName = utils.GeneratePodName(groupName, roleID, 0)
 			} else {
-				newPodName = fmt.Sprintf("%s-%s-%d", groupName, roleName, tt.newPodWorkerID)
+				newPodName = utils.GeneratePodName(groupName, roleID, tt.newPodWorkerID)
 			}
 
 			newPod := &corev1.Pod{
@@ -7327,10 +7347,10 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 			}
 
 			// Create controller
-			controller := &ModelServingController{
-				store:         store,
-				kubeClientSet: kubeClient,
-			}
+			controller, err := NewModelServingController(kubeClient, kthenafake.NewSimpleClientset(), nil, apiextfake.NewSimpleClientset())
+			require.NoError(t, err)
+			defer controller.workqueue.ShutDown()
+			controller.store = store
 
 			// Call the function
 			result := controller.findOutdatedRolesInServingGroups(ms, tt.servingGroups, newRevision)

@@ -100,6 +100,157 @@ func (h *revisionTemplates) get(ctx context.Context, revision string) ([]workloa
 	return roles, nil
 }
 
+// instanceTemplate resolves the layout of an existing Role, independently of
+// the desired replica count. An entry Pod anchors the identity after restart;
+// a newly added worker must not promote the whole Role to its revision.
+func (h *revisionTemplates) instanceTemplate(ctx context.Context, groupName, roleName string, observed datastore.Role, pods []*corev1.Pod) (workloadv1alpha1.Role, string, string, error) {
+	for _, pod := range pods {
+		if pod.Name == utils.GeneratePodName(groupName, observed.Name, 0) && utils.IsOwnedByModelServingWithUID(pod, h.ms.UID) {
+			observed.Revision = utils.ObjectRevision(pod)
+			observed.RoleTemplateHash = utils.ObjectRoleTemplateHash(pod)
+			break
+		}
+	}
+	if observed.Revision == "" {
+		observed.Revision, _ = h.c.store.GetServingGroupRevision(utils.GetNamespaceName(h.ms), groupName)
+	}
+	// An exact template hash proves the current template can be used even when
+	// this Role kept an older group revision after a different Role was updated.
+	for _, desired := range h.ms.Spec.Template.Roles {
+		if desired.Name == roleName && observed.RoleTemplateHash == h.desiredRoleHash(desired) && observed.Revision != "" {
+			return desired, observed.Revision, observed.RoleTemplateHash, nil
+		}
+	}
+	roles, err := h.get(ctx, observed.Revision)
+	if err != nil {
+		return workloadv1alpha1.Role{}, "", "", err
+	}
+	for _, role := range roles {
+		if role.Name == roleName {
+			hash := observed.RoleTemplateHash
+			if hash == "" {
+				hash = utils.CalRoleTemplateHash(role)
+			}
+			return role, observed.Revision, hash, nil
+		}
+	}
+	return workloadv1alpha1.Role{}, "", "", fmt.Errorf("role %s is missing from ControllerRevision %s", roleName, observed.Revision)
+}
+
+func (h *revisionTemplates) podMatchesTemplate(ctx context.Context, pod *corev1.Pod, role workloadv1alpha1.Role, revision string) (bool, error) {
+	if (revision != "" && utils.ObjectRevision(pod) == revision) || utils.ObjectRoleTemplateHash(pod) == utils.CalRoleTemplateHash(role) {
+		return true, nil
+	}
+	roles, err := h.get(ctx, utils.ObjectRevision(pod))
+	if err != nil {
+		return false, err
+	}
+	for _, historical := range roles {
+		if historical.Name == role.Name {
+			return utils.EqualRoleTemplate(historical, role), nil
+		}
+	}
+	return false, fmt.Errorf("role %s is missing from Pod %s revision", role.Name, pod.Name)
+}
+
+// groupRoleTargets protects historical templates while keeping Role replica
+// counts independently scalable, including inside the partition prefix.
+func (h *revisionTemplates) groupRoleTargets(ctx context.Context, groupName string) ([]workloadv1alpha1.Role, error) {
+	partition := h.c.getPartition(h.ms)
+	if partition == 0 {
+		return h.ms.Spec.Template.Roles, nil
+	}
+	groups, err := h.c.store.GetServingGroupByModelServing(utils.GetNamespaceName(h.ms))
+	if err != nil {
+		return nil, err
+	}
+	for i, group := range groups {
+		if group.Name != groupName || i >= partition {
+			continue
+		}
+		roles, err := h.get(ctx, group.Revision)
+		if err != nil {
+			return nil, err
+		}
+		return mergeLatestRoleReplicas(roles, h.ms.Spec.Template.Roles), nil
+	}
+	return h.ms.Spec.Template.Roles, nil
+}
+
+// podGroupModelServing changes only the Roles used for scheduling requirements.
+// Global scheduling settings remain current. Each live Role type keeps its own
+// layout, including during RoleRollingUpdate of other Role types in this group.
+func (h *revisionTemplates) podGroupModelServing(ctx context.Context, groupName string) (*workloadv1alpha1.ModelServing, error) {
+	if h.c.store == nil {
+		return h.ms, nil
+	}
+	if _, exists := h.c.store.GetServingGroupRevision(utils.GetNamespaceName(h.ms), groupName); !exists {
+		return h.ms, nil
+	}
+	roles, err := h.groupRoleTargets(ctx, groupName)
+	if err != nil {
+		return nil, err
+	}
+	copy := h.ms.DeepCopy()
+	copy.Spec.Template.Roles = nil
+	for _, desired := range roles {
+		instances, err := h.c.store.GetRoleList(utils.GetNamespaceName(h.ms), groupName, desired.Name)
+		if err != nil {
+			return nil, err
+		}
+		effective := desired
+		found := false
+		for _, instance := range instances {
+			if instance.Status == datastore.RoleDeleting {
+				continue
+			}
+			pods, err := h.c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", h.ms.Namespace, groupName, desired.Name, instance.Name))
+			if err != nil {
+				return nil, err
+			}
+			template, _, _, err := h.instanceTemplate(ctx, groupName, desired.Name, instance, pods)
+			if err != nil {
+				return nil, err
+			}
+			if found && !utils.EqualRoleTemplate(effective, template) {
+				// One SubGroupPolicy cannot describe different layouts of the
+				// same Role type. Retain its existing requirements until rollout
+				// replaces these instances; do not invent a new scheduling layout.
+				return nil, fmt.Errorf("role %s in ServingGroup %s has mixed instance templates", desired.Name, groupName)
+			}
+			effective, found = template, true
+		}
+		if !found && (h.ms.Spec.RolloutStrategy == nil || h.ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate) {
+			revision, _ := h.c.store.GetServingGroupRevision(utils.GetNamespaceName(h.ms), groupName)
+			effective, _, _, err = h.instanceTemplate(ctx, groupName, desired.Name, datastore.Role{Revision: revision}, nil)
+			if err != nil {
+				return nil, err
+			}
+		}
+		effective.Replicas = desired.Replicas
+		copy.Spec.Template.Roles = append(copy.Spec.Template.Roles, *effective.DeepCopy())
+	}
+	return copy, nil
+}
+
+func (h *revisionTemplates) instanceMatches(ctx context.Context, group datastore.ServingGroup, observed datastore.Role, desired workloadv1alpha1.Role) (bool, error) {
+	matches, err := h.roleMatches(ctx, group.Revision, observed, desired)
+	if err != nil || !matches {
+		return matches, err
+	}
+	pods, err := h.c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", h.ms.Namespace, group.Name, desired.Name, observed.Name))
+	if err != nil {
+		return false, err
+	}
+	for _, pod := range pods {
+		matches, err := h.roleMatches(ctx, group.Revision, datastore.Role{Revision: utils.ObjectRevision(pod), RoleTemplateHash: utils.ObjectRoleTemplateHash(pod)}, desired)
+		if err != nil || !matches {
+			return matches, err
+		}
+	}
+	return true, nil
+}
+
 // desiredRevision preserves an existing identity when only its hash encoding
 // differs. The hash algorithm and the set of fields participating in it stay intact.
 func (h *revisionTemplates) desiredRevision(ctx context.Context, computed string) string {
@@ -118,12 +269,17 @@ func (h *revisionTemplates) desiredRevision(ctx context.Context, computed string
 	return computed
 }
 
-func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision string, observed datastore.Role, desired workloadv1alpha1.Role) (bool, error) {
+func (h *revisionTemplates) desiredRoleHash(desired workloadv1alpha1.Role) string {
 	expectedHash, ok := h.roleHashes[desired.Name]
 	if !ok {
 		expectedHash = utils.CalRoleTemplateHash(desired)
 		h.roleHashes[desired.Name] = expectedHash
 	}
+	return expectedHash
+}
+
+func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision string, observed datastore.Role, desired workloadv1alpha1.Role) (bool, error) {
+	expectedHash := h.desiredRoleHash(desired)
 	if observed.RoleTemplateHash == expectedHash {
 		return true, nil
 	}
@@ -173,7 +329,7 @@ func (h *revisionTemplates) groupMatches(ctx context.Context, group datastore.Se
 			return false, err
 		}
 		for _, role := range roles {
-			same, err := h.roleMatches(ctx, group.Revision, role, desired)
+			same, err := h.instanceMatches(ctx, group, role, desired)
 			if err != nil || !same {
 				return same, err
 			}
