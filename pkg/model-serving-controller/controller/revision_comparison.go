@@ -477,6 +477,7 @@ func (c *ModelServingController) reportRevisionUnresolved(ms *workloadv1alpha1.M
 	// event follows a transient read failure or a repaired historical revision.
 	if c.workqueue != nil {
 		c.enqueueModelServingAfter(ms, 5*time.Second)
+		klog.V(4).Infof("Requeued ModelServing %s/%s after 5s to retry unresolved history for ServingGroup %s", ms.Namespace, ms.Name, group)
 	}
 	klog.Warningf("Skipping template update for ModelServing %s/%s, ServingGroup %s: %v", ms.Namespace, ms.Name, group, err)
 	if c.recorder != nil {

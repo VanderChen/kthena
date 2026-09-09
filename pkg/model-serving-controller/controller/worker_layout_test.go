@@ -353,3 +353,40 @@ func TestWorkerLayoutProtectedGroupRecoveryUsesLatestRoleReplicas(t *testing.T) 
 		}
 	}
 }
+
+func TestWorkerLayoutReadinessRetriesAfterHistoryFailure(t *testing.T) {
+	for _, missingHistory := range []bool{false, true} {
+		t.Run(fmt.Sprintf("history-read-failed-%t", missingHistory), func(t *testing.T) {
+			c, _, ms := layoutController(t, 1, 2, true, 3, api.ServingGroupRollingUpdate)
+			key := utils.GetNamespaceName(ms)
+			require.NoError(t, c.store.UpdateRoleStatus(key, "layout-0", "prefill", "prefill-0", datastore.RoleCreating))
+			require.NoError(t, c.store.UpdateServingGroupStatus(key, "layout-0", datastore.ServingGroupCreating))
+			pod, err := c.podsLister.Pods(ms.Namespace).Get("layout-0-prefill-0-1")
+			require.NoError(t, err)
+			pending := pod.DeepCopy()
+			pending.Status.Phase = corev1.PodPending
+			pending.Status.Conditions = nil
+			require.NoError(t, c.podsInformer.GetIndexer().Update(pending))
+			c.updatePod(nil, pending)
+			require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, "layout-0", "prefill", "prefill-0"))
+			unavailable := missingHistory
+			c.kubeClientSet.(*kubefake.Clientset).PrependReactor("get", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
+				if unavailable {
+					return true, nil, fmt.Errorf("temporary history read failure")
+				}
+				return false, nil, nil
+			})
+			require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+			c.updatePod(pending, pod)
+			if missingHistory {
+				require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, "layout-0", "prefill", "prefill-0"))
+				unavailable = false
+				// Simulate the existing delayed ModelServing retry, with no new Pod event.
+				require.NoError(t, c.syncModelServing(context.Background(), ms.Namespace+"/"+ms.Name))
+			}
+			require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, "layout-0", "prefill", "prefill-0"))
+			require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "layout-0"))
+			require.Positive(t, c.workqueue.Len(), "a ready group must enqueue ModelServing reconciliation")
+		})
+	}
+}

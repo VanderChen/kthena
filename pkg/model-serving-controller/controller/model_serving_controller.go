@@ -1105,6 +1105,19 @@ func (c *ModelServingController) manageRoleReplicas(ctx context.Context, ms *wor
 			if err := c.CreatePodsByRole(ctx, *template.DeepCopy(), ms, roleIndex, servingGroupOrdinal, revision, hash); err != nil {
 				return fmt.Errorf("manageRoleReplicas: recreate pods for role %s/%s in ServingGroup %s: %w", targetRole.Name, roleObj.Name, groupName, err)
 			}
+		} else if roleObj.Status == datastore.RoleCreating {
+			// The last Ready event may have failed to resolve history. A delayed
+			// ModelServing retry must recheck readiness without another Pod event.
+			for _, pod := range pods {
+				if pod.DeletionTimestamp == nil && utils.IsPodRunningAndReady(pod) && !c.shouldSkipHandling(ms, groupName, pod) {
+					klog.V(4).Infof("Rechecking readiness during ModelServing reconciliation for role %s/%s/%s/%s at revision %s using ready pod %s",
+						ms.Namespace, groupName, targetRole.Name, roleObj.Name, revision, pod.Name)
+					if err := c.handleReadyPod(ms, groupName, pod); err != nil {
+						return fmt.Errorf("retry readiness for role %s/%s in ServingGroup %s: %w", targetRole.Name, roleObj.Name, groupName, err)
+					}
+					break
+				}
+			}
 		}
 	}
 
