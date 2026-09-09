@@ -544,10 +544,6 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
-	if err := c.restoreObservedRevision(ctx, ms); err != nil {
-		return errors.Join(err, c.scaleDownOnRevisionError(ctx, ms, ms.Status.UpdateRevision))
-	}
-
 	// only fields in roles can be modified in rolling updates.
 	// and only modifying the role.replicas field will not affect the revision.
 	copy := utils.RemoveRoleReplicasForRevision(ms)
@@ -601,20 +597,6 @@ func (c *ModelServingController) ensureControllerRevision(
 		return fmt.Errorf("failed to create ControllerRevision %s: %v", revision, err)
 	}
 	return nil
-}
-
-// The last observed target belongs to this spec only while its generation is
-// unchanged. Recover a deleted snapshot before an upgraded hash can replace its
-// identity. CurrentRevision may describe an older template during a rollout.
-func (c *ModelServingController) restoreObservedRevision(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
-	if ms.Generation == 0 || ms.Status.ObservedGeneration != ms.Generation || ms.Status.UpdateRevision == "" {
-		return nil
-	}
-	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, ms.Status.UpdateRevision)
-	if err != nil || cr != nil {
-		return err
-	}
-	return c.ensureControllerRevision(ctx, ms, ms.Status.UpdateRevision)
 }
 
 func (c *ModelServingController) Run(ctx context.Context, workers int) {

@@ -36,6 +36,7 @@ import (
 )
 
 const rolloutFromRevisionsAnnotation = "modelserving.volcano.sh/rollout-from-revisions"
+const rolloutFromRolesAnnotation = "modelserving.volcano.sh/rollout-from-roles"
 
 // revisionTemplates holds a history snapshot for one reconciliation.
 // Never cache across reconciliations or infer history from the current template.
@@ -47,6 +48,7 @@ type revisionTemplates struct {
 	roleHashes              map[string]string
 	roleMatchesByRevision   map[roleRevision]bool
 	missingRolloutRevisions map[string]bool
+	missingRolloutRoles     map[string]bool
 }
 
 type roleRevision struct {
@@ -135,7 +137,7 @@ func (h *revisionTemplates) roleMatches(ctx context.Context, groupRevision strin
 	}
 	roles, err := h.get(ctx, revision)
 	if err != nil {
-		if apierrors.IsNotFound(err) && h.canReplaceMissingRevision(ctx, revision) {
+		if apierrors.IsNotFound(err) && h.canReplaceMissingRevision(ctx, revision) && h.missingRolloutRoles[revision+"/"+desired.Name] {
 			return false, nil
 		}
 		return false, err
@@ -206,6 +208,7 @@ func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, ta
 		return err
 	}
 	missing := map[string]bool{}
+	seen := map[string]bool{}
 	for _, group := range groups {
 		revisions := []string{group.Revision}
 		roles, err := h.c.store.GetRolesByGroup(utils.GetNamespaceName(h.ms), group.Name)
@@ -218,11 +221,16 @@ func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, ta
 			}
 		}
 		for _, revision := range revisions {
-			if revision != "" {
-				if _, err := h.get(ctx, revision); apierrors.IsNotFound(err) {
-					missing[revision] = true
-				} else if err != nil {
+			if revision != "" && !seen[revision] {
+				seen[revision] = true
+				// Only absence needs a recovery decision. Leave validation of an
+				// existing snapshot to its group, after partition is applied.
+				cr, err := utils.GetControllerRevision(ctx, h.c.kubeClientSet, h.ms, revision)
+				if err != nil {
 					return err
+				}
+				if cr == nil {
+					missing[revision] = true
 				}
 			}
 		}
@@ -234,6 +242,34 @@ func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, ta
 	if err != nil {
 		return err
 	}
+	// A revision-level decision is sufficient for ServingGroup rollout, but
+	// Role rollout may only replace roles whose templates actually changed.
+	roleDecisions := map[string]bool{}
+	for _, entry := range strings.Split(cr.Annotations[rolloutFromRolesAnnotation], ",") {
+		if entry != "" {
+			roleDecisions[entry] = true
+		}
+	}
+	for _, desired := range h.ms.Spec.Template.Roles {
+		unchanged := false
+		for _, old := range oldRoles {
+			if old.Name == desired.Name && utils.EqualRoleTemplate(old, desired) {
+				unchanged = true
+				break
+			}
+		}
+		if !unchanged {
+			for revision := range missing {
+				roleDecisions[revision+"/"+desired.Name] = true
+			}
+		}
+	}
+	roleEntries := make([]string, 0, len(roleDecisions))
+	for entry := range roleDecisions {
+		roleEntries = append(roleEntries, entry)
+	}
+	slices.Sort(roleEntries)
+	roleValue := strings.Join(roleEntries, ",")
 	for _, revision := range strings.Split(cr.Annotations[rolloutFromRevisionsAnnotation], ",") {
 		if revision != "" {
 			missing[revision] = true
@@ -245,13 +281,14 @@ func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, ta
 	}
 	slices.Sort(revisions)
 	value := strings.Join(revisions, ",")
-	if cr.Annotations[rolloutFromRevisionsAnnotation] == value {
+	if cr.Annotations[rolloutFromRevisionsAnnotation] == value && cr.Annotations[rolloutFromRolesAnnotation] == roleValue {
 		return nil
 	}
 	if cr.Annotations == nil {
 		cr.Annotations = map[string]string{}
 	}
 	cr.Annotations[rolloutFromRevisionsAnnotation] = value
+	cr.Annotations[rolloutFromRolesAnnotation] = roleValue
 	_, err = h.c.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
 	return err
 }
@@ -259,6 +296,7 @@ func (h *revisionTemplates) recordMissingRevisionRollout(ctx context.Context, ta
 func (h *revisionTemplates) canReplaceMissingRevision(ctx context.Context, revision string) bool {
 	if h.missingRolloutRevisions == nil {
 		h.missingRolloutRevisions = map[string]bool{}
+		h.missingRolloutRoles = map[string]bool{}
 		target := h.desiredRevision(ctx, utils.Revision(utils.RemoveRoleReplicasForRevision(h.ms).Spec.Template.Roles))
 		cr, err := utils.GetControllerRevision(ctx, h.c.kubeClientSet, h.ms, target)
 		if err != nil || cr == nil || !metav1.IsControlledBy(cr, h.ms) {
@@ -270,6 +308,9 @@ func (h *revisionTemplates) canReplaceMissingRevision(ctx context.Context, revis
 		}
 		for _, previous := range strings.Split(cr.Annotations[rolloutFromRevisionsAnnotation], ",") {
 			h.missingRolloutRevisions[previous] = true
+		}
+		for _, entry := range strings.Split(cr.Annotations[rolloutFromRolesAnnotation], ",") {
+			h.missingRolloutRoles[entry] = true
 		}
 	}
 	return h.missingRolloutRevisions[revision]

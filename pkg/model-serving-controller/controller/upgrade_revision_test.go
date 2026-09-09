@@ -92,7 +92,10 @@ func TestRestoreRevisionDoesNotLabelUnobservedSpecAsHistory(t *testing.T) {
 	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "old", "old"
 	c := newUpgradeController(t, ms)
 	defer c.workqueue.ShutDown()
-	require.NoError(t, c.restoreObservedRevision(ctx, ms))
+	for i := 0; i < 3; i++ {
+		addUpgradePod(t, c, ms, ms.Spec.Template.Roles[0], i, "old")
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
 	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "old")
 	require.NoError(t, err)
 	require.Nil(t, cr)
@@ -124,34 +127,57 @@ func TestPartitionRecreatesMissingProtectedTemplate(t *testing.T) {
 	require.Equal(t, old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image, created.Spec.Containers[0].Image)
 }
 
-func TestDeletedObservedRevisionRecoveredBeforeUpgrade(t *testing.T) {
-	ctx := context.Background()
-	ms := createStandardModelServing("deleted", 3, 1)
-	ms.UID, ms.Generation = "owner", 3
-	ms.Status.ObservedGeneration = 3
-	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "legacy", "legacy"
-	c := newUpgradeController(t, ms)
-	defer c.workqueue.ShutDown()
-	for i := 0; i < 3; i++ {
-		addUpgradePod(t, c, ms, ms.Spec.Template.Roles[0], i, "legacy")
-	}
-	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
-	require.Empty(t, podDeletionSelectors(c), "restoring deleted history must not roll Pods on upgrade")
-	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "legacy")
-	require.NoError(t, err)
-	require.NotNil(t, cr)
-	roles, err := utils.GetRolesFromControllerRevision(cr)
-	require.NoError(t, err)
-	require.True(t, utils.EqualRoleTemplates(roles, ms.Spec.Template.Roles))
+func TestMissingHistoryUpgradeThenTemplateChange(t *testing.T) {
+	for _, drift := range []string{"none", "group", "role", "both", "unrelated-hash-encoding"} {
+		t.Run(drift, func(t *testing.T) {
+			ctx := context.Background()
+			ms := createStandardModelServing("deleted", 3, 1)
+			ms.UID, ms.Generation = "owner", 3
+			ms.Status.ObservedGeneration = 3
+			target := utils.Revision(utils.RemoveRoleReplicasForRevision(ms).Spec.Template.Roles)
+			oldRevision := target
+			roleHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
+			if drift == "group" || drift == "both" || drift == "unrelated-hash-encoding" {
+				oldRevision = "lost-" + drift
+			}
+			if drift == "role" || drift == "both" || drift == "unrelated-hash-encoding" {
+				roleHash = "old-role-" + drift
+			}
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = oldRevision, oldRevision
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate,
+				RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(1))}}
+			c := newUpgradeController(t, ms)
+			defer c.workqueue.ShutDown()
+			for i := 0; i < 3; i++ {
+				addUpgradePodWithHash(t, c, ms, ms.Spec.Template.Roles[0], i, oldRevision, roleHash)
+			}
+			require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+			require.Empty(t, podDeletionSelectors(c), "upgrade must not roll Pods for any hash drift")
+			cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, target)
+			require.NoError(t, err)
+			require.NotNil(t, cr)
+			roles, err := utils.GetRolesFromControllerRevision(cr)
+			require.NoError(t, err)
+			require.True(t, utils.EqualRoleTemplates(roles, ms.Spec.Template.Roles))
+			if oldRevision != target {
+				oldCR, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, oldRevision)
+				require.NoError(t, err)
+				require.Nil(t, oldCR, "current spec must not be assigned to a lost historical identity")
+			}
 
-	changed, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	changed.Generation++
-	changed.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
-	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(changed))
-	c.kubeClientSet.(*kubefake.Clientset).ClearActions()
-	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
-	require.Len(t, podDeletionSelectors(c), 1, "a later real update must roll")
+			changed, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			changed.Generation++
+			changed.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+			_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, changed, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(changed))
+			c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+			require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+			require.Len(t, podDeletionSelectors(c), 1, "a later real update must roll")
+			require.NotContains(t, podDeletionSelectors(c)[0], "name=deleted-0", "partition must retain the first group")
+		})
+	}
 }
 
 func TestMissingHistoryRolloutSurvivesRestartAndPartition(t *testing.T) {
@@ -228,6 +254,80 @@ func TestReplicaAndPartitionChangesDoNotAuthorizeMissingHistory(t *testing.T) {
 	}
 }
 
+func TestMissingHistoryDoesNotTrustLegacyObservedGeneration(t *testing.T) {
+	ctx := context.Background()
+	old := createStandardModelServing("legacy-status", 3, 1)
+	old.UID = "owner"
+	oldRevision := utils.Revision(utils.RemoveRoleReplicasForRevision(old).Spec.Template.Roles)
+	ms := old.DeepCopy()
+	ms.Generation, ms.Status.ObservedGeneration = 2, 2
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = oldRevision, oldRevision
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	for i := 0; i < 3; i++ {
+		addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], i, oldRevision)
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, oldRevision)
+	require.NoError(t, err)
+	require.Nil(t, cr, "a stale observedGeneration cannot recreate the old template")
+	stored, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Zero(t, stored.Status.UpdatedReplicas, "old Pods must not be counted as updated")
+	require.Empty(t, podDeletionSelectors(c))
+}
+
+func TestProtectedMalformedHistoryDoesNotBlockOtherGroups(t *testing.T) {
+	ctx := context.Background()
+	old := createStandardModelServing("protected-error", 3, 1)
+	old.UID = "owner"
+	ms := old.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(1))}}
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "bad", "good"
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "good", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	_, err = utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "bad", map[string]string{"unexpected": "value"})
+	require.NoError(t, err)
+	addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], 0, "bad")
+	for i := 1; i < 3; i++ {
+		addUpgradePod(t, c, ms, old.Spec.Template.Roles[0], i, "good")
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	deletes := podDeletionSelectors(c)
+	require.Len(t, deletes, 1)
+	require.Contains(t, deletes[0], "protected-error-2")
+}
+
+func TestMissingHistoryRoleRolloutOnlyReplacesChangedRole(t *testing.T) {
+	ctx := context.Background()
+	old := createStandardModelServing("role-scope", 1, 1)
+	old.UID = "owner"
+	decode := old.Spec.Template.Roles[0].DeepCopy()
+	decode.Name = "decode"
+	old.Spec.Template.Roles = append(old.Spec.Template.Roles, *decode)
+	ms := old.DeepCopy()
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = "lost", "before-change"
+	ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Image = "changed:image"
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+	c := newUpgradeController(t, ms)
+	defer c.workqueue.ShutDown()
+	_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "before-change", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	for _, role := range old.Spec.Template.Roles {
+		addUpgradePod(t, c, ms, role, 0, "lost")
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	deletes := podDeletionSelectors(c)
+	require.Len(t, deletes, 1)
+	require.Contains(t, deletes[0], "decode")
+	require.NotContains(t, deletes[0], "prefill")
+}
+
 func newUpgradeController(t *testing.T, ms *workloadv1alpha1.ModelServing) *ModelServingController {
 	t.Helper()
 	c, err := NewModelServingController(kubefake.NewSimpleClientset(), kthenafake.NewSimpleClientset(ms.DeepCopy()), nil, apiextfake.NewSimpleClientset())
@@ -238,13 +338,18 @@ func newUpgradeController(t *testing.T, ms *workloadv1alpha1.ModelServing) *Mode
 
 func addUpgradePod(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role, ordinal int, revision string, roleIndices ...int) *corev1.Pod {
 	t.Helper()
+	return addUpgradePodWithHash(t, c, ms, role, ordinal, revision, "legacy-role-hash", roleIndices...)
+}
+
+func addUpgradePodWithHash(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role, ordinal int, revision, roleHash string, roleIndices ...int) *corev1.Pod {
+	t.Helper()
 	groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
 	roleIndex := 0
 	if len(roleIndices) > 0 {
 		roleIndex = roleIndices[0]
 	}
 	roleID := utils.GenerateRoleID(role.Name, roleIndex)
-	pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, groupName, roleIndex, revision, "legacy-role-hash")
+	pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, groupName, roleIndex, revision, roleHash)
 	pod.UID = types.UID(fmt.Sprintf("%s-uid", pod.Name))
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
@@ -252,7 +357,7 @@ func addUpgradePod(t *testing.T, c *ModelServingController, ms *workloadv1alpha1
 	_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod.DeepCopy(), metav1.CreateOptions{})
 	require.NoError(t, err)
 	key := utils.GetNamespaceName(ms)
-	c.store.AddRunningPodToServingGroup(key, groupName, pod.Name, revision, "legacy-role-hash", role.Name, roleID)
+	c.store.AddRunningPodToServingGroup(key, groupName, pod.Name, revision, roleHash, role.Name, roleID)
 	require.NoError(t, c.store.UpdateRoleStatus(key, groupName, role.Name, roleID, datastore.RoleRunning))
 	require.NoError(t, c.store.UpdateServingGroupStatus(key, groupName, datastore.ServingGroupRunning))
 	return pod
