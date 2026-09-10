@@ -18,6 +18,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -78,4 +80,10 @@ func TestUnresolvedHistorySchedulesRetry(t *testing.T) {
 	_, err := c.revisionHistory(context.Background(), ms).roles(context.Background(), "missing")
 	require.Error(t, err)
 	require.Eventually(t, func() bool { return c.workqueue.Len() > 0 }, 7*time.Second, 20*time.Millisecond)
+}
+
+func TestRevisionErrorDoesNotHideMutationFailure(t *testing.T) {
+	unresolved := &revisionResolutionError{fmt.Errorf("missing history")}
+	require.True(t, isRevisionResolutionError(fmt.Errorf("Role template: %w", unresolved)))
+	require.False(t, isRevisionResolutionError(errors.Join(unresolved, fmt.Errorf("delete hook failed"))))
 }

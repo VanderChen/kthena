@@ -135,7 +135,9 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 		if pod.Status.Phase == corev1.PodRunning && progress.runningVersion != pod.ResourceVersion+"/"+string(pod.UID) {
 			if err := c.handleRunningPod(ms, group, pod); err != nil {
 				progress.ready = false
-				hookErr = err
+				if !isRevisionResolutionError(err) {
+					hookErr = err
+				}
 				continue
 			}
 			progress.runningVersion = pod.ResourceVersion + "/" + string(pod.UID)
@@ -144,7 +146,9 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 			delete(state.grace, pod.UID)
 			if !progress.ready {
 				if err := c.runObservedPodReady(ctx, ms, pod); err != nil {
-					hookErr = err
+					if !isRevisionResolutionError(err) {
+						hookErr = err
+					}
 					continue
 				}
 				progress.ready = true
@@ -178,7 +182,7 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 					continue
 				}
 				ready, err := c.observedRoleReady(ctx, ms, group.Name, name, *role, state)
-				if err != nil {
+				if err != nil && !isRevisionResolutionError(err) {
 					return err
 				}
 				status := datastore.RoleCreating
@@ -191,7 +195,7 @@ func (c *ModelServingController) reconcileObservation(ctx context.Context, ms *w
 			}
 		}
 		ready, err := c.checkServingGroupReady(ms, group.Name)
-		if err != nil {
+		if err != nil && !isRevisionResolutionError(err) {
 			return err
 		}
 		status := datastore.ServingGroupCreating
@@ -336,6 +340,9 @@ func (c *ModelServingController) recoverMissingObservedRoles(ctx context.Context
 				}
 				pods, expected, err := c.observedRolePods(ctx, ms, group.Name, name, *role)
 				if err != nil {
+					if isRevisionResolutionError(err) {
+						continue
+					}
 					return err
 				}
 				if len(pods) == expected {

@@ -26,7 +26,9 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -287,4 +289,114 @@ func TestRevisionRecoveryUsesCompletedRoleTemplate(t *testing.T) {
 	assert.Equal(t, 2, limits.rolloutEnd, "the previous completed replica baseline is 2, not the group's ancient count of 1")
 	observed, _ := c.store.GetServingGroupRevision(key, group.Name)
 	assert.Equal(t, "ancient", observed)
+}
+
+// BinarySI and DecimalSI quantities survive API round trips with distinct hash
+// representations, while Kubernetes considers their resource values equal.
+func TestSemanticTemplateComparisonPreservesQuantityEquivalentInstances(t *testing.T) {
+	for _, strategy := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		t.Run(string(strategy), func(t *testing.T) {
+			old := createStandardModelServing("semantic-quantity", 1, 1)
+			old.UID = "semantic-quantity-uid"
+			old.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: strategy}
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Mi")}
+			ms := old.DeepCopy()
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("4194304")
+			require.True(t, utils.EqualRoleTemplatesForRevision(old.Spec.Template.Roles, ms.Spec.Template.Roles))
+			require.NotEqual(t, utils.CalRoleTemplateHash(old.Spec.Template.Roles[0]), utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
+			c := newRevisionTestController(t, ms)
+			_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, "legacy", old.Spec.Template.Roles)
+			require.NoError(t, err)
+			pod := addReadyLegacyGroupToController(t, c, ms, old.Spec.Template.Roles[0], 0, "legacy")
+			_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod.DeepCopy(), metav1.CreateOptions{})
+			require.NoError(t, err)
+			groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+			require.NoError(t, err)
+			ctx := c.withRevisionHistory(context.Background(), ms)
+			desired, err := c.revisionHistory(ctx, ms).desiredRevision(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, "legacy", desired)
+			assert.Equal(t, templateEquivalent, c.compareServingGroupTemplate(ctx, ms, groups[0], desired))
+			roles, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groups[0].Name, "prefill")
+			require.NoError(t, err)
+			outdated, unavailable := c.outdatedRoles(ctx, ms, groups[0], ms.Spec.Template.Roles[0], roles)
+			assert.Empty(t, outdated)
+			assert.Zero(t, unavailable)
+			assert.False(t, c.hasUpdateableOutdatedRole(ctx, ms, groups[0].Name, ms.Spec.Template.Roles[0], roles))
+			assert.Empty(t, c.findOutdatedRolesInServingGroups(ctx, ms, groups, desired))
+			state := c.resolveRoleRolloutState(ctx, ms, groups[0], ms.Spec.Template.Roles[0], 1, roles, 0, false, nil)
+			assert.False(t, state.hasOldVersion)
+			assert.Equal(t, targetReady, state.targetState)
+			assert.False(t, roleTemplateChanged(map[string]workloadv1alpha1.Role{"prefill": old.Spec.Template.Roles[0]}, ms.Spec.Template.Roles[0]))
+			require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
+			retained, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			assert.Equal(t, pod.UID, retained.UID)
+			assert.Equal(t, pod.Labels, retained.Labels)
+		})
+	}
+}
+
+func TestSemanticComparisonCacheSeparatesDesiredTemplatesAndRetriesHistory(t *testing.T) {
+	old := createStandardModelServing("semantic-cache", 1, 1)
+	old.UID = "semantic-cache-uid"
+	ms := old.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "new:v2"
+	c := newRevisionTestController(t, ms)
+	_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, "old", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	group := datastore.ServingGroup{Name: "semantic-cache-0", Revision: "old"}
+	observed := datastore.Role{Name: "prefill-0", Revision: "old", RoleTemplateHash: "opaque"}
+	ctx := c.withRevisionHistory(context.Background(), ms)
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	client.ClearActions()
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, templateDifferent, c.compareRoleTemplate(ctx, ms, group, "prefill", observed))
+	}
+	require.Len(t, client.Actions(), 1, "repeated comparisons reuse the immutable history")
+	history := c.revisionHistory(ctx, ms)
+	assert.Len(t, history.comparisons, 1)
+	// Recovery compares a stable copy with the same UID/resourceVersion against
+	// its older desired spec. It must not reuse the latest target's decision.
+	stable := ms.DeepCopy()
+	stable.Spec.Template.Roles = old.Spec.Template.Roles
+	assert.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, stable, group, "prefill", observed))
+	assert.Len(t, history.comparisons, 2)
+	observed.Revision = "late"
+	assert.Equal(t, templateUnknown, c.compareRoleTemplate(ctx, ms, group, "prefill", observed))
+	_, err = utils.CreateControllerRevision(ctx, client, ms, "late", ms.Spec.Template.Roles)
+	require.NoError(t, err)
+	assert.Equal(t, templateUnknown, c.compareRoleTemplate(ctx, ms, group, "prefill", observed))
+	assert.Equal(t, templateEquivalent, c.compareRoleTemplate(context.Background(), ms, group, "prefill", observed), "the next reconcile must retry a previously missing history")
+}
+
+func TestSemanticTerminatingCapacityChecksEveryPod(t *testing.T) {
+	old := createStandardModelServing("semantic-terminating", 1, 1)
+	old.UID = "semantic-terminating-uid"
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Mi")}
+	ms := old.DeepCopy()
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("4194304")
+	c := newRevisionTestController(t, ms)
+	_, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, "equal", old.Spec.Template.Roles)
+	require.NoError(t, err)
+	recordDifferentRevision(t, c, ms, "different")
+	pod := addReadyLegacyGroupToController(t, c, ms, old.Spec.Template.Roles[0], 0, "equal")
+	now := metav1.Now()
+	pod.DeletionTimestamp = &now
+	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	group := datastore.ServingGroup{Name: "semantic-terminating-0", Revision: "equal"}
+	ctx := c.withRevisionHistory(context.Background(), ms)
+	assert.Equal(t, templateEquivalent, c.terminatingRoleReplicas(ctx, ms, group)["prefill"][0])
+	worker := pod.DeepCopy()
+	worker.Name = "semantic-terminating-0-prefill-0-1"
+	worker.Labels[workloadv1alpha1.RevisionLabelKey] = "different"
+	require.NoError(t, c.podsInformer.GetIndexer().Add(worker))
+	assert.Equal(t, templateDifferent, c.terminatingRoleReplicas(ctx, ms, group)["prefill"][0])
+	// Live mixed observations must also remain old, even when the cached entry
+	// comparison is equal to the target.
+	role := datastore.Role{Name: "prefill-0", Revision: "equal", RoleTemplateHash: "opaque"}
+	assert.Equal(t, templateDifferent, c.compareRoleTemplate(ctx, ms, group, "prefill", role))
+	worker.Labels[workloadv1alpha1.RevisionLabelKey] = "equal"
+	require.NoError(t, c.podsInformer.GetIndexer().Update(worker))
+	assert.Equal(t, templateEquivalent, c.compareRoleTemplate(ctx, ms, group, "prefill", role))
 }

@@ -293,7 +293,7 @@ func isCoordinatedRole(ms *workloadv1alpha1.ModelServing, roleName string) bool 
 
 func roleTemplateChanged(oldRoles map[string]workloadv1alpha1.Role, role workloadv1alpha1.Role) bool {
 	oldRole, existed := oldRoles[role.Name]
-	return existed && utils.CalRoleTemplateHash(oldRole) != utils.CalRoleTemplateHash(role)
+	return existed && !utils.EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{oldRole}, []workloadv1alpha1.Role{role})
 }
 
 func (c *ModelServingController) roleSpecsFromRevision(
@@ -343,12 +343,11 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	roleList []datastore.Role,
 	partition int,
 	templateChanged bool,
-	terminatingReplicas map[int]string,
+	terminatingReplicas map[int]templateComparison,
 ) coordinatedRoleState {
 	desired := roleReplicas(roleSpec)
 	stableEnd := min(previousDesired, desired)
 	totalToUpdate := max(stableEnd-partition, 0)
-	expectedHash := utils.CalRoleTemplateHash(roleSpec)
 	stableTargetReady := 0
 	hasTargetWork := false
 	hasTargetReady := false
@@ -360,8 +359,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 			continue
 		}
 		inStableRange := ordinal >= partition && ordinal < stableEnd
-		observedHash, resolved := c.resolveRoleTemplateHashForComparison(ctx, ms, servingGroup, roleSpec.Name, role)
-		oldVersion := !resolved || observedHash != expectedHash
+		oldVersion := c.compareRoleTemplate(ctx, ms, servingGroup, roleSpec.Name, role) != templateEquivalent
 		if oldVersion {
 			hasOldVersion = true
 			if role.Status != datastore.RoleDeleting && inStableRange {
@@ -383,11 +381,11 @@ func (c *ModelServingController) resolveRoleRolloutState(
 
 	// The datastore is rebuilt from non-terminating Pod events. Keep terminating
 	// old capacity in the stable count and dependency state until all Pods vanish.
-	for ordinal, hash := range terminatingReplicas {
+	for ordinal, comparison := range terminatingReplicas {
 		if ordinal < 0 {
 			continue
 		}
-		if hash == "" || hash != expectedHash {
+		if comparison != templateEquivalent {
 			hasOldVersion = true
 		}
 	}
@@ -423,8 +421,8 @@ func (c *ModelServingController) terminatingRoleReplicas(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
 	servingGroup datastore.ServingGroup,
-) map[string]map[int]string {
-	result := make(map[string]map[int]string)
+) map[string]map[int]templateComparison {
+	result := make(map[string]map[int]templateComparison)
 	if c == nil || c.podsInformer == nil {
 		return result
 	}
@@ -447,17 +445,16 @@ func (c *ModelServingController) terminatingRoleReplicas(
 		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 			continue
 		}
-		hash, _ := c.resolveRoleTemplateHashForComparison(ctx, ms, servingGroup, roleName, datastore.Role{
+		comparison := c.revisionHistory(ctx, ms).compareObservedRole(ctx, ms, servingGroup, roleName, datastore.Role{
 			Revision: utils.ObjectRevision(pod), RoleTemplateHash: utils.ObjectRoleTemplateHash(pod),
 		})
 		if result[roleName] == nil {
-			result[roleName] = make(map[int]string)
+			result[roleName] = make(map[int]templateComparison)
 		}
-		currentHash, exists := result[roleName][ordinal]
-		// If any Pod for the Role ordinal has an unresolved hash, keep the
-		// conservative unresolved observation.
-		if !exists || (currentHash != "" && hash == "") {
-			result[roleName][ordinal] = hash
+		current, exists := result[roleName][ordinal]
+		// Every Pod must match before terminating capacity is classified as target.
+		if !exists || current == templateEquivalent {
+			result[roleName][ordinal] = comparison
 		}
 	}
 	return result

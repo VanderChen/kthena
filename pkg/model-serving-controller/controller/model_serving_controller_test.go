@@ -10147,7 +10147,7 @@ func TestFindOutdatedRolesInServingGroups_LegacyMissingRoleTemplateHash(t *testi
 	assert.Empty(t, result, "legacy role with missing roleTemplateHash should not be treated as outdated by default")
 }
 
-func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.T) {
+func TestCompareRoleTemplate_FromControllerRevision(t *testing.T) {
 	ns := "default"
 	msName := "test-ms"
 	oldRevision := "old-revision"
@@ -10178,15 +10178,14 @@ func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.
 	assert.NoError(t, err)
 
 	controller := &ModelServingController{kubeClientSet: kubeClient}
-	hash, ok := controller.resolveRoleTemplateHashForComparison(context.Background(),
+	comparison := controller.compareRoleTemplate(context.Background(),
 		ms,
 		datastore.ServingGroup{Name: "test-ms-0", Revision: oldRevision},
 		roleName,
 		datastore.Role{Name: "prefill-0", RoleTemplateHash: ""},
 	)
 
-	assert.True(t, ok)
-	assert.Equal(t, utils.CalRoleTemplateHash(oldRole), hash)
+	assert.Equal(t, templateEquivalent, comparison)
 }
 
 func TestResolveRoleTemplateHash_UsesPodRevisionControllerRevision(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -178,6 +180,25 @@ func TestValidateRoleCoordinationUpdateCapacity(t *testing.T) {
 			},
 		}
 	}
+
+	t.Run("equivalent quantities do not require dependency rollout capacity", func(t *testing.T) {
+		oldMS := modelServing("old", 1)
+		for i := range oldMS.Spec.Template.Roles {
+			oldMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Mi")}
+		}
+		newMS := oldMS.DeepCopy()
+		for i := range newMS.Spec.Template.Roles {
+			newMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory] = resource.MustParse("4194304")
+		}
+		require.True(t, apiequality.Semantic.DeepEqual(oldMS.Spec, newMS.Spec))
+		assert.Empty(t, validateRoleCoordinationUpdate(oldMS, newMS))
+		for i := range newMS.Spec.Template.Roles {
+			newMS.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "new"
+		}
+		errs := validateRoleCoordinationUpdate(oldMS, newMS)
+		require.NotEmpty(t, errs)
+		assert.Contains(t, errs.ToAggregate().Error(), "cannot create target-version capacity while retaining the old request path")
+	})
 
 	t.Run("multi-replica dependencies have replacement bootstrap capacity", func(t *testing.T) {
 		oldMS := modelServing("old", 2)

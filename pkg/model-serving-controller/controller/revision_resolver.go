@@ -27,8 +27,10 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
 )
 
@@ -41,17 +43,119 @@ const (
 )
 
 type revisionSnapshot struct {
-	roles []workloadv1alpha1.Role
-	err   error
+	roles    []workloadv1alpha1.Role
+	err      error
+	revision *appsv1.ControllerRevision
 }
 
 // revisionHistory is a read-only interpretation of persisted identities. Its
 // cache belongs to one reconcile, not the controller process: a missing history
 // can be retried next time, and no adoption state is lost on leader changes.
 type revisionHistory struct {
-	controller *ModelServingController
-	ms         *workloadv1alpha1.ModelServing
-	snapshots  map[string]revisionSnapshot
+	controller  *ModelServingController
+	ms          *workloadv1alpha1.ModelServing
+	snapshots   map[string]revisionSnapshot
+	target      string
+	roleHashes  map[*workloadv1alpha1.ModelServing]map[string]string
+	comparisons map[roleComparisonKey]templateComparison
+}
+
+// Include the desired object: recovery also compares against an older stable
+// template using a copy with the same UID, generation and resource version.
+type roleComparisonKey struct {
+	desired  *workloadv1alpha1.ModelServing
+	revision string
+	roleName string
+	target   string
+}
+
+func (h *revisionHistory) desiredRoleHash(ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role) string {
+	if h.roleHashes == nil {
+		h.roleHashes = make(map[*workloadv1alpha1.ModelServing]map[string]string)
+	}
+	if h.roleHashes[ms] == nil {
+		h.roleHashes[ms] = make(map[string]string)
+	}
+	if hash, ok := h.roleHashes[ms][role.Name]; ok {
+		return hash
+	}
+	hash := utils.CalRoleTemplateHash(role)
+	h.roleHashes[ms][role.Name] = hash
+	return hash
+}
+
+// Matching identities remain a fast path. A different hash is never evidence
+// of a different template: interpret this instance's own immutable history and
+// compare the projected specs using Kubernetes semantic equality.
+func (h *revisionHistory) compareObservedRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, group datastore.ServingGroup, roleName string, observed datastore.Role) templateComparison {
+	var desired *workloadv1alpha1.Role
+	for i := range ms.Spec.Template.Roles {
+		if ms.Spec.Template.Roles[i].Name == roleName {
+			desired = &ms.Spec.Template.Roles[i]
+			break
+		}
+	}
+	if desired == nil {
+		return templateDifferent
+	}
+	if observed.RoleTemplateHash == h.desiredRoleHash(ms, *desired) {
+		return templateEquivalent
+	}
+	revision := observed.Revision
+	if revision == "" {
+		revision = group.Revision
+	}
+	key := roleComparisonKey{desired: ms, revision: revision, roleName: roleName, target: h.target}
+	if result, ok := h.comparisons[key]; ok {
+		return result
+	}
+	result := templateUnknown
+	roles, err := h.roles(ctx, revision)
+	if err == nil {
+		for _, historical := range roles {
+			if historical.Name == roleName {
+				result = templateDifferent
+				if utils.EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{historical}, []workloadv1alpha1.Role{*desired}) {
+					result = templateEquivalent
+				}
+				break
+			}
+		}
+	} else if apierrors.IsNotFound(err) && h.canReplaceMissing(ctx, revision, roleName) {
+		result = templateDifferent
+	}
+	if h.comparisons == nil {
+		h.comparisons = make(map[roleComparisonKey]templateComparison)
+	}
+	h.comparisons[key] = result
+	return result
+}
+
+// A new worker cannot promote an entire old Role to the target. Pod observations
+// are checked on every call; only immutable historical comparisons are cached.
+func (c *ModelServingController) compareRoleTemplate(ctx context.Context, ms *workloadv1alpha1.ModelServing, group datastore.ServingGroup, roleName string, role datastore.Role) templateComparison {
+	history := c.revisionHistory(ctx, ms)
+	result := history.compareObservedRole(ctx, ms, group, roleName, role)
+	if result != templateEquivalent || (c.podsInformer == nil && c.observation == nil) {
+		return result
+	}
+	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group.Name, roleName, role.Name))
+	if err != nil {
+		return templateUnknown
+	}
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		comparison := history.compareObservedRole(ctx, ms, group, roleName, datastore.Role{Revision: utils.ObjectRevision(pod), RoleTemplateHash: utils.ObjectRoleTemplateHash(pod)})
+		if comparison == templateDifferent {
+			return templateDifferent
+		}
+		if comparison == templateUnknown {
+			result = templateUnknown
+		}
+	}
+	return result
 }
 
 type revisionHistoryKey struct{}
@@ -78,9 +182,9 @@ func (h *revisionHistory) decode(cr *appsv1.ControllerRevision) revisionSnapshot
 	}
 	roles, err := utils.GetRolesFromControllerRevision(cr)
 	if err == nil && len(roles) == 0 {
-		err = fmt.Errorf("ControllerRevision %s has no Role templates", cr.Name)
+		err = fmt.Errorf("ControllerRevision %s contains no Roles", cr.Name)
 	}
-	return revisionSnapshot{roles: roles, err: err}
+	return revisionSnapshot{roles: roles, err: err, revision: cr}
 }
 
 func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloadv1alpha1.Role, error) {
@@ -92,9 +196,14 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 		cr, err := utils.GetControllerRevision(ctx, h.controller.kubeClientSet, h.ms, revision)
 		if err != nil {
 			snapshot.err = err
+		} else if cr == nil {
+			snapshot.err = apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "controllerrevisions"}, utils.GenerateControllerRevisionName(h.ms.Name, revision))
 		} else {
 			snapshot = h.decode(cr)
 		}
+	}
+	if snapshot.err != nil {
+		snapshot.err = &revisionResolutionError{snapshot.err}
 	}
 	h.snapshots[revision] = snapshot
 	if snapshot.err != nil {
@@ -121,7 +230,7 @@ func (h *revisionHistory) role(ctx context.Context, revision, name string) (work
 			return *role.DeepCopy(), nil
 		}
 	}
-	return workloadv1alpha1.Role{}, fmt.Errorf("Role %s not found in ControllerRevision %s", name, revision)
+	return workloadv1alpha1.Role{}, &revisionResolutionError{fmt.Errorf("Role %s not found in ControllerRevision %s", name, revision)}
 }
 
 // desiredRevision keeps an existing identity when its immutable template is
@@ -169,7 +278,7 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 		if snapshot.err == nil {
 			h.snapshots[revision] = snapshot
 			if utils.EqualRoleTemplatesForRevision(snapshot.roles, h.ms.Spec.Template.Roles) {
-				return revision, nil
+				return h.selectTarget(ctx, revision)
 			}
 		}
 	}
@@ -183,7 +292,7 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("resolve persisted desired ControllerRevision: %w", snapshot.err)
 	}
 	h.snapshots[revision] = snapshot
-	return revision, nil
+	return h.selectTarget(ctx, revision)
 }
 
 func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context, ms *workloadv1alpha1.ModelServing, group datastore.ServingGroup, targetRevision string) templateComparison {
@@ -201,6 +310,9 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 		}
 		roles, err := history.roles(ctx, group.Revision)
 		if err != nil {
+			if apierrors.IsNotFound(err) && history.canReplaceMissing(ctx, group.Revision, "") {
+				return templateDifferent
+			}
 			return templateUnknown
 		}
 		if utils.EqualRoleTemplatesForRevision(roles, ms.Spec.Template.Roles) {
@@ -214,7 +326,7 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 	}
 	result := templateEquivalent
 	for roleName, roles := range rolesByName {
-		expected, exists := remaining[roleName]
+		_, exists := remaining[roleName]
 		if !exists {
 			return templateDifferent
 		}
@@ -223,10 +335,10 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 		}
 		delete(remaining, roleName)
 		for _, role := range roles {
-			hash, ok := c.resolveRoleTemplateHashForComparison(ctx, ms, group, roleName, *role)
-			if !ok {
+			comparison := c.compareRoleTemplate(ctx, ms, group, roleName, *role)
+			if comparison == templateUnknown {
 				result = templateUnknown
-			} else if hash != utils.CalRoleTemplateHash(expected) {
+			} else if comparison == templateDifferent {
 				return templateDifferent
 			}
 		}
@@ -273,4 +385,32 @@ func (c *ModelServingController) revisionForServingGroup(ctx context.Context, ms
 		return current
 	}
 	return group.Revision
+}
+
+// Revision failures pause only operations that require the affected template.
+// Plugin/API mutation failures remain hard errors in the reconciliation path.
+type revisionResolutionError struct{ err error }
+
+func (e *revisionResolutionError) Error() string { return e.err.Error() }
+func (e *revisionResolutionError) Unwrap() error { return e.err }
+func isRevisionResolutionError(err error) bool {
+	switch e := err.(type) {
+	case *revisionResolutionError:
+		return true
+	case interface{ Unwrap() []error }:
+		nested := e.Unwrap()
+		if len(nested) == 0 {
+			return false
+		}
+		for _, cause := range nested {
+			if !isRevisionResolutionError(cause) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return isRevisionResolutionError(e.Unwrap())
+	default:
+		return false
+	}
 }
