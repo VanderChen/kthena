@@ -176,6 +176,7 @@ func TestAuditPartialListFailurePreservesStoreAndRetryIntent(t *testing.T) {
 func TestAuditUnknownHistoryBlocksRecovery(t *testing.T) {
 	ms, pods := auditFixture(workloadv1alpha1.RoleRecreate, 0)
 	pods[0].Labels[workloadv1alpha1.RevisionLabelKey] = "missing-history"
+	pods[0].Labels[workloadv1alpha1.RoleTemplateHashLabelKey] = "unknown-template"
 	c, kube := auditController(t, ms, pods...)
 	key := utils.GetNamespaceName(ms).String()
 	c.requestAudit(key, func(r *auditRequest) { r.live = true })

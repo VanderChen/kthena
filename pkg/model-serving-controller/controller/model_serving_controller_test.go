@@ -842,9 +842,10 @@ func TestCheckServingGroupReady(t *testing.T) {
 
 			store := datastore.New()
 			controller := &ModelServingController{
-				podsInformer: podInformer.Informer(),
-				podsLister:   podInformer.Lister(),
-				store:        store,
+				kubeClientSet: kubeClient,
+				podsInformer:  podInformer.Informer(),
+				podsLister:    podInformer.Lister(),
+				store:         store,
 			}
 
 			stop := make(chan struct{})
@@ -880,6 +881,8 @@ func TestCheckServingGroupReady(t *testing.T) {
 			// Run setup function
 			tt.setupFunc(t, controller, ms, groupName)
 
+			_, revisionErr := utils.CreateControllerRevision(context.Background(), kubeClient, ms, "hash123", ms.Spec.Template.Roles)
+			require.NoError(t, revisionErr)
 			// Execute test
 			ok, err := controller.checkServingGroupReady(ms, groupName)
 
@@ -3006,6 +3009,8 @@ func TestManageRoleReplicas(t *testing.T) {
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
 			revision := "rev-1"
+			_, revisionErr := utils.CreateControllerRevision(context.Background(), kubeClient, ms, revision, ms.Spec.Template.Roles)
+			require.NoError(t, revisionErr)
 			roleTemplateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
 			for _, roleID := range tt.initialRoleIDs {
@@ -5941,15 +5946,21 @@ func TestCheckRoleReady(t *testing.T) {
 			assert.NoError(t, err)
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
+			revision := utils.ModelServingRevision(ms)
+			controller.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), groupName, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), tt.roleName, tt.roleID)
+			_, revisionErr := utils.CreateControllerRevision(context.Background(), kubeClient, ms, revision, ms.Spec.Template.Roles)
+			require.NoError(t, revisionErr)
 
 			// Create pods for the role
 			podIndexer := controller.podsInformer.GetIndexer()
 			for i := 0; i < tt.podCount; i++ {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: ms.Namespace,
-						Name:      fmt.Sprintf("%s-%s-%d", tt.roleID, tt.roleName, i),
+						Namespace:       ms.Namespace,
+						Name:            utils.GeneratePodName(groupName, tt.roleID, i),
+						OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 						Labels: map[string]string{
+							workloadv1alpha1.RevisionLabelKey:         revision,
 							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
 							workloadv1alpha1.RoleLabelKey:             tt.roleName,
@@ -7896,6 +7907,8 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				},
 			}
 
+			_, revisionErr := utils.CreateControllerRevision(context.Background(), kubeClient, ms, revision, ms.Spec.Template.Roles)
+			require.NoError(t, revisionErr)
 			// Create controller with workqueue
 			controller := &ModelServingController{
 				kubeClientSet:    kubeClient,
@@ -7920,7 +7933,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ns,
-						Name:      existingPod.name,
+						Name:      utils.GeneratePodName(groupName, roleID, existingPod.workerID),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -7975,12 +7988,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			}
 
 			// Create the new pod that triggers handleReadyPod
-			var newPodName string
-			if tt.newPodIsEntry {
-				newPodName = groupName + "-" + roleName + "-0"
-			} else {
-				newPodName = fmt.Sprintf("%s-%s-%d", groupName, roleName, tt.newPodWorkerID)
-			}
+			newPodName := utils.GeneratePodName(groupName, roleID, tt.newPodWorkerID)
 
 			newPod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -8108,14 +8116,16 @@ func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
 
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Namespace: namespace,
-					Name:      "test-ms-0-a-0-entry",
+					Namespace:       namespace,
+					Name:            utils.GeneratePodName(groupName, roleID, 0),
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: msName,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
 						workloadv1alpha1.RoleLabelKey:             roleName,
 						workloadv1alpha1.RoleIDKey:                roleID,
-						workloadv1alpha1.RoleTemplateHashLabelKey: "target-hash",
+						workloadv1alpha1.RevisionLabelKey:         "old-revision",
+						workloadv1alpha1.RoleTemplateHashLabelKey: utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]),
 						workloadv1alpha1.EntryLabelKey:            utils.Entry,
 					},
 				},
@@ -9122,8 +9132,8 @@ func TestCheckServingGroupReadyDefaultsNilRoleReplicas(t *testing.T) {
 	}
 	key := utils.GetNamespaceName(ms)
 	groupName := utils.GenerateServingGroupName(ms.Name, 0)
-	controller.store.AddServingGroup(key, 0, "revision")
-	controller.store.AddRole(key, groupName, "decode", "decode-0", "revision", "hash")
+	controller.store.AddServingGroup(key, 0, utils.ModelServingRevision(ms))
+	controller.store.AddRole(key, groupName, "decode", "decode-0", utils.ModelServingRevision(ms), "hash")
 	require.NoError(t, controller.store.UpdateRoleStatus(key, groupName, "decode", "decode-0", datastore.RoleRunning))
 
 	ready, err := controller.checkServingGroupReady(ms, groupName)

@@ -265,15 +265,15 @@ func (c *ModelServingController) calibrateFailedObservation(ctx context.Context,
 }
 
 func (c *ModelServingController) observedRolePods(ctx context.Context, ms *workloadv1alpha1.ModelServing, group, name string, role datastore.Role) ([]*corev1.Pod, int, error) {
-	spec, err := c.revisionHistory(ctx, ms).role(ctx, role.Revision, name)
-	if err != nil {
-		return nil, 0, err
-	}
-	expected := 1 + int(spec.WorkerReplicas)
 	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, name, role.Name))
 	if err != nil {
 		return nil, 0, err
 	}
+	spec, _, _, err := c.revisionHistory(ctx, ms).instanceTemplate(ctx, group, name, role, pods)
+	if err != nil {
+		return nil, 0, err
+	}
+	expected := 1 + int(spec.WorkerReplicas)
 	owned := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
 		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
@@ -297,21 +297,26 @@ func (c *ModelServingController) observedRoleReady(ctx context.Context, ms *work
 	if len(pods) != expected {
 		return false, nil
 	}
+	allPods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, name, role.Name))
+	if err != nil {
+		return false, err
+	}
+	if len(allPods) != expected {
+		return false, nil
+	}
+	history := c.revisionHistory(ctx, ms)
+	baseline, revision, _, err := history.instanceTemplate(ctx, group, name, role, pods)
+	if err != nil {
+		return false, err
+	}
 	for _, pod := range pods {
 		progress := state.pods[pod.Name]
 		if pod.DeletionTimestamp != nil || !utils.IsPodRunningAndReady(pod) || progress == nil || !progress.ready || progress.pod.UID != pod.UID {
 			return false, nil
 		}
-		template, err := c.revisionHistory(ctx, ms).role(ctx, utils.ObjectRevision(pod), name)
-		if err != nil {
+		matches, err := history.podMatchesTemplate(ctx, pod, baseline, revision)
+		if err != nil || !matches {
 			return false, err
-		}
-		baseline, err := c.revisionHistory(ctx, ms).role(ctx, role.Revision, name)
-		if err != nil {
-			return false, err
-		}
-		if !utils.EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{template}, []workloadv1alpha1.Role{baseline}) {
-			return false, nil
 		}
 	}
 	return true, nil
