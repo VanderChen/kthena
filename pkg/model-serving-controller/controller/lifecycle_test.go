@@ -46,7 +46,7 @@ func TestModelServingCanceledCacheSyncDoesNotInitialize(t *testing.T) {
 				})
 			}
 			c.Run(ctx, 1)
-			require.False(t, c.initialSync)
+			require.False(t, c.initialSync.Load())
 			require.True(t, c.workqueue.ShuttingDown())
 		})
 	}

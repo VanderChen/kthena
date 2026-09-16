@@ -76,7 +76,7 @@ func recoveryController(t *testing.T, ms *workloadv1alpha1.ModelServing, pods ..
 		require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
 		c.addPod(pod)
 	}
-	c.initialSync = true
+	c.initialSync.Store(true)
 	t.Cleanup(c.workqueue.ShutDown)
 	return c, kube
 }
