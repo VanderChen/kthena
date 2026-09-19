@@ -22,6 +22,7 @@ package v1alpha1
 // with apply.
 type WorkloadPortApplyConfiguration struct {
 	Port     *int32  `json:"port,omitempty"`
+	PortName *string `json:"portName,omitempty"`
 	Protocol *string `json:"protocol,omitempty"`
 }
 
@@ -36,6 +37,14 @@ func WorkloadPort() *WorkloadPortApplyConfiguration {
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *WorkloadPortApplyConfiguration) WithPort(value int32) *WorkloadPortApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithPortName sets the PortName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PortName field is set to the value of the last call.
+func (b *WorkloadPortApplyConfiguration) WithPortName(value string) *WorkloadPortApplyConfiguration {
+	b.PortName = &value
 	return b
 }
 
