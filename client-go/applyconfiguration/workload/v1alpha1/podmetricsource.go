@@ -28,6 +28,7 @@ type PodMetricSourceApplyConfiguration struct {
 	Name          *string                             `json:"name,omitempty"`
 	Uri           *string                             `json:"uri,omitempty"`
 	Port          *int32                              `json:"port,omitempty"`
+	PortName      *string                             `json:"portName,omitempty"`
 	LabelSelector *v1.LabelSelectorApplyConfiguration `json:"labelSelector,omitempty"`
 }
 
@@ -58,6 +59,14 @@ func (b *PodMetricSourceApplyConfiguration) WithUri(value string) *PodMetricSour
 // If called multiple times, the Port field is set to the value of the last call.
 func (b *PodMetricSourceApplyConfiguration) WithPort(value int32) *PodMetricSourceApplyConfiguration {
 	b.Port = &value
+	return b
+}
+
+// WithPortName sets the PortName field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the PortName field is set to the value of the last call.
+func (b *PodMetricSourceApplyConfiguration) WithPortName(value string) *PodMetricSourceApplyConfiguration {
+	b.PortName = &value
 	return b
 }
 
