@@ -2720,7 +2720,7 @@ func (c *ModelServingController) updateModelServingStatus(
 			copy.Status.UpdateRevision = updateRevision
 		}
 
-		if copy.Spec.RolloutStrategy == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration == nil || copy.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition == nil {
+		if modelServingPartition(copy) == nil {
 			// if not set spec.RolloutStrategy.RollingUpdateConfiguration.Partition,
 			// should set currentReplicas = updatedReplicas when rolling update is over.
 			if copy.Status.UpdatedReplicas == int32(replicas) &&
@@ -2794,7 +2794,8 @@ func (c *ModelServingController) getPartition(partitionConfig *intstr.IntOrStrin
 }
 
 func modelServingPartition(ms *workloadv1alpha1.ModelServing) *intstr.IntOrString {
-	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate ||
+		ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {
 		return nil
 	}
 	return ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition

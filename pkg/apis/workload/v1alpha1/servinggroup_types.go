@@ -69,7 +69,8 @@ type NetworkTopology struct {
 
 // Role defines the specific pod instance role that performs the inference task.
 type Role struct {
-	// The name of a role. Name must be unique within an ServingGroup
+	// The name of a role. Must be a unique DNS-1035 label within the ServingGroup,
+	// with at most 12 characters.
 	// +kubebuilder:validation:MaxLength=12
 	// +kubebuilder:validation:Pattern=^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
 	Name string `json:"name"`
@@ -147,6 +148,7 @@ type ServingGroup struct {
 	// +optional
 	NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
 
+	// Roles contains between 1 and 4 roles with unique names.
 	// +kubebuilder:validation:MaxItems=4
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:XValidation:rule="self.all(x, self.exists_one(y, y.name == x.name))", message="roles name must be unique"

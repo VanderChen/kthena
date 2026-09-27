@@ -18,10 +18,12 @@ package webhook
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -29,6 +31,27 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
+
+func validateRoleCoordinationImmutable(oldMS, newMS *workloadv1alpha1.ModelServing) field.ErrorList {
+	canonical := func(ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.RoleCoordination {
+		if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RoleCoordination == nil {
+			return nil
+		}
+		coordination := ms.Spec.RolloutStrategy.RoleCoordination.DeepCopy()
+		// These fields are declared as sets and a map in the API. Reordering
+		// them does not change policy, and validation must not mutate the object.
+		slices.Sort(coordination.Roles)
+		for i := range coordination.Dependencies {
+			slices.Sort(coordination.Dependencies[i].DependsOn)
+		}
+		slices.SortFunc(coordination.Dependencies, func(a, b workloadv1alpha1.RoleRolloutDependency) int {
+			return strings.Compare(a.Role, b.Role)
+		})
+		return coordination
+	}
+	return apivalidation.ValidateImmutableField(canonical(newMS), canonical(oldMS),
+		field.NewPath("spec", "rolloutStrategy", "roleCoordination"))
+}
 
 func validateRoleCoordination(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList

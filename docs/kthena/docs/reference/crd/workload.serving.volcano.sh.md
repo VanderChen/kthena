@@ -575,7 +575,7 @@ _Appears in:_
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
-| `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. | 10 | Minimum: 0 <br /> |
+| `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. Must be non-negative. | 10 | Minimum: 0 <br /> |
 
 
 #### ModelServingStatus
@@ -901,13 +901,13 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `name` _string_ | The name of a role. Name must be unique within an ServingGroup |  | MaxLength: 12 <br />Pattern: `^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$` <br /> |
+| `name` _string_ | The name of a role. Must be a unique DNS-1035 label within the ServingGroup,<br />with at most 12 characters. |  | MaxLength: 12 <br />Pattern: `^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$` <br /> |
 | `replicas` _integer_ | The number of a certain role.<br />For example, in Disaggregated Prefilling, setting the replica count for both the P and D roles to 1 results in 1P1D deployment configuration.<br />This approach can similarly be applied to configure a xPyD deployment scenario.<br />Default to 1. | 1 |  |
 | `entryTemplate` _[PodTemplateSpec](#podtemplatespec)_ | EntryTemplate defines the template for the entry pod of a role.<br />Required: Currently, a role must have only one entry-pod. |  |  |
 | `workerReplicas` _integer_ | WorkerReplicas defines the number for the worker pod of a role.<br />Required: Need to set the number of worker-pod replicas. |  |  |
 | `workerTemplate` _[PodTemplateSpec](#podtemplatespec)_ | WorkerTemplate defines the template for the worker pod of a role. |  |  |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down. A<br />non-zero ServingGroup percentage has an effective minimum value of one.<br />It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
-| `maxSurge` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSurge is the maximum number of resources that may be created above<br />the desired replica count during an update. It can be an absolute number<br />(for example, 1) or a percentage (for example, 25%). A percentage is<br />calculated from ModelServing replicas for ServingGroupRollingUpdate and<br />from the corresponding Role's replicas for RoleRollingUpdate, then rounded<br />up. It defaults to 0. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down.<br />Percentages must be within 0-100%. At the active rollout granularity,<br />integers must not exceed replicas, except that the default 1 is valid at<br />zero replicas. Admission rejects budgets that both resolve to zero, even<br />at zero replicas or when partition protects all replicas. Omitted MaxSurge<br />resolves to zero.<br />Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `maxSurge` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSurge is the maximum number of resources that may be created above<br />the desired replica count during an update. It can be an absolute number<br />(for example, 1) or a percentage (for example, 25%). Percentages may exceed<br />100%, but replicas plus resolved surge must fit in a non-negative int32. A percentage is<br />calculated from ModelServing replicas for ServingGroupRollingUpdate and<br />from the corresponding Role's replicas for RoleRollingUpdate, then rounded<br />up. It defaults to 0. |  | XIntOrString: \{\} <br /> |
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
@@ -934,7 +934,7 @@ _Appears in:_
 
 
 RoleAffinityTerm selects Role policy names and the topology tier used to
-compare their SubJobs. Exactly one topology tier field must be set.
+compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
 
 
 
@@ -944,10 +944,10 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `roles` _string array_ | Roles contains names from spec.template.roles. |  | MinItems: 1 <br /> |
+| `roles` _string array_ | Roles contains distinct names from spec.template.roles: at least two for<br />affinity and at least one for anti-affinity. |  | MinItems: 1 <br /> |
 | `weight` _integer_ | Weight applies only to preferred terms and must be between 1 and 100. |  | Maximum: 100 <br />Minimum: 1 <br /> |
-| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName. |  | MaxLength: 253 <br /> |
-| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier. |  | Minimum: 0 <br /> |
+| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName, with at most 253 characters. |  | MaxLength: 253 <br /> |
+| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier and must be non-negative. |  | Minimum: 0 <br /> |
 
 
 #### RoleAntiAffinity
@@ -1075,8 +1075,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down. A<br />non-zero ServingGroup percentage has an effective minimum value of one.<br />It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
-| `maxSurge` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSurge is the maximum number of resources that may be created above<br />the desired replica count during an update. It can be an absolute number<br />(for example, 1) or a percentage (for example, 25%). A percentage is<br />calculated from ModelServing replicas for ServingGroupRollingUpdate and<br />from the corresponding Role's replicas for RoleRollingUpdate, then rounded<br />up. It defaults to 0. |  | XIntOrString: \{\} <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable is the maximum number of resources that may be<br />unavailable during an update. It can be an absolute number (for example,<br />5) or a percentage (for example, 10%). A percentage is calculated from<br />ModelServing replicas for ServingGroupRollingUpdate and from the<br />corresponding Role's replicas for RoleRollingUpdate, then rounded down.<br />Percentages must be within 0-100%. At the active rollout granularity,<br />integers must not exceed replicas, except that the default 1 is valid at<br />zero replicas. Admission rejects budgets that both resolve to zero, even<br />at zero replicas or when partition protects all replicas. Omitted MaxSurge<br />resolves to zero.<br />Defaults to 1. | 1 | XIntOrString: \{\} <br /> |
+| `maxSurge` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSurge is the maximum number of resources that may be created above<br />the desired replica count during an update. It can be an absolute number<br />(for example, 1) or a percentage (for example, 25%). Percentages may exceed<br />100%, but replicas plus resolved surge must fit in a non-negative int32. A percentage is<br />calculated from ModelServing replicas for ServingGroupRollingUpdate and<br />from the corresponding Role's replicas for RoleRollingUpdate, then rounded<br />up. It defaults to 0. |  | XIntOrString: \{\} <br /> |
 | `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition protects the first N existing replicas in ascending ordinal order<br />from updates. The remaining replicas are eligible for rolling update.<br />For a contiguous ordinal set, this is equivalent to protecting [0, Partition).<br />Value can be an absolute number (ex: 5) or a percentage of total replicas (ex: 10%).<br />Absolute number is calculated from percentage by rounding up.<br />The default value is 0. |  | XIntOrString: \{\} <br /> |
 
 
@@ -1094,8 +1094,8 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration must not be set.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
-| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It must not be set when type is RoleRollingUpdate; configure maxUnavailable<br />maxSurge, and partition on each Role instead. |  |  |
+| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type selects the granularity of rolling updates. Supported values are<br />ServingGroupRollingUpdate and RoleRollingUpdate. It defaults to<br />ServingGroupRollingUpdate.<br />ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;<br />rolling update settings on individual Roles do not take effect.<br />RoleRollingUpdate uses the rolling update configuration on each Role;<br />rolloutStrategy.rollingUpdateConfiguration does not take effect.<br />Kthena performs RoleRollingUpdate across all ServingGroups at the same time.<br />Therefore, we recommend using it only in scenarios with a single ServingGroup. | ServingGroupRollingUpdate | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `rollingUpdateConfiguration` _[RollingUpdateConfiguration](#rollingupdateconfiguration)_ | RollingUpdateConfiguration configures ServingGroupRollingUpdate.<br />It does not take effect when type is RoleRollingUpdate; configure maxUnavailable<br />maxSurge, and partition on each Role instead. |  |  |
 | `roleCoordination` _[RoleCoordination](#rolecoordination)_ | RoleCoordination defines the cross-Role coordination parameters to be used<br />when type is RoleRollingUpdate. |  |  |
 | `evictionStrategy` _[EvictionStrategySpec](#evictionstrategyspec)_ | EvictionStrategy defines the protection policy during node eviction. |  |  |
 
@@ -1105,9 +1105,8 @@ _Appears in:_
 _Underlying type:_ _string_
 
 RolloutStrategyType defines the strategy to use to update replicas.
-Note that if recoveryPolicy is ServingGroupRecreate and the rollout strategy
-is RoleRollingUpdate, deleting an outdated Role causes its entire ServingGroup
-to be recreated.
+RoleRollingUpdate cannot use recoveryPolicy ServingGroupRecreate because
+deleting an outdated Role would recreate its entire ServingGroup.
 
 
 
@@ -1154,7 +1153,7 @@ _Appears in:_
 | `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error) | 0 |  |
 | `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy defines the gang scheduler config. |  |  |
 | `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines topology-aware aggregation and relationship<br />policies for ServingGroups and Roles on the scheduler's HyperNode tree.<br />The field is immutable after the ModelServing is created so Pods added by<br />later scaling operations use the same topology constraints as existing Pods. |  |  |
-| `roles` _[Role](#role) array_ |  |  | MaxItems: 4 <br />MinItems: 1 <br /> |
+| `roles` _[Role](#role) array_ | Roles contains between 1 and 4 roles with unique names. |  | MaxItems: 4 <br />MinItems: 1 <br /> |
 
 
 #### ServingGroupAffinityTerm
@@ -1162,7 +1161,7 @@ _Appears in:_
 
 
 ServingGroupAffinityTerm selects the topology tier used to compare peer
-ServingGroups. Exactly one topology tier field must be set.
+ServingGroups. Required and preferred terms must each specify exactly one topology tier.
 
 
 
@@ -1172,8 +1171,8 @@ _Appears in:_
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `weight` _integer_ | Weight applies only to preferred terms and must be between 1 and 100. |  | Maximum: 100 <br />Minimum: 1 <br /> |
-| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName. |  | MaxLength: 253 <br /> |
-| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier. |  | Minimum: 0 <br /> |
+| `topologyTierName` _string_ | TopologyTierName refers to HyperNode.spec.tierName, with at most 253 characters. |  | MaxLength: 253 <br /> |
+| `topologyTier` _integer_ | TopologyTier refers to HyperNode.spec.tier and must be non-negative. |  | Minimum: 0 <br /> |
 
 
 #### ServingGroupAntiAffinity

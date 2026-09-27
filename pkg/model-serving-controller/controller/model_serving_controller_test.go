@@ -8603,6 +8603,20 @@ func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {
 			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupRunning}},
 			wantOutdatedLeft: 1,
 		},
+		{
+			name:             "percentage rounding to zero waits for surge readiness",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromString("25%"),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupCreating}},
+			wantOutdatedLeft: 2,
+		},
+		{
+			name:             "percentage rounding to zero progresses with ready surge",
+			maxSurge:         ptr.To(intstr.FromInt(1)),
+			maxUnavailable:   intstr.FromString("25%"),
+			groups:           []datastore.ServingGroup{{Name: "rollout-0", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-1", Revision: "old", Status: datastore.ServingGroupRunning}, {Name: "rollout-2", Revision: "new", Status: datastore.ServingGroupRunning}},
+			wantOutdatedLeft: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -9160,10 +9174,11 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 	outdatedHash := "outdated-hash"
 
 	tests := []struct {
-		name              string
-		maxUnavailable    *intstr.IntOrString
-		statuses          []datastore.RoleStatus
-		expectedDeletions int
+		name                string
+		maxUnavailable      *intstr.IntOrString
+		statuses            []datastore.RoleStatus
+		expectedDeletions   int
+		inactiveGroupBudget bool
 	}{
 		{
 			name:              "unset deletes all outdated replicas",
@@ -9181,6 +9196,13 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 			maxUnavailable:    ptr.To(intstr.FromInt(2)),
 			statuses:          []datastore.RoleStatus{datastore.RoleRunning, datastore.RoleRunning, datastore.RoleCreating, datastore.RoleCreating},
 			expectedDeletions: 2,
+		},
+		{
+			name:                "manageRollingUpdate ignores inactive ServingGroup partition and budgets",
+			maxUnavailable:      ptr.To(intstr.FromInt(2)),
+			statuses:            []datastore.RoleStatus{datastore.RoleRunning, datastore.RoleRunning, datastore.RoleRunning, datastore.RoleRunning},
+			expectedDeletions:   2,
+			inactiveGroupBudget: true,
 		},
 	}
 
@@ -9216,6 +9238,13 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 			}
 
 			recordDifferentRevision(t, controller, ms, oldRevision)
+			if tt.inactiveGroupBudget {
+				ms.Spec.RolloutStrategy.RollingUpdateConfiguration = &workloadv1alpha1.RollingUpdateConfiguration{
+					MaxUnavailable: ptr.To(intstr.FromInt(0)),
+					MaxSurge:       ptr.To(intstr.FromInt(0)),
+					Partition:      ptr.To(intstr.FromInt(100)),
+				}
+			}
 			nsn := utils.GetNamespaceName(ms)
 			controller.store.AddServingGroup(nsn, 0, oldRevision)
 			for i, status := range tt.statuses {
@@ -9224,11 +9253,15 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", roleID, status))
 			}
 
-			_, err = controller.deleteOutdatedRoles(
-				context.Background(), ms,
-				[]datastore.ServingGroup{{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}},
-				newRevision, nil,
-			)
+			if tt.inactiveGroupBudget {
+				err = controller.manageRollingUpdate(context.Background(), ms, newRevision, &roleRolloutPolicy{})
+			} else {
+				_, err = controller.deleteOutdatedRoles(
+					context.Background(), ms,
+					[]datastore.ServingGroup{{Name: groupName, Revision: oldRevision, Status: datastore.ServingGroupRunning}},
+					newRevision, nil,
+				)
+			}
 			require.NoError(t, err)
 
 			deletions := 0

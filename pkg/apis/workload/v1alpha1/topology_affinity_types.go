@@ -65,7 +65,7 @@ type RoleAntiAffinity struct {
 }
 
 // ServingGroupAffinityTerm selects the topology tier used to compare peer
-// ServingGroups. Exactly one topology tier field must be set.
+// ServingGroups. Required and preferred terms must each specify exactly one topology tier.
 // +kubebuilder:validation:XValidation:rule="has(self.topologyTierName) != has(self.topologyTier)",message="exactly one of topologyTierName and topologyTier must be set"
 type ServingGroupAffinityTerm struct {
 	// Weight applies only to preferred terms and must be between 1 and 100.
@@ -74,22 +74,23 @@ type ServingGroupAffinityTerm struct {
 	// +optional
 	Weight *int32 `json:"weight,omitempty"`
 
-	// TopologyTierName refers to HyperNode.spec.tierName.
+	// TopologyTierName refers to HyperNode.spec.tierName, with at most 253 characters.
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	TopologyTierName string `json:"topologyTierName,omitempty"`
 
-	// TopologyTier refers to HyperNode.spec.tier.
+	// TopologyTier refers to HyperNode.spec.tier and must be non-negative.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TopologyTier *int32 `json:"topologyTier,omitempty"`
 }
 
 // RoleAffinityTerm selects Role policy names and the topology tier used to
-// compare their SubJobs. Exactly one topology tier field must be set.
+// compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
 // +kubebuilder:validation:XValidation:rule="has(self.topologyTierName) != has(self.topologyTier)",message="exactly one of topologyTierName and topologyTier must be set"
 type RoleAffinityTerm struct {
-	// Roles contains names from spec.template.roles.
+	// Roles contains distinct names from spec.template.roles: at least two for
+	// affinity and at least one for anti-affinity.
 	// +kubebuilder:validation:MinItems=1
 	// +listType=set
 	Roles []string `json:"roles"`
@@ -100,12 +101,12 @@ type RoleAffinityTerm struct {
 	// +optional
 	Weight *int32 `json:"weight,omitempty"`
 
-	// TopologyTierName refers to HyperNode.spec.tierName.
+	// TopologyTierName refers to HyperNode.spec.tierName, with at most 253 characters.
 	// +kubebuilder:validation:MaxLength=253
 	// +optional
 	TopologyTierName string `json:"topologyTierName,omitempty"`
 
-	// TopologyTier refers to HyperNode.spec.tier.
+	// TopologyTier refers to HyperNode.spec.tier and must be non-negative.
 	// +kubebuilder:validation:Minimum=0
 	// +optional
 	TopologyTier *int32 `json:"topologyTier,omitempty"`

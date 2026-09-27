@@ -637,21 +637,9 @@ func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 			maxUnavailable = *ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
 		}
 	}
-	// Calculate maxUnavailable as absolute numbers
-	resolved, err := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
-	if err != nil {
-		return 0, err
-	}
-	if replicas > 0 && resolved == 0 && maxUnavailable.Type == intstr.String {
-		configuredPercentage, percentageErr := intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, 100, false)
-		if percentageErr != nil {
-			return 0, percentageErr
-		}
-		if configuredPercentage > 0 {
-			resolved = 1
-		}
-	}
-	return resolved, nil
+	// Resolve against the desired replica count, rounding down. A percentage
+	// may resolve to zero; maxSurge can provide capacity for the rollout.
+	return intstr.GetScaledValueFromIntOrPercent(&maxUnavailable, replicas, false)
 }
 
 // GetMaxSurge resolves the ServingGroup surge budget against the latest
