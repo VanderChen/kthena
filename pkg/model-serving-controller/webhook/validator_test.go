@@ -159,7 +159,8 @@ func TestModelServingValidatorNetworkTopologyIsImmutableOnUpdate(t *testing.T) {
 				Template: workloadv1alpha1.ServingGroup{
 					NetworkTopology: &workloadv1alpha1.NetworkTopology{
 						GroupPolicy: &schedulingv1beta1.NetworkTopologySpec{
-							Mode: schedulingv1beta1.HardNetworkTopologyMode,
+							Mode:            schedulingv1beta1.HardNetworkTopologyMode,
+							HighestTierName: "rack",
 						},
 						ServingGroupAntiAffinity: &workloadv1alpha1.ServingGroupAntiAffinity{
 							Required: []workloadv1alpha1.ServingGroupAffinityTerm{{TopologyTierName: "rack"}},
@@ -573,7 +574,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: field.ErrorList(nil),
 		},
 		{
-			name: "rejects configuration for role rolling update",
+			name: "ignores configuration for role rolling update",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -590,12 +591,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList{
-				field.Forbidden(
-					field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration"),
-					"rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate",
-				),
-			},
+			want: nil,
 		},
 		{
 			name: "invalid maxUnavailable format",
@@ -673,7 +669,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "allows non-zero percentage maxUnavailable that rounds down",
+			name: "rejects percentage unavailable that rounds down to zero with omitted surge",
 			args: args{ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				Replicas: &replicas,
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
@@ -683,10 +679,10 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			}}},
-			want: nil,
+			want: field.ErrorList{field.Invalid(field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration"), "", "maxUnavailable and maxSurge cannot both resolve to 0")},
 		},
 		{
-			name: "maxUnavailable greater than replicas is allowed for scale down",
+			name: "rejects maxUnavailable greater than replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -702,7 +698,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: field.ErrorList(nil),
+			want: field.ErrorList{field.Invalid(field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration", "maxUnavailable"), ptr.To(intstr.FromInt(4)), "cannot be greater than replicas (3)")},
 		},
 		{
 			name: "valid partition - within range",
@@ -783,7 +779,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "valid partition - greater than replicas",
+			name: "invalid partition - greater than replicas",
 			args: args{
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
@@ -812,7 +808,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 					},
 				},
 			},
-			want: nil,
+			want: field.ErrorList{field.Invalid(field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration", "partition"), ptr.To(intstr.FromInt(5)), "cannot be greater than replicas (3)")},
 		},
 		{
 			name: "valid partition - zero value",
@@ -940,7 +936,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			}},
 		},
 		{
-			name: "requires role rolling update for partition",
+			name: "ignores role partition during serving group rolling update",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
@@ -951,7 +947,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 					},
 				}}},
 			}},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "allows role maxSurge",
@@ -982,7 +978,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			}},
 		},
 		{
-			name: "rejects role maxSurge for serving group rolling update",
+			name: "ignores role maxSurge during serving group rolling update",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
 				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
@@ -993,7 +989,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 					},
 				}}},
 			}},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "rejects maxUnavailable greater than role replicas",
@@ -1785,7 +1781,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 				field.Invalid(
 					field.NewPath("spec").Child("rolloutStrategy").Child("type"),
 					workloadv1alpha1.RoleRollingUpdate,
-					"incompatible recoveryPolicy and rolloutStrategy.type after applying defaults: recoveryPolicy=ServingGroupRecreate, rolloutStrategy.type=RoleRollingUpdate; valid pairs: (ServingGroupRecreate,ServingGroupRollingUpdate) or (RoleRecreate,RoleRollingUpdate)",
+					"RoleRollingUpdate does not support ServingGroupRecreate; use RoleRecreate or None",
 				),
 			},
 		},

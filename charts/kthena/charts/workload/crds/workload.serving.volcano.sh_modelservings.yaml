@@ -123,7 +123,7 @@ spec:
                 description: |-
                   RevisionHistoryLimit is the maximum number of non-live revisions to retain.
                   Revisions still referenced by the ModelServing or its workloads do not count
-                  toward this limit.
+                  toward this limit. Must be non-negative.
                 format: int32
                 minimum: 0
                 type: integer
@@ -221,7 +221,7 @@ spec:
                   rollingUpdateConfiguration:
                     description: |-
                       RollingUpdateConfiguration configures ServingGroupRollingUpdate.
-                      It must not be set when type is RoleRollingUpdate; configure maxUnavailable
+                      It does not take effect when type is RoleRollingUpdate; configure maxUnavailable
                       maxSurge, and partition on each Role instead.
                     properties:
                       maxSurge:
@@ -231,7 +231,8 @@ spec:
                         description: |-
                           MaxSurge is the maximum number of resources that may be created above
                           the desired replica count during an update. It can be an absolute number
-                          (for example, 1) or a percentage (for example, 25%). A percentage is
+                          (for example, 1) or a percentage (for example, 25%). Percentages may exceed
+                          100%, but replicas plus resolved surge must fit in a non-negative int32. A percentage is
                           calculated from ModelServing replicas for ServingGroupRollingUpdate and
                           from the corresponding Role's replicas for RoleRollingUpdate, then rounded
                           up. It defaults to 0.
@@ -246,9 +247,13 @@ spec:
                           unavailable during an update. It can be an absolute number (for example,
                           5) or a percentage (for example, 10%). A percentage is calculated from
                           ModelServing replicas for ServingGroupRollingUpdate and from the
-                          corresponding Role's replicas for RoleRollingUpdate, then rounded down. A
-                          non-zero ServingGroup percentage has an effective minimum value of one.
-                          It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
+                          corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+                          Percentages must be within 0-100%. At the active rollout granularity,
+                          integers must not exceed replicas, except that the default 1 is valid at
+                          zero replicas. Admission rejects budgets that both resolve to zero, even
+                          at zero replicas or when partition protects all replicas. Omitted MaxSurge
+                          resolves to zero.
+                          Defaults to 1.
                         x-kubernetes-int-or-string: true
                       partition:
                         anyOf:
@@ -273,7 +278,7 @@ spec:
                       ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;
                       rolling update settings on individual Roles do not take effect.
                       RoleRollingUpdate uses the rolling update configuration on each Role;
-                      rolloutStrategy.rollingUpdateConfiguration must not be set.
+                      rolloutStrategy.rollingUpdateConfiguration does not take effect.
                       Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
                       Therefore, we recommend using it only in scenarios with a single ServingGroup.
                     enum:
@@ -360,22 +365,26 @@ spec:
                             items:
                               description: |-
                                 RoleAffinityTerm selects Role policy names and the topology tier used to
-                                compare their SubJobs. Exactly one topology tier field must be set.
+                                compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 roles:
-                                  description: Roles contains names from spec.template.roles.
+                                  description: |-
+                                    Roles contains distinct names from spec.template.roles: at least two for
+                                    affinity and at least one for anti-affinity.
                                   items:
                                     type: string
                                   minItems: 1
                                   type: array
                                   x-kubernetes-list-type: set
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -400,22 +409,26 @@ spec:
                             items:
                               description: |-
                                 RoleAffinityTerm selects Role policy names and the topology tier used to
-                                compare their SubJobs. Exactly one topology tier field must be set.
+                                compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 roles:
-                                  description: Roles contains names from spec.template.roles.
+                                  description: |-
+                                    Roles contains distinct names from spec.template.roles: at least two for
+                                    affinity and at least one for anti-affinity.
                                   items:
                                     type: string
                                   minItems: 1
                                   type: array
                                   x-kubernetes-list-type: set
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -452,22 +465,26 @@ spec:
                             items:
                               description: |-
                                 RoleAffinityTerm selects Role policy names and the topology tier used to
-                                compare their SubJobs. Exactly one topology tier field must be set.
+                                compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 roles:
-                                  description: Roles contains names from spec.template.roles.
+                                  description: |-
+                                    Roles contains distinct names from spec.template.roles: at least two for
+                                    affinity and at least one for anti-affinity.
                                   items:
                                     type: string
                                   minItems: 1
                                   type: array
                                   x-kubernetes-list-type: set
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -492,22 +509,26 @@ spec:
                             items:
                               description: |-
                                 RoleAffinityTerm selects Role policy names and the topology tier used to
-                                compare their SubJobs. Exactly one topology tier field must be set.
+                                compare their SubJobs. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 roles:
-                                  description: Roles contains names from spec.template.roles.
+                                  description: |-
+                                    Roles contains distinct names from spec.template.roles: at least two for
+                                    affinity and at least one for anti-affinity.
                                   items:
                                     type: string
                                   minItems: 1
                                   type: array
                                   x-kubernetes-list-type: set
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -569,15 +590,17 @@ spec:
                             items:
                               description: |-
                                 ServingGroupAffinityTerm selects the topology tier used to compare peer
-                                ServingGroups. Exactly one topology tier field must be set.
+                                ServingGroups. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -600,15 +623,17 @@ spec:
                             items:
                               description: |-
                                 ServingGroupAffinityTerm selects the topology tier used to compare peer
-                                ServingGroups. Exactly one topology tier field must be set.
+                                ServingGroups. Required and preferred terms must each specify exactly one topology tier.
                               properties:
                                 topologyTier:
-                                  description: TopologyTier refers to HyperNode.spec.tier.
+                                  description: TopologyTier refers to HyperNode.spec.tier
+                                    and must be non-negative.
                                   format: int32
                                   minimum: 0
                                   type: integer
                                 topologyTierName:
-                                  description: TopologyTierName refers to HyperNode.spec.tierName.
+                                  description: TopologyTierName refers to HyperNode.spec.tierName,
+                                    with at most 253 characters.
                                   maxLength: 253
                                   type: string
                                 weight:
@@ -641,6 +666,8 @@ spec:
                     format: int64
                     type: integer
                   roles:
+                    description: Roles contains between 1 and 4 roles with unique
+                      names.
                     items:
                       description: Role defines the specific pod instance role that
                         performs the inference task.
@@ -9280,7 +9307,8 @@ spec:
                           description: |-
                             MaxSurge is the maximum number of resources that may be created above
                             the desired replica count during an update. It can be an absolute number
-                            (for example, 1) or a percentage (for example, 25%). A percentage is
+                            (for example, 1) or a percentage (for example, 25%). Percentages may exceed
+                            100%, but replicas plus resolved surge must fit in a non-negative int32. A percentage is
                             calculated from ModelServing replicas for ServingGroupRollingUpdate and
                             from the corresponding Role's replicas for RoleRollingUpdate, then rounded
                             up. It defaults to 0.
@@ -9295,13 +9323,18 @@ spec:
                             unavailable during an update. It can be an absolute number (for example,
                             5) or a percentage (for example, 10%). A percentage is calculated from
                             ModelServing replicas for ServingGroupRollingUpdate and from the
-                            corresponding Role's replicas for RoleRollingUpdate, then rounded down. A
-                            non-zero ServingGroup percentage has an effective minimum value of one.
-                            It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
+                            corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+                            Percentages must be within 0-100%. At the active rollout granularity,
+                            integers must not exceed replicas, except that the default 1 is valid at
+                            zero replicas. Admission rejects budgets that both resolve to zero, even
+                            at zero replicas or when partition protects all replicas. Omitted MaxSurge
+                            resolves to zero.
+                            Defaults to 1.
                           x-kubernetes-int-or-string: true
                         name:
-                          description: The name of a role. Name must be unique within
-                            an ServingGroup
+                          description: |-
+                            The name of a role. Must be a unique DNS-1035 label within the ServingGroup,
+                            with at most 12 characters.
                           maxLength: 12
                           pattern: ^[a-zA-Z0-9]([-a-zA-Z0-9]*[a-zA-Z0-9])?$
                           type: string

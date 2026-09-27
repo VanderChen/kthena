@@ -67,7 +67,7 @@ type ModelServingSpec struct {
 
 	// RevisionHistoryLimit is the maximum number of non-live revisions to retain.
 	// Revisions still referenced by the ModelServing or its workloads do not count
-	// toward this limit.
+	// toward this limit. Must be non-negative.
 	// +optional
 	// +kubebuilder:default=10
 	// +kubebuilder:validation:Minimum=0
@@ -149,7 +149,7 @@ type RolloutStrategy struct {
 	// ServingGroupRollingUpdate uses rolloutStrategy.rollingUpdateConfiguration;
 	// rolling update settings on individual Roles do not take effect.
 	// RoleRollingUpdate uses the rolling update configuration on each Role;
-	// rolloutStrategy.rollingUpdateConfiguration must not be set.
+	// rolloutStrategy.rollingUpdateConfiguration does not take effect.
 	// Kthena performs RoleRollingUpdate across all ServingGroups at the same time.
 	// Therefore, we recommend using it only in scenarios with a single ServingGroup.
 	//
@@ -158,7 +158,7 @@ type RolloutStrategy struct {
 	Type RolloutStrategyType `json:"type"`
 
 	// RollingUpdateConfiguration configures ServingGroupRollingUpdate.
-	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
+	// It does not take effect when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
 	// +optional
 	RollingUpdateConfiguration *RollingUpdateConfiguration `json:"rollingUpdateConfiguration,omitempty"`
@@ -207,9 +207,8 @@ type EvictionStrategySpec struct {
 }
 
 // RolloutStrategyType defines the strategy to use to update replicas.
-// Note that if recoveryPolicy is ServingGroupRecreate and the rollout strategy
-// is RoleRollingUpdate, deleting an outdated Role causes its entire ServingGroup
-// to be recreated.
+// RoleRollingUpdate cannot use recoveryPolicy ServingGroupRecreate because
+// deleting an outdated Role would recreate its entire ServingGroup.
 type RolloutStrategyType string
 
 const (
@@ -227,16 +226,21 @@ type RollingUpdateConfiguration struct {
 	// unavailable during an update. It can be an absolute number (for example,
 	// 5) or a percentage (for example, 10%). A percentage is calculated from
 	// ModelServing replicas for ServingGroupRollingUpdate and from the
-	// corresponding Role's replicas for RoleRollingUpdate, then rounded down. A
-	// non-zero ServingGroup percentage has an effective minimum value of one.
-	// It may resolve to 0 only when MaxSurge resolves above 0. Defaults to 1.
+	// corresponding Role's replicas for RoleRollingUpdate, then rounded down.
+	// Percentages must be within 0-100%. At the active rollout granularity,
+	// integers must not exceed replicas, except that the default 1 is valid at
+	// zero replicas. Admission rejects budgets that both resolve to zero, even
+	// at zero replicas or when partition protects all replicas. Omitted MaxSurge
+	// resolves to zero.
+	// Defaults to 1.
 	// +kubebuilder:validation:XIntOrString
 	// +kubebuilder:default=1
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 
 	// MaxSurge is the maximum number of resources that may be created above
 	// the desired replica count during an update. It can be an absolute number
-	// (for example, 1) or a percentage (for example, 25%). A percentage is
+	// (for example, 1) or a percentage (for example, 25%). Percentages may exceed
+	// 100%, but replicas plus resolved surge must fit in a non-negative int32. A percentage is
 	// calculated from ModelServing replicas for ServingGroupRollingUpdate and
 	// from the corresponding Role's replicas for RoleRollingUpdate, then rounded
 	// up. It defaults to 0.

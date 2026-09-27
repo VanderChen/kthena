@@ -277,7 +277,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 			expectError:    false,
 		},
 		{
-			name: "MaxUnavailable as percentage - non-zero value rounds up to minimum one",
+			name: "MaxUnavailable as percentage - non-zero value rounds down to zero",
 			modelServing: &workloadv1alpha1.ModelServing{
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](3),
@@ -289,7 +289,7 @@ func TestGetMaxUnavailable(t *testing.T) {
 					},
 				},
 			},
-			expectedResult: 1,
+			expectedResult: 0,
 			expectError:    false,
 		},
 		{
