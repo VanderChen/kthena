@@ -51,10 +51,12 @@ const (
 	AutoscalerController   = "autoscaler"
 )
 
-func SetupController(ctx context.Context, cc Config) {
+func SetupController(ctx context.Context, cc Config, health *HealthMonitor) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	config, err := kube.BuildConfig(cc.MasterURL, cc.Kubeconfig)
 	if err != nil {
-		klog.Fatalf("build client config: %v", err)
+		return fmt.Errorf("build client config: %w", err)
 	}
 	// Set QPS and Burst if provided
 	if cc.KubeAPIQPS > 0 {
@@ -67,11 +69,11 @@ func SetupController(ctx context.Context, cc Config) {
 	client := clientset.NewForConfigOrDie(config)
 	volcanoClient, err := volcanoClientSet.NewForConfig(config)
 	if err != nil {
-		klog.Fatalf("failed to create volcano client: %v", err)
+		return fmt.Errorf("failed to create volcano client: %w", err)
 	}
 	apiextClient, err := apiextclient.NewForConfig(config)
 	if err != nil {
-		klog.Fatalf("failed to create apiext client: %v", err)
+		return fmt.Errorf("failed to create apiext client: %w", err)
 	}
 
 	var mc *modelbooster.ModelBoosterController
@@ -87,40 +89,48 @@ func SetupController(ctx context.Context, cc Config) {
 			case ModelServingController:
 				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
-					klog.Fatalf("failed to create ModelServing controller: %v", err)
+					return fmt.Errorf("failed to create ModelServing controller: %w", err)
 				}
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
-					klog.Errorf("Failed to initialize LWS controller: %v", err)
+					return fmt.Errorf("failed to initialize LWS controller: %w", err)
 				} else if lwsc == nil {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
 			case AutoscalerController:
 				ac = autoscaler.NewAutoscaleController(kubeClient, client, cc.AutoscalingSyncPeriodSeconds)
+				if ac == nil {
+					return fmt.Errorf("failed to create autoscaler controller")
+				}
 			}
 		}
 	}
 
 	startControllers := func(ctx context.Context) {
 		if mc != nil {
-			go mc.Run(ctx, cc.Workers)
+			health.start(ctx, ModelBoosterController, func(ctx context.Context) error {
+				mc.Run(ctx, cc.Workers)
+				return nil
+			})
 			klog.Info("ModelBooster controller started")
 		}
 		if msc != nil {
-			go msc.Run(ctx, cc.Workers)
+			health.start(ctx, ModelServingController, func(ctx context.Context) error {
+				msc.Run(ctx, cc.Workers)
+				return nil
+			})
 			klog.Info("ModelServing controller started")
 
 			if lwsc != nil {
-				go func() {
-					if err = lwsc.Run(ctx, 1); err != nil {
-						klog.Errorf("Error running LWS controller: %s", err.Error())
-					}
-				}()
+				health.start(ctx, "lws", func(ctx context.Context) error { return lwsc.Run(ctx, 1) })
 				klog.Info("ModelServing lws controller started")
 			}
 		}
 		if ac != nil {
-			go ac.Run(ctx)
+			health.start(ctx, AutoscalerController, func(ctx context.Context) error {
+				ac.Run(ctx)
+				return nil
+			})
 			klog.Info("Autoscaler controller started")
 		}
 
@@ -161,14 +171,17 @@ func SetupController(ctx context.Context, cc Config) {
 		}
 		leaderElector, err := initLeaderElector(kubeClient, startedLeading)
 		if err != nil {
-			panic(err)
+			return fmt.Errorf("initialize leader election: %w", err)
 		}
-		leaderElector.Run(ctx)
+		health.start(ctx, "leader-election", func(ctx context.Context) error {
+			leaderElector.Run(ctx)
+			return nil
+		})
 	} else {
 		startControllers(ctx)
 		klog.Info("Started controllers without leader election")
 	}
-	<-ctx.Done()
+	return health.wait()
 }
 
 // initLeaderElector inits a leader elector for leader election
@@ -185,7 +198,8 @@ func initLeaderElector(kubeClient kubernetes.Interface, startedLeading func(ctx 
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: startedLeading,
 			OnStoppedLeading: func() {
-				klog.Error("leader election lost")
+				// The health monitor handles an unexpected return from Run.
+				// This callback also runs during normal shutdown of a standby.
 			},
 		},
 		ReleaseOnCancel: false,

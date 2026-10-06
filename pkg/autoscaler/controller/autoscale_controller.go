@@ -102,23 +102,24 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 
 func (ac *AutoscaleController) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
+	if ctx.Err() != nil {
+		return
+	}
 
 	// start informers
 	go ac.autoscalingPoliciesInformer.RunWithContext(ctx)
 	go ac.modelServingInformer.RunWithContext(ctx)
 	go ac.podsInformer.RunWithContext(ctx)
-	cache.WaitForCacheSync(ctx.Done(),
+	if !cache.WaitForCacheSync(ctx.Done(),
 		ac.autoscalingPoliciesInformer.HasSynced,
 		ac.modelServingInformer.HasSynced,
 		ac.podsInformer.HasSynced,
-	)
+	) || ctx.Err() != nil {
+		return
+	}
 
 	klog.Info("start autoscale controller")
-	go wait.Until(func() {
-		ac.Reconcile(ctx)
-	}, time.Duration(ac.syncPeriodSeconds)*time.Second, nil)
-
-	<-ctx.Done()
+	wait.UntilWithContext(ctx, ac.Reconcile, time.Duration(ac.syncPeriodSeconds)*time.Second)
 	klog.Info("shut down autoscale controller")
 }
 

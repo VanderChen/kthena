@@ -81,6 +81,9 @@ type ModelBoosterController struct {
 func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer mc.workQueue.ShutDown()
+	if ctx.Err() != nil {
+		return
+	}
 
 	// start informers
 	go mc.modelsInformer.RunWithContext(ctx)
@@ -92,13 +95,15 @@ func (mc *ModelBoosterController) Run(ctx context.Context, workers int) {
 	// start Kubernetes informer factory
 	go mc.kubeInformerFactory.Start(ctx.Done())
 
-	cache.WaitForCacheSync(ctx.Done(),
+	if !cache.WaitForCacheSync(ctx.Done(),
 		mc.modelsInformer.HasSynced,
 		mc.modelServingInformer.HasSynced,
 		mc.podsInformer.HasSynced,
 		mc.modelServersInformer.HasSynced,
 		mc.modelRoutesInformer.HasSynced,
-	)
+	) || ctx.Err() != nil {
+		return
+	}
 
 	klog.Info("start model controller")
 	for i := 0; i < workers; i++ {

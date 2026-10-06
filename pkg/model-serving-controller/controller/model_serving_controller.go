@@ -664,6 +664,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	defer utilruntime.HandleCrash()
 	defer c.workqueue.ShutDown()
+	if ctx.Err() != nil {
+		return
+	}
 
 	// start informers
 	go c.podsInformer.RunWithContext(ctx)
@@ -673,17 +676,23 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 
 	if err := c.podGroupManager.Run(ctx); err != nil {
 		klog.Errorf("failed to start PodGroup informer: %v", err)
+		return
 	}
 
-	cache.WaitForCacheSync(ctx.Done(),
+	if !cache.WaitForCacheSync(ctx.Done(),
 		c.podsInformer.HasSynced,
 		c.servicesInformer.HasSynced,
 		c.configMapsInformer.HasSynced,
 		c.modelServingsInformer.HasSynced,
-	)
+	) || ctx.Err() != nil {
+		return
+	}
 
 	// sync pods first
 	c.syncAll()
+	if ctx.Err() != nil {
+		return
+	}
 	klog.Info("initial sync has been done")
 
 	klog.Info("start modelServing controller")

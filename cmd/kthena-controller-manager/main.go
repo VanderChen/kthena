@@ -111,14 +111,30 @@ func main() {
 	}()
 	wc.kubeAPIQPS = cc.KubeAPIQPS
 	wc.kubeAPIBurst = cc.KubeAPIBurst
+	health := controller.NewHealthMonitor(ctx)
+	webhookDone := make(chan struct{})
 	if enableWebhook {
 		go func() {
-			if err := setupWebhook(ctx, wc); err != nil {
+			defer close(webhookDone)
+			if err := setupWebhook(ctx, wc, health.Check); err != nil {
 				os.Exit(1)
 			}
 		}()
 	}
-	controller.SetupController(ctx, cc)
+	err := controller.SetupController(ctx, cc, health)
+	cancel()
+	if enableWebhook {
+		select {
+		case <-webhookDone:
+		case <-time.After(5 * time.Second):
+			klog.Warning("Timed out waiting for webhook shutdown")
+		}
+	}
+	if err != nil {
+		klog.Errorf("Controller manager failed: %v", err)
+		klog.Flush()
+		os.Exit(1)
+	}
 }
 
 const validatingWebhookName = "kthena-controller-manager-validating-webhook"
@@ -135,7 +151,7 @@ func ensureWebhookCertificate(ctx context.Context, kubeClient kubernetes.Interfa
 	return webhookcert.EnsureCertificate(ctx, kubeClient, namespace, wc.certSecretName, dnsNames)
 }
 
-func setupWebhook(ctx context.Context, wc webhookConfig) error {
+func setupWebhook(ctx context.Context, wc webhookConfig, checkHealth func() error) error {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		klog.Fatalf("build client config: %v", err)
@@ -224,12 +240,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux.HandleFunc("/validate/autoscalingpolicy", autoscalingPolicyValidator.Handle)
 	mux.HandleFunc("/mutate/autoscalingpolicy", autoscalingPolicyMutator.Handle)
 
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		if _, err := w.Write([]byte("ok")); err != nil {
-			klog.Errorf("failed to write health check response: %v", err)
-		}
-	})
+	mux.HandleFunc("/healthz", healthHandler(checkHealth))
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", wc.port),
@@ -258,6 +269,19 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	defer cancel()
 	_ = server.Shutdown(ctxTimeout)
 	return nil
+}
+
+// healthHandler reports controller lifecycle failures to both manager probes.
+func healthHandler(check func() error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := check(); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if _, err := w.Write([]byte("ok")); err != nil {
+			klog.Errorf("failed to write health check response: %v", err)
+		}
+	}
 }
 
 // getNamespace returns the current pod namespace or "default".
