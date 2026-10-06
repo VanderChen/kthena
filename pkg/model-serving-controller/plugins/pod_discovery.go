@@ -147,7 +147,7 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 				continue
 			}
 
-			roleName := utils.PodRoleName(&pod)
+			roleName := utils.GetRoleName(&pod)
 			if roleName == "" {
 				continue
 			}

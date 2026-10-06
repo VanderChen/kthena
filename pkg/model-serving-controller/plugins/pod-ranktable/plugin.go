@@ -65,6 +65,10 @@ func (p *PodRanktablePlugin) Name() string {
 	return PluginName
 }
 
+func (p *PodRanktablePlugin) OnRoleSync(context.Context, *plugins.HookRequest) error {
+	return nil
+}
+
 func (p *PodRanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequest) error {
 	ms := req.ModelServing
 

@@ -56,6 +56,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	_ "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins/pod-ranktable"
 	_ "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins/ranktable"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
