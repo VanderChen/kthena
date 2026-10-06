@@ -788,3 +788,127 @@ func selectedCountByRole(selected []roleToDelete) map[string]int {
 	}
 	return result
 }
+
+func TestRoleRolloutAvailabilityAndOrderedCandidates(t *testing.T) {
+	for _, tc := range []struct {
+		name                                       string
+		n, u, partition                            int
+		coordinated, exhausted, retained, excluded bool
+		unready, temporary, target, terminating    []int
+		count                                      int
+		unknown                                    int // one-based ordinal, zero disables
+		want                                       []string
+	}{
+		{name: "terminating low Pod reserves budget after restart", n: 3, u: 1, count: 3, unready: []int{0, 2}, terminating: []int{0}},
+		{name: "independent skips healthy high for low old fault", n: 3, u: 1, count: 3, unready: []int{0}, want: []string{"prefill-0"}},
+		{name: "coordination waits at healthy high", n: 3, u: 1, count: 3, coordinated: true, unready: []int{0}},
+		{name: "nonparticipating Role still ordered when coordination configured", n: 3, u: 1, count: 3, coordinated: true, excluded: true, unready: []int{0}},
+		{name: "all old failed repairs highest", n: 3, u: 1, count: 3, coordinated: true, unready: []int{0, 1, 2}, want: []string{"prefill-2"}},
+		{name: "new failed replacement consumes allowance", n: 3, u: 1, count: 3, unready: []int{0, 1, 2}, target: []int{2}},
+		{name: "protected fault cannot fund healthy deletion", n: 3, u: 1, count: 3, partition: 1, unready: []int{0}},
+		{name: "049 single obsolete surge only", n: 1, u: 0, count: 2, coordinated: true, unready: []int{1}, temporary: []int{1}, want: []string{"prefill-1"}},
+		{name: "049 triple obsolete surge only", n: 3, u: 0, count: 4, coordinated: true, unready: []int{3}, temporary: []int{3}, want: []string{"prefill-3"}},
+		{name: "obsolete surge cleanup does not need stable start credit", n: 3, u: 0, count: 4, coordinated: true, exhausted: true, unready: []int{3}, temporary: []int{3}, want: []string{"prefill-3"}},
+		{name: "target surge unavailable is not rolled again", n: 1, u: 0, count: 2, coordinated: true, unready: []int{1}, temporary: []int{1}, target: []int{1}},
+		{name: "healthy surge retains availability for new stable fault", n: 1, u: 0, count: 2, coordinated: true, unready: []int{0}, temporary: []int{1}, target: []int{0}},
+		{name: "ready target surge permits stable replacement", n: 1, u: 0, count: 2, coordinated: true, temporary: []int{1}, target: []int{1}, want: []string{"prefill-0"}},
+		{name: "unmarked high ordinal is not obsolete surge", n: 3, u: 1, count: 4, coordinated: true, unready: []int{3}},
+		{name: "absorbed surge obeys stable start limit", n: 3, u: 1, count: 3, coordinated: true, exhausted: true, unready: []int{2}, temporary: []int{2}},
+		{name: "necessary last old dependency survives", n: 1, u: 1, count: 2, coordinated: true, retained: true, unready: []int{1}, temporary: []int{1}, target: []int{0}},
+		{name: "unknown high history blocks lower old fault", n: 3, u: 1, count: 3, coordinated: true, unknown: 3, unready: []int{0}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := createStandardModelServing("role-budget", 1, int32(tc.n))
+			ms.UID = "role-budget-uid"
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+			if tc.coordinated {
+				ms.Spec.RolloutStrategy.RoleCoordination = coordinationForTest("20%")
+			}
+			role := &ms.Spec.Template.Roles[0]
+			role.WorkerReplicas = 0
+			role.MaxUnavailable = ptr.To(intstr.FromInt(tc.u))
+			role.MaxSurge = ptr.To(intstr.FromInt(1))
+			role.Partition = ptr.To(intstr.FromInt(tc.partition))
+			c := newRevisionTestController(t, ms)
+			recordDifferentRevision(t, c, ms, "old")
+			target, err := c.revisionHistory(context.Background(), ms).desiredRevision(context.Background())
+			require.NoError(t, err)
+			key := utils.GetNamespaceName(ms)
+			c.store.AddServingGroup(key, 0, "old")
+			contains := func(xs []int, i int) bool {
+				for _, x := range xs {
+					if i == x {
+						return true
+					}
+				}
+				return false
+			}
+			for ordinal := 0; ordinal < tc.count; ordinal++ {
+				id := utils.GenerateRoleID(role.Name, ordinal)
+				revision := "old"
+				if contains(tc.target, ordinal) {
+					revision = target
+				}
+				if ordinal+1 == tc.unknown {
+					revision = "missing"
+				}
+				pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, "role-budget-0", id, revision, "legacy-hash")
+				if contains(tc.temporary, ordinal) {
+					setSurgeScope(pod, surgeRole)
+				}
+				if contains(tc.terminating, ordinal) {
+					pod.DeletionTimestamp = ptr.To(metav1.Now())
+				}
+				require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+				c.store.AddRole(key, "role-budget-0", role.Name, id, revision, "legacy-hash")
+				status := datastore.RoleRunning
+				if contains(tc.unready, ordinal) {
+					status = datastore.RoleCreating
+				}
+				require.NoError(t, c.store.UpdateRoleStatus(key, "role-budget-0", role.Name, id, status))
+			}
+			var policy *roleRolloutGroupPolicy
+			if tc.coordinated && !tc.excluded {
+				remaining := tc.n
+				if tc.exhausted {
+					remaining = 0
+				}
+				policy = &roleRolloutGroupPolicy{roles: map[string]roleRolloutLimits{role.Name: {rolloutEnd: tc.n, effectivePartition: tc.partition, remainingDeletions: remaining, retainOldReplica: tc.retained}}}
+			}
+			groups, err := c.store.GetServingGroupByModelServing(key)
+			require.NoError(t, err)
+			selected, _, err := c.rolesToDeleteForRoleRollingUpdate(context.Background(), ms, groups[0], policy)
+			require.NoError(t, err)
+			var names []string
+			for _, candidate := range selected {
+				names = append(names, candidate.roleID)
+			}
+			require.Equal(t, tc.want, names)
+			// Selected deletions remain physically present. Their reservation must
+			// prevent another stable deletion before replacement readiness.
+			for _, candidate := range selected {
+				require.NoError(t, c.store.UpdateRoleStatus(key, "role-budget-0", candidate.roleName, candidate.roleID, datastore.RoleDeleting))
+			}
+			selected, _, err = c.rolesToDeleteForRoleRollingUpdate(context.Background(), ms, groups[0], policy)
+			require.NoError(t, err)
+			require.Empty(t, selected)
+		})
+	}
+}
+
+func TestResolveRoleRolloutStateKeepsTerminatingStartAfterRestart(t *testing.T) {
+	role := workloadv1alpha1.Role{Name: "a", Replicas: ptr.To[int32](2)}
+	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}}}}
+	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(), ms,
+		datastore.ServingGroup{Name: "test-0"}, role, 2,
+		[]datastore.Role{
+			{Name: "a-0", RoleTemplateHash: "old", Status: datastore.RoleCreating},
+			{Name: "a-1", RoleTemplateHash: "old", Status: datastore.RoleRunning},
+		}, 0, true, map[int]templateComparison{0: templateDifferent})
+	require.Equal(t, 1, state.startedCount)
+	require.Zero(t, state.readyCount)
+	require.True(t, state.hasOldVersion)
+	policy, err := calculateRoleRolloutLimits([]coordinatedRoleState{state, newCoordinatedRoleStateForTest("b", 2, 0, 0)}, coordinationForTest("20%"))
+	require.NoError(t, err)
+	require.Zero(t, policy.roles["a"].remainingDeletions)
+}

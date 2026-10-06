@@ -10570,6 +10570,27 @@ func TestPodReadinessLossRevokesAvailabilityWithoutRecovery(t *testing.T) {
 	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "readiness-loss-0"))
 }
 
+func TestServingGroupTerminatingPodReservesRolloutBudgetAfterRestart(t *testing.T) {
+	ms := createStandardModelServing("pending-delete", 3, 1)
+	ms.UID = "pending-delete-uid"
+	ms.Spec.Template.Roles[0].WorkerReplicas = 0
+	ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate, RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1))}}
+	c := newRevisionTestController(t, ms)
+	recordDifferentRevision(t, c, ms, "old")
+	for i := 0; i < 3; i++ {
+		pod := addReadyLegacyGroupToController(t, c, ms, ms.Spec.Template.Roles[0], i, "old")
+		if i == 0 {
+			pod.DeletionTimestamp = ptr.To(metav1.Now())
+			require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+		}
+		if i != 1 {
+			require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), utils.GenerateServingGroupName(ms.Name, i), datastore.ServingGroupCreating))
+		}
+	}
+	require.NoError(t, c.manageRollingUpdate(context.Background(), ms, utils.ModelServingRevision(ms), nil))
+	require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "pending-delete-2"), "old terminating slot 0 already owns the only cleanup credit")
+}
+
 func TestRolloutRefreshesReadinessBeforeQueuedPodCallback(t *testing.T) {
 	for _, mode := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
 		t.Run(string(mode), func(t *testing.T) {

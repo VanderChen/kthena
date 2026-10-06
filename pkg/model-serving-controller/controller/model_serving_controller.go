@@ -1692,7 +1692,7 @@ func (c *ModelServingController) manageRollingUpdate(
 
 	newServingGroupUnavailableCount, readyCount := 0, 0
 	for _, sg := range servingGroupList {
-		if sg.Status == datastore.ServingGroupDeleting {
+		if sg.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, sg.Name, "", "") {
 			// In-flight deletion still occupies C. Reserve it once until the
 			// slot disappears or its replacement contributes to V.
 			newServingGroupUnavailableCount++
@@ -1899,15 +1899,12 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(
 		if len(outdatedRoles) == 0 {
 			continue
 		}
-		maxScaleDown, err := calMaxScaleDown(roleSpec, outdatedRoles, len(roleList), newUnavailable)
+		budget, err := roleRolloutBudget(roleSpec, roleList, newUnavailable)
 		if err != nil {
-			klog.Errorf("failed to calculate maxScaleDown for role %s in ServingGroup %s: %v", roleSpec.Name, sg.Name, err)
-		}
-		outdatedRoles, maxScaleDown = groupPolicy.constrainRoleDeletion(roleSpec.Name, outdatedRoles, maxScaleDown)
-		if len(outdatedRoles) == 0 {
+			klog.ErrorS(err, "Invalid Role rollout budget", "role", roleSpec.Name, "group", sg.Name)
 			continue
 		}
-		localCandidates, err := selectOutdatedRolesToDelete(roleSpec.Name, outdatedRoles, maxScaleDown)
+		localCandidates, err := c.selectRoleRolloutCandidates(ctx, ms, sg, roleSpec, roleList, outdatedRoles, budget, groupPolicy)
 		if err != nil {
 			return nil, false, err
 		}
@@ -1935,8 +1932,11 @@ func (c *ModelServingController) outdatedRoles(ctx context.Context, ms *workload
 	outdatedRoles := make([]datastore.Role, 0, len(roleList))
 	// record the number of roles that is in rollingupdate but not ready yet.
 	newUnavailable := 0
-	for _, role := range roleList {
-		if role.Status == datastore.RoleDeleting {
+	for i, role := range roleList {
+		if role.Status == datastore.RoleDeleting || c.rolloutDeletionPending(ms, sg.Name, roleSpec.Name, role.Name) {
+			// Normalize the reconcile-local ledger too: a terminating observation
+			// must not remain Ready credit in roleRolloutBudget.
+			roleList[i].Status = datastore.RoleDeleting
 			newUnavailable++
 			continue
 		}
@@ -1955,7 +1955,7 @@ func (c *ModelServingController) outdatedRoles(ctx context.Context, ms *workload
 	}
 
 	slices.SortFunc(outdatedRoles, func(a, b datastore.Role) int {
-		if a.Status != b.Status {
+		if roleCoordination(ms) == nil && (a.Status == datastore.RoleRunning) != (b.Status == datastore.RoleRunning) {
 			if a.Status != datastore.RoleRunning {
 				return -1
 			}
@@ -1968,16 +1968,18 @@ func (c *ModelServingController) outdatedRoles(ctx context.Context, ms *workload
 	return outdatedRoles, newUnavailable
 }
 
-func selectOutdatedRolesToDelete(roleName string, outdatedRoles []datastore.Role, maxScaleDown int) ([]roleToDelete, error) {
+func selectOutdatedRolesToDelete(roleName string, outdatedRoles []datastore.Role, budget rolloutBudget, ordered bool) []roleToDelete {
 	rolesToDelete := make([]roleToDelete, 0, len(outdatedRoles))
 	for _, role := range outdatedRoles {
-		if maxScaleDown == 0 {
-			break
+		if !budget.take(role.Status == datastore.RoleRunning) {
+			if ordered || budget.total == 0 {
+				break
+			}
+			continue
 		}
-		maxScaleDown--
 		rolesToDelete = append(rolesToDelete, roleToDelete{roleName: roleName, roleID: role.Name})
 	}
-	return rolesToDelete, nil
+	return rolesToDelete
 }
 
 func (c *ModelServingController) handleRunningPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {
@@ -3550,27 +3552,19 @@ func (c *ModelServingController) RegisterModelServingDebugEndpoints(mux *http.Se
 	mux.HandleFunc("/debug/modelserving/cache", c.handleModelServingDatastoreCacheDump)
 }
 
-func calMaxScaleDown(role workloadv1alpha1.Role, outdatedRoles []datastore.Role, allReplicas, newUnavailable int) (int, error) {
-	// RoleRollingUpdate has an independent budget for each Role. The
-	// ModelServing-level maxUnavailable is intentionally not consulted here.
+func roleRolloutBudget(role workloadv1alpha1.Role, instances []datastore.Role, unavailable int) (rolloutBudget, error) {
 	maxUnavailable, configured, err := utils.GetMaxUnavailableForRole(role)
 	if err != nil {
-		return 0, fmt.Errorf("failed to calculate maxUnavailable for role %s: %v", role.Name, err)
+		return rolloutBudget{}, fmt.Errorf("failed to calculate maxUnavailable for role %s: %v", role.Name, err)
 	}
 	if !configured {
-		return len(outdatedRoles), nil
+		maxUnavailable = roleReplicas(role)
 	}
-	expectedReplicas := 1
-	if role.Replicas != nil {
-		expectedReplicas = int(*role.Replicas)
+	ready := 0
+	for _, instance := range instances {
+		if instance.Status == datastore.RoleRunning {
+			ready++
+		}
 	}
-	minAvailable := expectedReplicas - maxUnavailable
-	if minAvailable < 0 {
-		minAvailable = 0
-	}
-	maxScaleDown := allReplicas - minAvailable - newUnavailable
-	if maxScaleDown < 0 {
-		maxScaleDown = 0
-	}
-	return maxScaleDown, nil
+	return newRolloutBudget(roleReplicas(role), maxUnavailable, len(instances), ready, unavailable), nil
 }

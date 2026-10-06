@@ -19,6 +19,8 @@ package controller
 import (
 	"context"
 	"errors"
+	"fmt"
+
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -47,6 +49,30 @@ func (b *rolloutBudget) take(ready bool) bool {
 		b.healthy--
 	}
 	return true
+}
+
+// A restart may reconstruct a Creating placeholder while the old Pod still
+// terminates at the same ordinal. Its reservation is physical evidence and must
+// not depend solely on the transient datastore Deleting status.
+func (c *ModelServingController) rolloutDeletionPending(ms *workloadv1alpha1.ModelServing, group, role, instance string) bool {
+	if c.podsInformer == nil {
+		return false
+	}
+	index, key := GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, group)
+	if role != "" {
+		index, key = RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance)
+	}
+	pods, err := c.getPodsByIndex(index, key)
+	if err != nil {
+		c.enqueueModelServingAfter(ms, enqueueAfter)
+		return true
+	}
+	for _, pod := range pods {
+		if pod.DeletionTimestamp != nil && utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			return true
+		}
+	}
+	return false
 }
 
 // Refresh only cached Ready claims. Creating instances gain credit through the

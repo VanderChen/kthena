@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -108,9 +109,15 @@ func (p *roleRolloutGroupPolicy) constrainRoleDeletion(
 		if ordinal >= 0 && ordinal < limits.rolloutEnd {
 			updateableOldCount++
 		}
-		if ordinal >= limits.effectivePartition && ordinal < limits.rolloutEnd {
-			eligible = append(eligible, role)
+	}
+	for _, role := range outdatedRoles {
+		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+		if ordinal < limits.effectivePartition || ordinal >= limits.rolloutEnd {
+			// The caller supplies a descending stable prefix. A blocked high
+			// ordinal must never be filtered away to expose a lower candidate.
+			break
 		}
+		eligible = append(eligible, role)
 	}
 
 	maxScaleDown = min(maxScaleDown, limits.remainingDeletions)
@@ -118,6 +125,68 @@ func (p *roleRolloutGroupPolicy) constrainRoleDeletion(
 		maxScaleDown = min(maxScaleDown, max(updateableOldCount-1, 0))
 	}
 	return eligible, maxScaleDown
+}
+
+// selectRoleRolloutCandidates separates obsolete temporary capacity from the
+// stable ordinal prefix. Both consume the same Q/B ledger, but removing a surge
+// does not spend or return a stable maxSkew start allowance.
+func (c *ModelServingController) selectRoleRolloutCandidates(
+	ctx context.Context, ms *workloadv1alpha1.ModelServing, group datastore.ServingGroup,
+	role workloadv1alpha1.Role, instances, outdated []datastore.Role, budget rolloutBudget,
+	policy *roleRolloutGroupPolicy,
+) ([]roleToDelete, error) {
+	if roleCoordination(ms) == nil {
+		return selectOutdatedRolesToDelete(role.Name, outdated, budget, false), nil
+	}
+	var pods []*corev1.Pod
+	if c.podsInformer != nil {
+		var err error
+		pods, err = c.surgePods(ms, surgeRole, group.Name, role.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	temporary := markedSurgeNames(pods, surgeRole, roleReplicas(role))
+	limits, _ := policy.role(role.Name)
+	remainingOld := len(outdated)
+	var selected []roleToDelete
+	stable := make([]datastore.Role, 0, len(outdated))
+	for _, instance := range outdated {
+		if !temporary.Has(instance.Name) {
+			stable = append(stable, instance)
+			continue
+		}
+		// Keep a necessary last old dependency. A marked replica inside the
+		// latest desired range has already been adopted and is not temporary.
+		if limits.retainOldReplica && remainingOld <= 1 {
+			continue
+		}
+		if budget.take(instance.Status == datastore.RoleRunning) {
+			selected = append(selected, roleToDelete{roleName: role.Name, roleID: instance.Name})
+			remainingOld--
+		}
+	}
+	// Unknown history is a possible old stable instance, not permission to
+	// skip it. Known target replicas and already-started deletions are handled
+	// by the availability and progress ledgers instead.
+	unknownOrdinal := -1
+	for _, instance := range instances {
+		_, ordinal := utils.GetParentNameAndOrdinal(instance.Name)
+		if !temporary.Has(instance.Name) && instance.Status != datastore.RoleDeleting &&
+			c.compareRoleTemplate(ctx, ms, group, role.Name, instance) == templateUnknown {
+			unknownOrdinal = max(unknownOrdinal, ordinal)
+		}
+	}
+	for i, instance := range stable {
+		_, ordinal := utils.GetParentNameAndOrdinal(instance.Name)
+		if ordinal <= unknownOrdinal {
+			stable = stable[:i]
+			break
+		}
+	}
+	stable, budget.total = policy.constrainRoleDeletion(role.Name, stable, budget.total)
+	selected = append(selected, selectOutdatedRolesToDelete(role.Name, stable, budget, true)...)
+	return selected, nil
 }
 
 // roleRolloutPolicy is the reconcile-scoped view of optional cross-Role
@@ -359,15 +428,16 @@ func (c *ModelServingController) resolveRoleRolloutState(
 			continue
 		}
 		inStableRange := ordinal >= partition && ordinal < stableEnd
+		_, terminating := terminatingReplicas[ordinal]
 		oldVersion := c.compareRoleTemplate(ctx, ms, servingGroup, roleSpec.Name, role) != templateEquivalent
 		if oldVersion {
 			hasOldVersion = true
-			if role.Status != datastore.RoleDeleting && inStableRange {
+			if role.Status != datastore.RoleDeleting && !terminating && inStableRange {
 				remainingOldToUpdate++
 			}
 			continue
 		}
-		if role.Status == datastore.RoleDeleting || ordinal >= desired {
+		if role.Status == datastore.RoleDeleting || terminating || ordinal >= desired {
 			continue
 		}
 		hasTargetWork = true
