@@ -2238,3 +2238,29 @@ func TestValidateRanktablePlugin(t *testing.T) {
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && s[0:len(substr)] == substr || (len(s) > len(substr) && contains(s[1:], substr))
 }
+
+func TestValidateRestartGracePeriod(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		seconds *int64
+		valid   bool
+	}{
+		{"default", nil, true},
+		{"invalid negative", ptr.To[int64](-2), false},
+		{"forever", ptr.To[int64](-1), true},
+		{"immediate", ptr.To[int64](0), true},
+		{"finite", ptr.To[int64](30), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+				Template: workloadv1alpha1.ServingGroup{RestartGracePeriodSeconds: tc.seconds},
+			}}
+			errs := validateRestartGracePeriod(ms)
+			assert.Equal(t, tc.valid, len(errs) == 0)
+			if !tc.valid && assert.Len(t, errs, 1) {
+				assert.Equal(t, "spec.template.restartGracePeriodSeconds", errs[0].Field)
+				assert.Equal(t, field.ErrorTypeInvalid, errs[0].Type)
+			}
+		})
+	}
+}

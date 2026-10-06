@@ -1937,6 +1937,7 @@ func (c *ModelServingController) handleRunningPod(ms *workloadv1alpha1.ModelServ
 }
 
 func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, newPod *corev1.Pod) error {
+	c.graceMap.Delete(getPodGracePeriodKey(newPod))
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
@@ -2012,31 +2013,45 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	return nil
 }
 
+// podRecoveryDisabled leaves existing Pods to kubelet or external deletion.
+// Missing Pods are still reconciled independently of this setting.
+func podRecoveryDisabled(ms *workloadv1alpha1.ModelServing) bool {
+	return ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy ||
+		(ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds == -1)
+}
+
+func restartGraceRemaining(ms *workloadv1alpha1.ModelServing, started time.Time) time.Duration {
+	seconds := ms.Spec.Template.RestartGracePeriodSeconds
+	if seconds == nil || *seconds <= 0 {
+		return 0
+	}
+	elapsed := time.Since(started)
+	remaining := *seconds - int64(elapsed/time.Second)
+	if remaining <= 0 {
+		return 0
+	}
+	// Recheck long waits daily without overflowing time.Duration for int64 seconds.
+	if remaining > int64(24*time.Hour/time.Second) {
+		return 24 * time.Hour
+	}
+	return time.Duration(remaining)*time.Second - elapsed%time.Second
+}
+
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
-	// None: leave a restarted, still-alive pod to the kubelet (do not delete it),
-	// but mark it unavailable. A terminal PodFailed pod falls through to deletion.
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy && utils.ContainerRestarted(errPod) && !utils.IsPodFailed(errPod) {
-		if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
-			klog.Warningf("mark pod %s unavailable: %v", errPod.Name, err)
-		}
-		c.enqueueModelServing(ms)
-		return nil
-	}
-	// pod is already in the grace period and does not need to be processed for the time being.
-	key := getPodGracePeriodKey(errPod)
-	now := time.Now()
-	_, loaded := c.graceMap.LoadOrStore(key, now)
-	if loaded {
-		klog.V(4).Infof("Pod %v already in grace period", key)
-		return nil
-	}
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
 		return err
 	}
-	// Wait for the grace period before processing
-	go c.handlePodAfterGraceTime(ms, errPod)
-	// ServingGroup status may change, needs reconcile
 	c.enqueueModelServing(ms)
+	key := getPodGracePeriodKey(errPod)
+	if podRecoveryDisabled(ms) {
+		c.graceMap.Delete(key)
+		return nil
+	}
+	started := time.Now()
+	if _, loaded := c.graceMap.LoadOrStore(key, started); loaded {
+		return nil
+	}
+	go c.handlePodAfterGraceTime(ms, errPod, started)
 	return nil
 }
 
@@ -2073,47 +2088,35 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 	return nil
 }
 
-func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) {
-	if ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds > 0 {
-		// Wait for the grace period before making a decision
-		time.Sleep(time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second)
-		klog.V(4).Infof("%s after grace time", errPod.Name)
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
-
-		newPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				klog.V(4).Infof("pod %s has been deleted after grace time", errPod.Name)
-			} else {
-				klog.Errorf("cannot get pod %s after grace time, err: %v", errPod.Name, err)
-			}
+func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod, started time.Time) {
+	key := getPodGracePeriodKey(errPod)
+	// A Ready event can end this failure episode and a later failure can start
+	// another. An old task must never remove or execute the new task's wait.
+	defer c.graceMap.CompareAndDelete(key, started)
+	ctx := context.Background()
+	for {
+		if current, ok := c.graceMap.Load(key); !ok || current != started {
 			return
 		}
-		if newPod.UID != errPod.UID {
-			klog.V(4).Infof("pod %s has been replaced after grace time", errPod.Name)
+		latestMS, err := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name)
+		if err != nil || latestMS.UID != ms.UID || latestMS.DeletionTimestamp != nil || podRecoveryDisabled(latestMS) {
 			return
 		}
-
-		if !utils.IsPodRunningAndReady(newPod) {
-			// pod has not recovered after the grace period, needs to be rebuilt
-			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-			if err != nil {
-				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
-				return
-			}
-			klog.V(2).Infof("%s been deleted after grace time", errPod.Name)
+		if remaining := restartGraceRemaining(latestMS, started); remaining > 0 {
+			// Re-read the informer cache so configuration changes cancel or
+			// reschedule a pending recovery without waiting for the old deadline.
+			time.Sleep(min(remaining, time.Second))
+			continue
 		}
-	} else {
-		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
-
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-		if err != nil {
-			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
+		latestPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
+		if err != nil || latestPod.UID != errPod.UID || latestPod.DeletionTimestamp != nil ||
+			!utils.IsOwnedByModelServingWithUID(latestPod, ms.UID) || utils.IsPodRunningAndReady(latestPod) {
 			return
 		}
-		klog.V(2).Infof("%s been deleted without grace time", errPod.Name)
+		if err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, latestPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID))); err != nil {
+			klog.Errorf("cannot delete pod %s after grace time: %v", latestPod.Name, err)
+		}
+		return
 	}
 }
 
@@ -3145,14 +3148,7 @@ func (c *ModelServingController) createPod(
 				c.enqueueModelServingAfter(ms, enqueueAfter)
 				return nil
 			}
-			if ownedByCurrentModelServing && utils.IsPodFailed(existing) {
-				klog.V(4).Infof("%s pod %s already exists but has failed, deleting and enqueueing to reconcile", roleKind, pod.Name)
-				if deleteErr := c.deleteConflictingPod(ctx, existing); deleteErr != nil && !apierrors.IsNotFound(deleteErr) {
-					return fmt.Errorf("failed to delete failed %s pod %s: %v", roleKind, pod.Name, deleteErr)
-				}
-				c.enqueueModelServingAfter(ms, enqueueAfter)
-				return nil
-			}
+
 			existingRoleTemplateHash := utils.ObjectRoleTemplateHash(existing)
 			expectedRoleTemplateHash := utils.ObjectRoleTemplateHash(pod)
 			roleTemplateHashMatches := false

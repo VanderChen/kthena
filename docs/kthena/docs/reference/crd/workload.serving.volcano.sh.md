@@ -574,7 +574,7 @@ _Appears in:_
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugins that customize serving pods or manage<br />auxiliary resources through controller lifecycle hooks. |  |  |
 | `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
-| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the scope of recovery after a Pod is deleted or fails<br />to recover within restartGracePeriodSeconds. None disables proactive recovery<br />while still allowing missing Pods to be replaced. | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
 | `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. Must be non-negative. | 10 | Minimum: 0 <br /> |
 
 
@@ -883,9 +883,9 @@ _Appears in:_
 
 | Field | Description |
 | --- | --- |
-| `ServingGroupRecreate` | ServingGroupRecreate will recreate all the pods in the ServingGroup if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted. This is to ensure all pods/containers in the group will be<br />started in the same time.<br /> |
-| `RoleRecreate` | RoleRecreate will recreate all pods in one Role if<br />1. Any individual pod in the group is recreated; 2. Any containers/init-containers<br />in a pod is restarted.<br /> |
-| `None` | NoneRestartPolicy will follow the same behavior as the default pod or deployment.<br /> |
+| `ServingGroupRecreate` | ServingGroupRecreate recreates all Pods in the affected ServingGroup after<br />a Pod is deleted, or remains unhealthy after a container/init-container<br />restart or Pod failure for restartGracePeriodSeconds. A grace period of -1<br />triggers recovery only after Pod deletion.<br /> |
+| `RoleRecreate` | RoleRecreate applies the same triggers as ServingGroupRecreate, but recreates<br />only the affected Role instance, including its entry and worker Pods.<br /> |
+| `None` | NoneRestartPolicy disables proactive recovery, including deletion of Failed<br />Pods. Kubelet handles container restarts according to the Pod's restartPolicy.<br />Missing Pods are still replaced without restarting other Pods.<br /> |
 
 
 #### Role
@@ -1150,7 +1150,7 @@ _Appears in:_
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
-| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs<br />Defaults to 0 (ServingGroup will be rebuilt immediately after an error) | 0 |  |
+| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds is the time to wait for an unhealthy Pod to recover<br />after a container/init-container restart or Pod failure. Defaults to 0 for<br />immediate recovery. A positive value preserves the Pod if it becomes Ready<br />before recovery is attempted. -1 disables proactive recovery, including for<br />Failed Pods; only Pod deletion triggers Role or ServingGroup recreation.<br />Ignored when recoveryPolicy is None. Pod deletion is never delayed by this field. | 0 | Minimum: -1 <br /> |
 | `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy defines the gang scheduler config. |  |  |
 | `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology defines topology-aware aggregation and relationship<br />policies for ServingGroups and Roles on the scheduler's HyperNode tree.<br />The field is immutable after the ModelServing is created so Pods added by<br />later scaling operations use the same topology constraints as existing Pods. |  |  |
 | `roles` _[Role](#role) array_ | Roles contains between 1 and 4 roles with unique names. |  | MaxItems: 4 <br />MinItems: 1 <br /> |

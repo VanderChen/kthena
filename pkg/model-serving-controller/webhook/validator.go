@@ -158,6 +158,7 @@ func (v *ModelServingValidator) validateModelServingErrors(ctx context.Context, 
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, v.validateRanktablePlugin(ctx, modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
+	allErrs = append(allErrs, validateRestartGracePeriod(modelServing)...)
 
 	return validationResult(allErrs)
 }
@@ -1031,4 +1032,12 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 	}
 
 	return allErrs
+}
+
+func validateRestartGracePeriod(ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	seconds := ms.Spec.Template.RestartGracePeriodSeconds
+	if seconds != nil && *seconds < -1 {
+		return field.ErrorList{field.Invalid(field.NewPath("spec", "template", "restartGracePeriodSeconds"), *seconds, "must be -1 (disable proactive recovery) or a non-negative number of seconds")}
+	}
+	return nil
 }

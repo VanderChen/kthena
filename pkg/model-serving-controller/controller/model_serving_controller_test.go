@@ -49,6 +49,7 @@ import (
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	informersv1alpha1 "github.com/volcano-sh/kthena/client-go/informers/externalversions"
+	mslisters "github.com/volcano-sh/kthena/client-go/listers/workload/v1alpha1"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
@@ -7259,9 +7260,11 @@ func TestHandlePodAfterGraceTime(t *testing.T) {
 				},
 				Status: corev1.PodStatus{Phase: corev1.PodPending},
 			}
-			controller, kubeClient := newGracePeriodTestController(t, currentPod)
+			controller, kubeClient := newGracePeriodTestController(t, ms, currentPod)
 
-			controller.handlePodAfterGraceTime(ms, failedPod)
+			started := time.Now()
+			controller.graceMap.Store(getPodGracePeriodKey(failedPod), started)
+			controller.handlePodAfterGraceTime(ms, failedPod, started)
 
 			_, err := kubeClient.CoreV1().Pods(namespace).Get(context.Background(), podName, metav1.GetOptions{})
 			if tt.wantDeleted {
@@ -7306,9 +7309,11 @@ func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
 			Name:      "test-model",
 		},
 	}
-	controller, kubeClient := newGracePeriodTestController(t, failedPod)
+	controller, kubeClient := newGracePeriodTestController(t, ms, failedPod)
 
-	controller.handlePodAfterGraceTime(ms, failedPod)
+	started := time.Now()
+	controller.graceMap.Store(getPodGracePeriodKey(failedPod), started)
+	controller.handlePodAfterGraceTime(ms, failedPod, started)
 
 	actions := kubeClient.Actions()
 	require.Len(t, actions, 1)
@@ -7347,7 +7352,7 @@ func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
 			},
 		},
 	}
-	controller, kubeClient := newGracePeriodTestController(t, replacementPod)
+	controller, kubeClient := newGracePeriodTestController(t, ms, replacementPod)
 	controller.store = datastore.New()
 	controller.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()) //nolint:staticcheck
 	t.Cleanup(controller.workqueue.ShutDown)
@@ -7410,7 +7415,7 @@ func TestHandleErrorPodNoneLeavesRestartedPod(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: msName},
 		Spec:       workloadv1alpha1.ModelServingSpec{RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy},
 	}
-	controller, kubeClient := newGracePeriodTestController(t, restartedPod)
+	controller, kubeClient := newGracePeriodTestController(t, ms, restartedPod)
 
 	// Seed a Running serving group + role with the pod in the running set.
 	msKey := types.NamespacedName{Namespace: namespace, Name: msName}
@@ -7437,16 +7442,20 @@ func TestHandleErrorPodNoneLeavesRestartedPod(t *testing.T) {
 	assert.Equal(t, 0, running, "restarted pod must leave the running set")
 }
 
-func newGracePeriodTestController(t *testing.T, pod *corev1.Pod) (*ModelServingController, *kubefake.Clientset) {
+func newGracePeriodTestController(t *testing.T, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) (*ModelServingController, *kubefake.Clientset) {
 	t.Helper()
 
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	require.NoError(t, indexer.Add(pod.DeepCopy()))
-
+	pod = pod.DeepCopy()
+	pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))}
+	require.NoError(t, indexer.Add(pod))
+	msIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	require.NoError(t, msIndexer.Add(ms.DeepCopy()))
 	kubeClient := kubefake.NewSimpleClientset(pod.DeepCopy())
 	controller := &ModelServingController{
-		kubeClientSet: kubeClient,
-		podsLister:    corelisters.NewPodLister(indexer),
+		kubeClientSet:      kubeClient,
+		podsLister:         corelisters.NewPodLister(indexer),
+		modelServingLister: mslisters.NewModelServingLister(msIndexer),
 	}
 	return controller, kubeClient
 }

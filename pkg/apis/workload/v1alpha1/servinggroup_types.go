@@ -131,10 +131,15 @@ type Metadata struct {
 // ServingGroup is the smallest unit to complete the inference task
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.gangPolicy) || has(self.gangPolicy)", message="gangPolicy is required once set"
 type ServingGroup struct {
-	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
-	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+	// RestartGracePeriodSeconds is the time to wait for an unhealthy Pod to recover
+	// after a container/init-container restart or Pod failure. Defaults to 0 for
+	// immediate recovery. A positive value preserves the Pod if it becomes Ready
+	// before recovery is attempted. -1 disables proactive recovery, including for
+	// Failed Pods; only Pod deletion triggers Role or ServingGroup recreation.
+	// Ignored when recoveryPolicy is None. Pod deletion is never delayed by this field.
 	// +optional
 	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=-1
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
 
 	// GangPolicy defines the gang scheduler config.

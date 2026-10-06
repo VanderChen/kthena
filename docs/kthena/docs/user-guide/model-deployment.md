@@ -258,6 +258,60 @@ Pod's hostname to its generated Pod name and its subdomain to the Entry Service
 name. Because that Service selects both Entry and Worker Pods, every Pod in the
 Role replica receives a DNS record under the Headless Service domain.
 
+### ModelServing failure recovery
+
+`spec.recoveryPolicy` controls recovery after Pod deletion and persistent failure:
+
+| Policy | Recovery scope |
+| --- | --- |
+| `ServingGroupRecreate` | Recreate all Pods in the affected ServingGroup. |
+| `RoleRecreate` (default) | Recreate the affected Role instance, including its entry and worker Pods. |
+| `None` | Leave existing Pods to Kubernetes. Replace missing Pods without restarting their peers. |
+
+`spec.template.restartGracePeriodSeconds` controls when an unhealthy Pod is
+actively deleted so its Role or ServingGroup can recover:
+
+- `0` (default): recover immediately after detecting a container or init-container
+  restart while the Pod is not Ready, or a `Failed` Pod.
+- A positive number: wait that many seconds. Keep the Pod if it becomes Ready
+  before recovery is attempted. Updating the duration uses the original observed
+  failure time.
+- `-1`: tolerate failures indefinitely. Only Pod deletion triggers the configured
+  Role or ServingGroup recovery. No expiry task is created.
+
+Values below `-1` are rejected. A Pod that is already Ready is not restarted
+because of a historical container restart. Pod deletion does not wait for this
+grace period.
+
+For example, to let kubelet handle container restarts and recreate the Role
+instance only when a Pod is deleted, use this fragment in your ModelServing:
+
+```yaml
+spec:
+  recoveryPolicy: RoleRecreate
+  template:
+    restartGracePeriodSeconds: -1
+    # roles: ...
+```
+
+With `recoveryPolicy: None`, the grace period has no effect. Kthena does not delete
+Pods because of container restarts or a `Failed` phase. Kubelet follows the Pod's
+own `restartPolicy`; a terminal `Failed` Pod remains until an external actor
+removes it. If a Pod is deleted, Kthena still creates the missing Pod to maintain
+the desired replicas.
+
+The same terminal-Pod behavior applies to a grace period of `-1`. Readiness and
+available replica counts still reflect actual health. Planned rolling updates
+and scaling continue to use their own settings.
+
+Changing the policy to `None` or the grace period to `-1` cancels pending recovery
+when the controller observes the new configuration. It cannot undo a Pod deletion
+that has already been submitted or a Role/ServingGroup recreation already started.
+
+When upgrading from earlier behavior, review negative grace periods: `-1` now
+means indefinite tolerance instead of immediate recovery. `None` now also retains
+terminal `Failed` Pods.
+
 ### GPU PD Disaggregation
 
 This example demonstrates a disaggregated deployment using NVIDIA GPUs with prefill and decode roles.
