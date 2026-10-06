@@ -2596,7 +2596,7 @@ func (c *ModelServingController) updateModelServingStatus(
 				referencedRevisions = append(referencedRevisions, group.Revision)
 			}
 			// Independent Role updates can leave multiple observed revisions in
-			// one group. Preserve every live snapshot for comparison and recovery.
+			// one group. Preserve references even while the last Pod is absent.
 			rolesByName, rolesErr := c.store.GetRolesByGroup(utils.GetNamespaceName(latestMS), group.Name)
 			if rolesErr != nil {
 				return rolesErr

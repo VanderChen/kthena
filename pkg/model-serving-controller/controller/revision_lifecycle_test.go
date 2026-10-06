@@ -250,3 +250,30 @@ func TestZeroReplicasPersistsHistoryAndConvergesStatus(t *testing.T) {
 		require.False(t, action.Matches("create", "pods"))
 	}
 }
+
+func TestRevisionCleanupPreservesRoleHistoryWithoutLivePod(t *testing.T) {
+	ctx := context.Background()
+	ms := createStandardModelServing("pending-history", 1, 1)
+	ms.UID = "owner"
+	ms.Spec.RevisionHistoryLimit = ptr.To[int32](0)
+	revision := utils.ModelServingRevision(ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	c := newRevisionTestController(t, ms)
+	for _, name := range []string{revision, "role-history", "unused"} {
+		_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, name, ms.Spec.Template.Roles)
+		require.NoError(t, err)
+	}
+	key, groupName := utils.GetNamespaceName(ms), ms.Name+"-0"
+	c.store.AddServingGroup(key, 0, revision)
+	c.store.AddRole(key, groupName, "prefill", "prefill-0", "role-history", utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
+	require.NoError(t, c.UpdateModelServingStatus(ms, revision))
+	pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Empty(t, pods.Items)
+	cr, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "role-history")
+	require.NoError(t, err)
+	require.NotNil(t, cr, "a pending Role still references its recovery snapshot")
+	cr, err = utils.GetControllerRevision(ctx, c.kubeClientSet, ms, "unused")
+	require.NoError(t, err)
+	require.Nil(t, cr)
+}
