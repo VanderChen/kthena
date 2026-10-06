@@ -1209,6 +1209,9 @@ func (c *ModelServingController) scaleUpRoles(
 		// Insert new Role to global storage
 		roleID := utils.GenerateRoleID(targetRole.Name, ordinal)
 		c.store.AddRole(utils.GetNamespaceName(ms), groupName, targetRole.Name, roleID, revision, roleTemplateHash)
+		// Reevaluate scheduling requirements when old and new worker layouts
+		// coexist, even when the new Pods cannot yet be scheduled.
+		c.enqueueModelServing(ms)
 		// Emit event for new role entering Creating state
 		message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", targetRole.Name, roleID, groupName)
 		c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)
@@ -1287,11 +1290,6 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			expectedCount += maxSurge
 		}
 	}
-	expectedPods := 1 + int(targetRole.WorkerReplicas)
-	partition, partitionConfigured, partitionErr := c.getPartition(rolePartition(ms, targetRole), roleReplicas(targetRole))
-	if partitionErr != nil {
-		klog.Errorf("manageRoleReplicasPerGroup: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
-	}
 	for _, roleObj := range roleList {
 		if roleObj.Status == datastore.RoleDeleting {
 			c.reconcileDeletingRole(ctx, ms, groupName, targetRole.Name, roleObj.Name)
@@ -1300,9 +1298,13 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		roleIDValue := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, targetRole.Name, roleObj.Name)
 		pods, err := c.getPodsByIndex(RoleIDKey, roleIDValue)
 		if err != nil {
-			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
-			continue
+			return err
 		}
+		roleToApply, revisionToUse, hashToUse, err := c.roleTemplateForInstance(ctx, ms, groupName, targetRole.Name, roleObj, pods)
+		if err != nil {
+			return fmt.Errorf("resolve layout for Role %s/%s: %w", groupName, roleObj.Name, err)
+		}
+		expectedPods := 1 + int(roleToApply.WorkerReplicas)
 		ownedPods := make([]*corev1.Pod, 0, len(pods))
 		for _, pod := range pods {
 			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
@@ -1325,7 +1327,18 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 			ownedPods = append(ownedPods, pod)
 		}
-		if len(ownedPods) < expectedPods {
+		podNames := make(map[string]bool, len(ownedPods))
+		for _, pod := range ownedPods {
+			podNames[pod.Name] = true
+		}
+		missing := false
+		for i := 0; i < expectedPods; i++ {
+			if !podNames[utils.GeneratePodName(groupName, roleObj.Name, i)] {
+				missing = true
+				break
+			}
+		}
+		if missing {
 			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleObj.Status == datastore.RoleRunning {
 				klog.V(2).Infof("manageRoleReplicasPerGroup: running role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 				if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName); groupStatus == datastore.ServingGroupRunning {
@@ -1340,13 +1353,19 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 			klog.V(2).Infof("manageRoleReplicasPerGroup: role %s/%s in ServingGroup %s is missing pods (%d/%d), recreating", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
-			keepCurrentRevision := (partitionConfigured && partition > 0 && roleIndex >= 0 && roleIndex < partition) || !allowTargetStart
-			roleToApply, revisionToUse, hashToUse, err := c.roleTemplateForReplica(ctx, ms, targetRole, roleObj, newRevision, keepCurrentRevision)
-			if err != nil {
-				return fmt.Errorf("resolve recovery template for Role %s/%s: %w", groupName, roleObj.Name, err)
-			}
 			if err := c.CreatePodsByRole(ctx, *roleToApply.DeepCopy(), ms, roleIndex, servingGroupOrdinal, revisionToUse, hashToUse); err != nil {
-				klog.Errorf("manageRoleReplicasPerGroup: failed to recreate pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
+				return fmt.Errorf("restore Role %s/%s: %w", groupName, roleObj.Name, err)
+			}
+		} else if roleObj.Status == datastore.RoleCreating {
+			// Retry readiness after a transient history lookup failure, even
+			// if no further Pod events arrive after the history is restored.
+			for _, pod := range pods {
+				if utils.IsPodRunningAndReady(pod) && pod.DeletionTimestamp == nil && !c.shouldSkipHandling(ms, groupName, pod) {
+					if err := c.handleReadyPod(ms, groupName, pod); err != nil {
+						return err
+					}
+					break
+				}
 			}
 		}
 		if chain != nil {
@@ -1357,7 +1376,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 				RoleName:      targetRole.Name,
 				RoleID:        roleObj.Name,
 				RoleIndex:     roleIndex,
-				Role:          targetRole.DeepCopy(),
+				Role:          roleToApply.DeepCopy(),
 				KubeClient:    c.kubeClientSet,
 				ServiceLister: c.servicesLister,
 			}); err != nil {
@@ -2161,34 +2180,47 @@ func (c *ModelServingController) checkRoleReady(ms *workloadv1alpha1.ModelServin
 	if err != nil {
 		return false, fmt.Errorf("failed to get pods for role %s/%s: %v", roleName, roleID, err)
 	}
-	// Find the role specification to get expected pod count. A partition-
-	// protected ServingGroup keeps the template from its own revision.
-	roles, err := c.rolesForServingGroupReadiness(ms, servingGroupName)
-	if err != nil {
-		return false, err
+	if len(pods) == 0 {
+		return false, nil
 	}
-	var targetRole *workloadv1alpha1.Role
-	for i := range roles {
-		if roles[i].Name == roleName {
-			targetRole = &roles[i]
+	observed := datastore.Role{Name: roleID}
+	instances, _ := c.store.GetRoleList(utils.GetNamespaceName(ms), servingGroupName, roleName)
+	for _, instance := range instances {
+		if instance.Name == roleID {
+			observed = instance
 			break
 		}
 	}
-
-	if targetRole == nil {
-		klog.Warningf("role %s not found in ModelServing spec or ControllerRevision", roleName)
-		return false, nil
+	targetRole, revision, hash, err := c.roleTemplateForInstance(context.Background(), ms, servingGroupName, roleName, observed, pods)
+	if err != nil {
+		c.enqueueModelServingAfter(ms, enqueueAfter)
+		return false, err
 	}
 
 	// Calculate expected pod count for this role replica
 	// Each role replica has 1 entry pod + workerReplicas worker pods
 	expectedPods := 1 + int(targetRole.WorkerReplicas)
 
-	// Count running and ready pods
+	// Require the expected ordinals and one consistent instance template.
+	// An extra or mixed-version worker cannot hide a missing old worker.
 	runningPods := 0
+	readyNames := make(map[string]bool, len(pods))
 	for _, pod := range pods {
-		if utils.IsPodRunningAndReady(pod) {
+		if pod.DeletionTimestamp == nil && utils.IsOwnedByModelServingWithUID(pod, ms.UID) &&
+			utils.IsPodRunningAndReady(pod) &&
+			(utils.ObjectRevision(pod) == revision || (hash != "" && utils.ObjectRoleTemplateHash(pod) == hash)) {
 			runningPods++
+			readyNames[pod.Name] = true
+		}
+	}
+	if len(pods) != expectedPods {
+		klog.V(4).Infof("Role %s/%s: %d/%d pods present", roleName, roleID, len(pods), expectedPods)
+		return false, nil
+	}
+	for i := 0; i < expectedPods; i++ {
+		if !readyNames[utils.GeneratePodName(servingGroupName, roleID, i)] {
+			klog.V(4).Infof("Role %s/%s: pod ordinal %d is missing, not ready or has a different template", roleName, roleID, i)
+			return false, nil
 		}
 	}
 
@@ -3230,11 +3262,11 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 }
 
 func (c *ModelServingController) createOrUpdatePodGroupByServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
-	roles, err := c.rolesForServingGroupReadiness(ms, servingGroupName)
+	projected, err := c.modelServingForPodGroup(ctx, ms, servingGroupName)
 	if err != nil {
 		return fmt.Errorf("failed to resolve PodGroup requirements for ServingGroup %s: %w", servingGroupName, err)
 	}
-	return c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, servingGroupName, roles)
+	return c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, servingGroupName, projected.Spec.Template.Roles)
 }
 
 // createOrUpdatePodGroupByServingGroupWithRoles keeps the PodGroup gang size

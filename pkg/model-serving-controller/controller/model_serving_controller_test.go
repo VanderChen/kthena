@@ -231,6 +231,7 @@ func TestCreateOrUpdatePodGroupByServingGroupEmitsFailureEvent(t *testing.T) {
 	recorder := record.NewFakeRecorder(1)
 	controller := &ModelServingController{
 		recorder: recorder,
+		store:    datastore.New(),
 		podGroupManager: &fakePodGroupManager{
 			createOrUpdateFunc: func(_ context.Context, _ *workloadv1alpha1.ModelServing, _ string) (error, time.Duration) {
 				return fmt.Errorf("networkTopology affinity rules require spec.topologyAffinity in the installed Volcano PodGroup CRD"), 0
@@ -2965,7 +2966,11 @@ func TestSyncRoleReplicasRecordedConfigurationBoundaries(t *testing.T) {
 			require.NoError(t, err)
 			require.Len(t, pods.Items, tt.wantReplicas, "missing Pods must still be recovered")
 			for _, pod := range pods.Items {
-				assert.Equal(t, tt.wantImage, pod.Spec.Containers[0].Image)
+				wantImage := tt.wantImage
+				if tt.mode == workloadv1alpha1.RoleRollingUpdate && utils.GetRoleID(&pod) == "p-0" {
+					wantImage = "old"
+				}
+				assert.Equal(t, wantImage, pod.Spec.Containers[0].Image)
 			}
 		})
 	}
@@ -6123,13 +6128,16 @@ func TestCheckRoleReady(t *testing.T) {
 			for i := 0; i < tt.podCount; i++ {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: ms.Namespace,
-						Name:      fmt.Sprintf("%s-%s-%d", tt.roleID, tt.roleName, i),
+						Namespace:       ms.Namespace,
+						Name:            utils.GeneratePodName(groupName, tt.roleID, i),
+						OwnerReferences: []metav1.OwnerReference{{APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing", UID: ms.UID}},
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
 							workloadv1alpha1.RoleLabelKey:             tt.roleName,
 							workloadv1alpha1.RoleIDKey:                tt.roleID,
+							workloadv1alpha1.RevisionLabelKey:         utils.ModelServingRevision(ms),
+							workloadv1alpha1.RoleTemplateHashLabelKey: utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]),
 						},
 					},
 				}
@@ -7874,8 +7882,6 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	groupName := "test-ms-0"
 	roleName := "prefill"
 	roleID := "prefill-0"
-	revision := "hash123"
-	roleTemplateHash := "rolehash123"
 
 	tests := []struct {
 		description    string
@@ -8088,6 +8094,8 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			kubeInformerFactory.Start(stop)
 			kubeInformerFactory.WaitForCacheSync(stop)
 
+			revision := utils.ModelServingRevision(ms)
+			roleTemplateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 			podIndexer := podInformer.Informer().GetIndexer()
 
 			// Add existing pods to indexer
@@ -8095,7 +8103,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
 						Namespace: ns,
-						Name:      existingPod.name,
+						Name:      utils.GeneratePodName(groupName, roleID, existingPod.workerID),
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: msName,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -8150,12 +8158,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 			}
 
 			// Create the new pod that triggers handleReadyPod
-			var newPodName string
-			if tt.newPodIsEntry {
-				newPodName = groupName + "-" + roleName + "-0"
-			} else {
-				newPodName = fmt.Sprintf("%s-%s-%d", groupName, roleName, tt.newPodWorkerID)
-			}
+			newPodName := utils.GeneratePodName(groupName, roleID, tt.newPodWorkerID)
 
 			newPod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -8284,7 +8287,7 @@ func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: namespace,
-					Name:      "test-ms-0-a-0-entry",
+					Name:      "test-ms-0-a-0-0",
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: msName,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -8299,6 +8302,9 @@ func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
 				},
 			}
+			pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))}
+			pod.Labels[workloadv1alpha1.RevisionLabelKey] = utils.ModelServingRevision(ms)
+			pod.Labels[workloadv1alpha1.RoleTemplateHashLabelKey] = utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 			require.NoError(t, podInformer.Informer().GetIndexer().Add(pod))
 			require.NoError(t, controller.handleReadyPod(ms, groupName, pod))
 			assert.Equal(t, tt.expectedQueue, queue.Len())
