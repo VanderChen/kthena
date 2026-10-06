@@ -8654,7 +8654,7 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 			}
 
 			groups := append(tt.runningOutdatedGroups, tt.notRunningOutdatedGroups...)
-			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, tt.maxScaleDown, groups)
+			result, err := controller.deleteOutdatedServingGroups(context.Background(), ms, rolloutBudget{total: tt.maxScaleDown, healthy: tt.maxScaleDown}, groups)
 
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedUpdateCount, result)
@@ -9214,7 +9214,7 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 	assert.Equal(t, "new", groups[2].Revision)
 }
 
-func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T) {
+func TestServingGroupRollingUpdateCountsUnavailableProtectedGroups(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
 		kthenafake.NewSimpleClientset(),
@@ -9257,7 +9257,7 @@ func TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups(t *testing.T
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, group.ordinal), group.status))
 	}
 	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new", &roleRolloutPolicy{}))
-	assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, 2)))
 }
 
 func TestSyncServingGroupReplicasHonorsReducedMaxSurge(t *testing.T) {
@@ -10487,4 +10487,116 @@ func TestResolveRoleTemplateHash_ReturnsEmptyWhenControllerRevisionNotFound(t *t
 
 	hash := controller.resolveRoleTemplateHash(ms, roleName, pod)
 	assert.Equal(t, "", hash)
+}
+
+// The candidate ordinal and Ready floor are independent constraints (API 2.2
+// RU-B01..B07/B11/B15). Keep deleting slots present to exercise a second sync.
+func TestServingGroupRolloutAvailabilityLedger(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		n, u, p int
+		states  []datastore.ServingGroupStatus
+		target  []int
+		want    []int
+	}{
+		{"healthy descending", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupRunning}, nil, []int{2}},
+		{"protected failure cannot fund healthy deletion", 3, 1, 1, []datastore.ServingGroupStatus{datastore.ServingGroupCreating, datastore.ServingGroupRunning, datastore.ServingGroupRunning}, nil, nil},
+		{"skip healthy higher ordinal for old failure", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupCreating, datastore.ServingGroupRunning, datastore.ServingGroupRunning}, nil, []int{0}},
+		{"all old unavailable repairs one", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupCreating, datastore.ServingGroupCreating, datastore.ServingGroupCreating}, nil, []int{2}},
+		{"new unavailable spends allowance", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupCreating, datastore.ServingGroupCreating, datastore.ServingGroupCreating}, []int{2}, nil},
+		{"new unavailable surge no healthy credit", 3, 0, 0, []datastore.ServingGroupStatus{datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupCreating}, []int{3}, nil},
+		{"new Ready surge supplies healthy credit", 3, 0, 0, []datastore.ServingGroupStatus{datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupRunning}, []int{3}, []int{2}},
+		{"bad old plus unavailable new surge", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupRunning, datastore.ServingGroupRunning, datastore.ServingGroupCreating, datastore.ServingGroupCreating}, []int{3}, []int{2}},
+		{"existing deletion cannot spend twice", 3, 1, 0, []datastore.ServingGroupStatus{datastore.ServingGroupCreating, datastore.ServingGroupCreating, datastore.ServingGroupDeleting}, nil, []int{2}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := createStandardModelServing("ledger", int32(tc.n), 1)
+			ms.UID = "ledger-uid"
+			ms.Spec.Template.Roles[0].WorkerReplicas = 0
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate, RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(tc.u)), MaxSurge: ptr.To(intstr.FromInt(1)), Partition: ptr.To(intstr.FromInt(tc.p))}}
+			c := newRevisionTestController(t, ms)
+			recordDifferentRevision(t, c, ms, "old")
+			target, err := c.revisionHistory(context.Background(), ms).desiredRevision(context.Background())
+			require.NoError(t, err)
+			for ordinal, status := range tc.states {
+				revision := "old"
+				for _, updated := range tc.target {
+					if ordinal == updated {
+						revision = target
+					}
+				}
+				addReadyLegacyGroupToController(t, c, ms, ms.Spec.Template.Roles[0], ordinal, revision)
+				require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), utils.GenerateServingGroupName(ms.Name, ordinal), status))
+			}
+			for pass := 0; pass < 2; pass++ {
+				require.NoError(t, c.manageRollingUpdate(context.Background(), ms, target, nil))
+				groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+				require.NoError(t, err)
+				var deleting []int
+				for _, group := range groups {
+					if group.Status == datastore.ServingGroupDeleting {
+						_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+						deleting = append(deleting, ordinal)
+					}
+				}
+				require.Equal(t, tc.want, deleting, "pass %d must not reuse in-flight credit", pass)
+			}
+		})
+	}
+}
+
+func TestPodReadinessLossRevokesAvailabilityWithoutRecovery(t *testing.T) {
+	ms := createStandardModelServing("readiness-loss", 1, 1)
+	ms.UID = "readiness-loss-uid"
+	ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+	ms.Spec.Template.Roles[0].WorkerReplicas = 0
+	c := newRevisionTestController(t, ms)
+	revision, err := c.revisionHistory(context.Background(), ms).desiredRevision(context.Background())
+	require.NoError(t, err)
+	pod := addReadyLegacyGroupToController(t, c, ms, ms.Spec.Template.Roles[0], 0, revision)
+	unready := pod.DeepCopy()
+	unready.Status.Conditions[0].Status = corev1.ConditionFalse
+	require.NoError(t, c.podsInformer.GetIndexer().Update(unready))
+	c.updatePod(pod, unready)
+	key := utils.GetNamespaceName(ms)
+	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, "readiness-loss-0", "prefill", "prefill-0"))
+	require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(key, "readiness-loss-0"))
+	for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
+		require.NotEqual(t, "delete-collection", action.GetVerb(), "readiness loss must not trigger failure recovery")
+	}
+	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	c.updatePod(unready, pod)
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, "readiness-loss-0", "prefill", "prefill-0"))
+	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "readiness-loss-0"))
+}
+
+func TestRolloutRefreshesReadinessBeforeQueuedPodCallback(t *testing.T) {
+	for _, mode := range []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate} {
+		t.Run(string(mode), func(t *testing.T) {
+			ms := createStandardModelServing("queued-ready", 3, 1)
+			ms.UID = "queued-ready-uid"
+			ms.Spec.Template.Roles[0].WorkerReplicas = 0
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: mode, RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1))}}
+			c := newRevisionTestController(t, ms)
+			recordDifferentRevision(t, c, ms, "old")
+			for i := 0; i < 3; i++ {
+				pod := addReadyLegacyGroupToController(t, c, ms, ms.Spec.Template.Roles[0], i, "old")
+				if i == 0 {
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+				}
+			}
+			key := utils.GetNamespaceName(ms)
+			require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "queued-ready-0"))
+			require.NoError(t, c.refreshRolloutAvailability(c.withRevisionHistory(context.Background(), ms), ms))
+			require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(key, "queued-ready-0"))
+			require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, "queued-ready-0", "prefill", "prefill-0"))
+			require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "queued-ready-2"))
+			if mode == workloadv1alpha1.ServingGroupRollingUpdate {
+				require.NoError(t, c.manageRollingUpdate(context.Background(), ms, utils.ModelServingRevision(ms), nil))
+				require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, "queued-ready-0"))
+				require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "queued-ready-2"))
+			}
+		})
+	}
 }
