@@ -422,3 +422,65 @@ func TestDesiredRevisionCollisionPreservesHistoryAndWorkload(t *testing.T) {
 		require.NotContains(t, []string{"create", "update", "patch", "delete", "delete-collection"}, action.GetVerb())
 	}
 }
+
+func TestZeroReplicaRoleTemplateCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                      string
+		groupMode, allZero, residual, terminating, missingHistory bool
+		want                                                      templateComparison
+	}{
+		{name: "only zero Role changed", want: templateEquivalent},
+		{name: "all Roles zero", allZero: true, want: templateEquivalent},
+		{name: "SG rollout still compares zero Role template", groupMode: true, want: templateDifferent},
+		{name: "old instance remains", residual: true, want: templateDifferent},
+		{name: "terminating instance remains", residual: true, terminating: true, want: templateDifferent},
+		{name: "nonzero Role history unknown", missingHistory: true, want: templateUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := createStandardModelServing("zero-role", 1, 1)
+			old.UID = "zero-role-uid"
+			old.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+			old.Spec.Template.Roles[0].WorkerReplicas = 0
+			if !tc.allZero {
+				active := *old.Spec.Template.Roles[0].DeepCopy()
+				active.Name = "decode"
+				active.Replicas = ptr.To[int32](1)
+				old.Spec.Template.Roles = append(old.Spec.Template.Roles, active)
+			}
+			ms := old.DeepCopy()
+			ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+			if tc.groupMode {
+				ms.Spec.RolloutStrategy.Type = workloadv1alpha1.ServingGroupRollingUpdate
+			}
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "zero:v2"
+			c := newRevisionTestController(t, ms)
+			ctx := context.Background()
+			if !tc.missingHistory {
+				_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, "legacy", old.Spec.Template.Roles)
+				require.NoError(t, err)
+			}
+			target, err := c.revisionHistory(ctx, ms).desiredRevision(ctx)
+			require.NoError(t, err)
+			c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "legacy")
+			if !tc.allZero {
+				addReadyLegacyGroupToController(t, c, ms, old.Spec.Template.Roles[1], 0, "legacy")
+			}
+			if tc.residual {
+				pod := addReadyLegacyGroupToController(t, c, ms, old.Spec.Template.Roles[0], 0, "legacy")
+				if tc.terminating {
+					pod.DeletionTimestamp = ptr.To(metav1.Now())
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "zero-role-0", "prefill", "prefill-0", datastore.RoleDeleting))
+				}
+			}
+			groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+			require.NoError(t, err)
+			require.Equal(t, tc.want, c.compareServingGroupTemplate(ctx, ms, groups[0], target))
+			// Role list ordering cannot change which empty Role is ignored.
+			if len(ms.Spec.Template.Roles) == 2 {
+				ms.Spec.Template.Roles[0], ms.Spec.Template.Roles[1] = ms.Spec.Template.Roles[1], ms.Spec.Template.Roles[0]
+				require.Equal(t, tc.want, c.compareServingGroupTemplate(ctx, ms, groups[0], target))
+			}
+		})
+	}
+}

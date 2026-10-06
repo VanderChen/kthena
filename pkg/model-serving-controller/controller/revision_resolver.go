@@ -159,6 +159,7 @@ func (c *ModelServingController) compareRoleTemplate(ctx context.Context, ms *wo
 	if err != nil {
 		return templateUnknown
 	}
+
 	for _, pod := range pods {
 		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 			continue
@@ -330,6 +331,38 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 	if err != nil {
 		return templateUnknown
 	}
+	remaining := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
+	for _, role := range ms.Spec.Template.Roles {
+		remaining[role.Name] = role
+	}
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
+		// A zero-replica Role has no template replacement to perform. The desired
+		// snapshot is persisted before reconciliation; the group's original
+		// revision must not keep an otherwise completed independent rollout open.
+		// Retain observations (including terminating Pods) until they disappear.
+		pods, err := c.getPodsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, group.Name))
+		if err != nil {
+			return templateUnknown
+		}
+		for _, role := range ms.Spec.Template.Roles {
+			if roleReplicas(role) != 0 || len(rolesByName[role.Name]) != 0 {
+				continue
+			}
+			observed := false
+			for _, pod := range pods {
+				if utils.IsOwnedByModelServingWithUID(pod, ms.UID) && utils.GetRoleName(pod) == role.Name {
+					observed = true
+					break
+				}
+			}
+			if !observed {
+				delete(remaining, role.Name)
+			}
+		}
+		if len(remaining) == 0 && len(rolesByName) == 0 {
+			return templateEquivalent
+		}
+	}
 	// Empty groups have no per-Role observation yet. Their recorded revision
 	// still describes the intended template; readiness is evaluated separately.
 	if len(rolesByName) == 0 {
@@ -348,18 +381,14 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 		}
 		return templateDifferent
 	}
-	remaining := make(map[string]workloadv1alpha1.Role, len(ms.Spec.Template.Roles))
-	for _, role := range ms.Spec.Template.Roles {
-		remaining[role.Name] = role
-	}
 	result := templateEquivalent
 	for roleName, roles := range rolesByName {
+		if len(roles) == 0 {
+			continue
+		}
 		_, exists := remaining[roleName]
 		if !exists {
 			return templateDifferent
-		}
-		if len(roles) == 0 {
-			continue
 		}
 		delete(remaining, roleName)
 		for _, role := range roles {
