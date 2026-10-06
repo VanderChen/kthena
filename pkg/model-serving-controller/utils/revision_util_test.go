@@ -326,3 +326,64 @@ func TestEqualRoleTemplatesForRevision(t *testing.T) {
 		t.Fatal("a worker topology change must not be revision-equivalent")
 	}
 }
+
+func TestSerializedRevisionIgnoresOmittedNilFields(t *testing.T) {
+	type roleBeforeDependencyUpgrade struct {
+		Name string `json:"name"`
+	}
+	type roleAfterDependencyUpgrade struct {
+		Name        string  `json:"name"`
+		WorkloadRef *string `json:"workloadRef,omitempty"`
+	}
+
+	before := roleBeforeDependencyUpgrade{Name: "decode"}
+	afterWithNilField := roleAfterDependencyUpgrade{Name: "decode"}
+	if Revision(before) == Revision(afterWithNilField) {
+		t.Fatal("test requires direct Go-struct hashing to observe the added field")
+	}
+	if serializedRevision(before) != serializedRevision(afterWithNilField) {
+		t.Fatal("an added nil field omitted from JSON changed the serialized revision")
+	}
+
+	workloadRef := "inference.example.com/workload"
+	afterWithValue := roleAfterDependencyUpgrade{Name: "decode", WorkloadRef: &workloadRef}
+	if serializedRevision(before) == serializedRevision(afterWithValue) {
+		t.Fatal("a non-nil field included in JSON did not change the serialized revision")
+	}
+}
+
+func TestRevisionComparisonUsesHashProjection(t *testing.T) {
+	original := newRole("prefill", int32Ptr(1), 0)
+	for _, change := range []struct {
+		name   string
+		mutate func(*workloadv1alpha1.Role)
+		equal  bool
+	}{
+		{"replicas", func(r *workloadv1alpha1.Role) { r.Replicas = int32Ptr(3) }, true},
+		{"rollout policy", func(r *workloadv1alpha1.Role) { p := intstr.FromInt(1); r.Partition = &p }, true},
+		{"entry template", func(r *workloadv1alpha1.Role) { r.EntryTemplate.Spec.Containers[0].Image = "new:v2" }, false},
+		{"worker count", func(r *workloadv1alpha1.Role) { r.WorkerReplicas = 2 }, false},
+		{"worker template", func(r *workloadv1alpha1.Role) { r.WorkerTemplate = r.EntryTemplate.DeepCopy() }, false},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			before := original.DeepCopy()
+			changed := original.DeepCopy()
+			change.mutate(changed)
+			if got := EqualRoleTemplateForRevision(original, *changed); got != change.equal {
+				t.Fatalf("single comparison = %v", got)
+			}
+			if got := EqualRoleTemplatesForRevision([]workloadv1alpha1.Role{original}, []workloadv1alpha1.Role{*changed}); got != change.equal {
+				t.Fatalf("collection comparison = %v", got)
+			}
+			if got := CalRoleTemplateHash(original) == CalRoleTemplateHash(*changed); got != change.equal {
+				t.Fatalf("Role hash equality = %v", got)
+			}
+			if got := ModelServingRevision(newModelServing([]workloadv1alpha1.Role{original})) == ModelServingRevision(newModelServing([]workloadv1alpha1.Role{*changed})); got != change.equal {
+				t.Fatalf("ModelServing hash equality = %v", got)
+			}
+			if !EqualRoleTemplateForRevision(original, *before) || *original.Replicas != *before.Replicas {
+				t.Fatal("comparison mutated input")
+			}
+		})
+	}
+}

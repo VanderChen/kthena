@@ -353,7 +353,7 @@ func dependencyCapacityRequirements(
 			return false
 		}
 		oldRole, existed := oldRoles[roleName]
-		return !existed || utils.CalRoleTemplateHash(oldRole) != utils.CalRoleTemplateHash(newRole)
+		return !existed || !utils.EqualRoleTemplateForRevision(oldRole, newRole)
 	}
 
 	// Presence means target capacity is required; true additionally means old

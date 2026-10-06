@@ -176,9 +176,9 @@ func TestResolveRoleRolloutStateReconstructsTerminatingOldReplica(t *testing.T) 
 		roleList,
 		0,
 		true,
-		map[int]string{
-			1: "old",
-			4: "old", // Scale-down excess is ignored.
+		map[int]templateComparison{
+			1: templateDifferent,
+			4: templateDifferent, // Scale-down excess is ignored.
 		},
 	)
 
@@ -210,12 +210,10 @@ func TestTerminatingRoleReplicasReadsPodInformerAfterRestart(t *testing.T) {
 	controller := &ModelServingController{podsInformer: informer, kubeClientSet: kubefake.NewSimpleClientset()}
 	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"}, Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "a"}}}}}
 	recordDifferentRevision(t, controller, ms, "legacy")
-	historical, err := controller.revisionHistory(context.Background(), ms).roles(context.Background(), "legacy")
-	require.NoError(t, err)
 
 	replicas := controller.terminatingRoleReplicas(context.Background(), ms, datastore.ServingGroup{Name: "test-ms-0"})
 	require.Contains(t, replicas, "a")
-	assert.Equal(t, utils.CalRoleTemplateHash(historical[0]), replicas["a"][3])
+	assert.Equal(t, templateDifferent, replicas["a"][3])
 }
 
 func TestResolveRoleRolloutStateDoesNotReserveUnadmittedScaleUp(t *testing.T) {

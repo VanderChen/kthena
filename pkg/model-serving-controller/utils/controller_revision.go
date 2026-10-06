@@ -70,17 +70,12 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		// A revision name identifies immutable historical template data. Never
 		// overwrite it: doing so would make stable ordinal recovery use a
 		// template different from the one referenced by live resources.
-		if string(existing.Data.Raw) != string(data) {
-			// Replica counts and rollout policy are intentionally excluded from
-			// revision identity. Reuse an immutable snapshot when those are the
-			// only differences, just as Kubernetes reuses a semantically equal
-			// ReplicaSet while ignoring its template hash label.
-			if desiredRoles, ok := templateData.([]workloadv1alpha1.Role); ok {
-				existingRoles, decodeErr := GetRolesFromControllerRevision(existing)
-				if decodeErr == nil && EqualRoleTemplatesForRevision(existingRoles, desiredRoles) {
-					return existing, nil
-				}
-			}
+		sameTemplate := string(existing.Data.Raw) == string(data)
+		if roles, ok := templateData.([]workloadv1alpha1.Role); ok {
+			historical, err := GetRolesFromControllerRevision(existing)
+			sameTemplate = err == nil && EqualRoleTemplatesForRevision(historical, roles)
+		}
+		if !sameTemplate {
 			return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, controllerRevisionName)
 		}
 		return existing, nil
