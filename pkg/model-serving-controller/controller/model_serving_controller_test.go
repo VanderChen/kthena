@@ -8662,7 +8662,7 @@ func TestDeleteOutdatedServingGroups(t *testing.T) {
 	}
 }
 
-func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
+func TestServingGroupMaxSurgeRestoresOrdinals(t *testing.T) {
 	controller, err := NewModelServingController(
 		kubefake.NewSimpleClientset(),
 		kthenafake.NewSimpleClientset(),
@@ -8713,6 +8713,13 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 	surgeName := utils.GenerateServingGroupName(ms.Name, 2)
 	assert.Equal(t, surgeName, groups[2].Name)
 	assert.Equal(t, "new-revision", groups[2].Revision)
+	// Deliver creation to the informer before simulating readiness, as the real
+	// event stream does, so subsequent allocation sees the temporary identity.
+	created, err := controller.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range created.Items {
+		require.NoError(t, controller.podsInformer.GetIndexer().Add(&created.Items[i]))
+	}
 
 	// An unready surge consumes its slot but cannot authorize deletion when
 	// maxUnavailable is zero.
@@ -8735,18 +8742,32 @@ func TestServingGroupMaxSurgeRetainedPoolLifecycle(t *testing.T) {
 
 	require.NoError(t, controller.manageRollingUpdate(context.Background(), ms, "new-revision", &roleRolloutPolicy{}))
 
-	// Once all remaining groups use the new revision, replica synchronization
-	// derives the normal desired count. The high ordinal remains a normal replica
-	// rather than being identified and removed as a surge group.
+	// Observe the persisted marker as a real informer would (the fake client's
+	// Create operation does not populate the controller's Pod cache).
+	pods, err := controller.kubeClientSet.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+	require.NoError(t, err)
+	for i := range pods.Items {
+		require.NoError(t, controller.podsInformer.GetIndexer().Add(&pods.Items[i]))
+	}
+
+	// With no outdated groups left, keep surge capacity while restoring 0.
 	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
 	groups, err = controller.store.GetServingGroupByModelServing(key)
 	require.NoError(t, err)
-	require.Len(t, groups, 2)
-	for _, group := range groups {
-		assert.Equal(t, "new-revision", group.Revision)
+	require.Len(t, groups, 3)
+	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 0), groups[0].Name)
+	assert.Equal(t, datastore.ServingGroupCreating, groups[0].Status)
+	assert.Equal(t, datastore.ServingGroupRunning, groups[2].Status)
+
+	// A NotReady replacement must not authorize removal of the Ready surge.
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, surgeName))
+	require.NoError(t, controller.store.UpdateServingGroupStatus(key, groups[0].Name, datastore.ServingGroupRunning))
+	require.NoError(t, controller.syncServingGroupReplicas(context.Background(), ms, "new-revision"))
+	assert.Equal(t, datastore.ServingGroupDeleting, controller.store.GetServingGroupStatus(key, surgeName))
+	for _, ordinal := range []int{0, 1} {
+		assert.Equal(t, datastore.ServingGroupRunning, controller.store.GetServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal)))
 	}
-	assert.Equal(t, utils.GenerateServingGroupName(ms.Name, 1), groups[0].Name)
-	assert.Equal(t, surgeName, groups[1].Name)
 }
 
 func TestManageRollingUpdateIncludesSurgeStatusInMaxScaleDown(t *testing.T) {

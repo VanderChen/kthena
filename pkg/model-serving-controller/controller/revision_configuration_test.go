@@ -45,7 +45,7 @@ func TestRecordedConfigurationSurvivesRecovery(t *testing.T) {
 	target, err := c.revisionHistory(ctx, desired).desiredRevision(ctx)
 	require.NoError(t, err)
 	require.NotEqual(t, "historical", target)
-	require.NoError(t, c.CreatePodsByRole(ctx, role, desired, 0, 0, "historical", observed.RoleTemplateHash))
+	require.NoError(t, c.CreatePodsByRole(ctx, role, desired, 0, 0, "historical", observed.RoleTemplateHash, ""))
 	pods, err := c.kubeClientSet.CoreV1().Pods(old.Namespace).List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	require.NotEmpty(t, pods.Items)

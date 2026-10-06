@@ -271,7 +271,7 @@ func TestRecoveryPolicyPodDeletionScope(t *testing.T) {
 				if policy == workloadv1alpha1.NoneRestartPolicy {
 					require.Empty(t, recoveryDeletedPods(kube))
 					require.Positive(t, c.workqueue.Len())
-					require.NoError(t, c.CreatePodsByRole(context.Background(), ms.Spec.Template.Roles[0], ms, 0, 0, utils.ObjectRevision(pods[0]), utils.ObjectRoleTemplateHash(pods[0])))
+					require.NoError(t, c.CreatePodsByRole(context.Background(), ms.Spec.Template.Roles[0], ms, 0, 0, utils.ObjectRevision(pods[0]), utils.ObjectRoleTemplateHash(pods[0]), ""))
 					_, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), pods[1].Name, metav1.GetOptions{})
 					require.NoError(t, err)
 				} else {

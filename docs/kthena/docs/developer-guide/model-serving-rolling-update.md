@@ -45,9 +45,13 @@ $$
 N_{available} \geq replicas - maxUnavailable
 $$
 
-An unready additional ServingGroup counts toward the replica ceiling but does not contribute to availability. If it cannot be scheduled, the rollout waits without deleting available capacity. No rollout lifecycle label or status journal is required because the expected count is derived from the observed revisions on every reconciliation.
+An unready additional ServingGroup counts toward the replica ceiling but does not contribute to availability. If it cannot be scheduled, the rollout waits without deleting available capacity. Temporary instances created beyond the desired ordinal range carry a controller-managed `modelserving.volcano.sh/surge` Pod annotation. The annotation is separate from the template and revision hash and lets the controller finish cleanup after a restart.
 
-Ordinal values do not identify surge capacity. Binpack scale-down can leave sparse ordinals or an ordinal greater than `replicas`, and that ServingGroup remains a normal replica. When the update finishes, the expected count returns to `replicas` and the regular ModelServing binpack scale-down policy selects excess groups using readiness and deletion cost. Changing `replicas` or `maxSurge` during rollout therefore changes only the target count; it does not force deletion of high ordinals. Partition protection remains ordinal-based and independent of the current replica count.
+After the last eligible outdated ServingGroup is removed, the controller restores missing desired instances before retiring marked surge groups. Creation stays within `replicas + maxSurge`; deletion preserves the `maxUnavailable` budget. With `maxUnavailable: 0`, a Ready surge group stays until its replacement is Ready. A rollout starting with `0..replicas-1` therefore returns to that ordinal range before it reports completion.
+
+Unmarked sparse or high ordinals left by ordinary binpack scale-down remain normal replicas. Increasing `replicas` to include a temporary ordinal adopts that instance without replacing its Pods and removes its surge annotation. Lowering the surge budget during cleanup uses the new availability budget; zero budgets pause replacement. Existing unmarked sparse instances from an older controller are not automatically treated as temporary replicas.
+
+A healthy high ordinal already using the target template retains its identity. An outdated high ordinal can instead be replaced at the lowest missing ordinal during a real template rollout. Partition always applies to the new ordinal: with `replicas: 2`, `partition: 2`, and old replicas `{0:v1, 3:v1}`, submitting v2 can replace 3 with 1 using historical v1. The resulting `{0:v1, 1:v1}` is a partition pause, with zero updated replicas, rather than full adoption of v2. A stable hole alone never starts a rollout. The same rule applies to Role replicas.
 
 In the following we'll show how rolling update processes for a `ModelServing` with four replicas. Three Replica status are simulated here:
 
@@ -94,6 +98,6 @@ Kthena evaluates Role updates across all `ServingGroups`. Because each `ServingG
 
 While an updateable outdated Role replica exists, the controller temporarily changes that Role's expected replica count from `replicas` to `replicas + maxSurge`. Normal Role replica synchronization creates and later removes the additional capacity, while rolling-update reconciliation only selects outdated replicas within the `maxUnavailable` budget. An unready new replica consumes availability budget and can naturally block further deletion.
 
-Role ordinals do not identify surge capacity. Binpack scale-down may retain sparse or high Role ordinals as normal replicas. When the update finishes, the expected count returns to `replicas`, and the existing Role scale-down policy selects excess replicas using readiness and deletion cost.
+Role rollout uses the same completion rules within each ServingGroup: restore missing desired Role instances, wait for sufficient Ready capacity, and remove the marked temporary instances using that Role's budgets. Entry and worker Pods carry the marker so cleanup survives controller restart. Unmarked binpack survivors retain their identities; expansion can adopt a temporary Role instance without changing its Pod UIDs.
 
 `RoleRollingUpdate` rejects `recoveryPolicy: ServingGroupRecreate`, because deleting an outdated Role would recreate its entire ServingGroup. Use `RoleRecreate` or `None`. `ServingGroupRollingUpdate` supports all three recovery policies.
