@@ -85,7 +85,14 @@ func projectRoleTemplatesForRevision(roles []workloadv1alpha1.Role) []roleTempla
 
 // ModelServingRevision calculates the revision of a ModelServing object.
 func ModelServingRevision(ms *workloadv1alpha1.ModelServing) string {
-	return serializedRevision(projectRoleTemplatesForRevision(ms.Spec.Template.Roles))
+	configuration, err := BuildRevisionConfiguration(ms)
+	if err != nil {
+		return ""
+	}
+	return serializedRevision(struct {
+		Roles         []roleTemplateRevision `json:"roles"`
+		Configuration json.RawMessage        `json:"configuration"`
+	}{projectRoleTemplatesForRevision(ms.Spec.Template.Roles), configuration})
 }
 
 // CalRoleTemplateHash calculates the revision hash for a Role template.

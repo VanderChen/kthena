@@ -2,6 +2,8 @@
 
 The ModelServing plugin framework lets you customize Pods and opt in to auxiliary Role resources managed by the ModelServing controller. The framework supports different inference engines (e.g., vLLM, TensorRT-LLM), accelerators (GPU, NPU, etc.), and optional integrations such as per-Role Headless Services.
 
+**`spec.plugins` is immutable after creation.** With the ModelServing validating webhook enabled, updates that add, remove, reorder, or change plugins are rejected. This includes adding the first plugin and removing all plugins, in both SG and Role rollout modes and at zero replicas. Create a new ModelServing to use a different plugin configuration. See [Plugin 不可修改：规则与场景](./modelserving-plugin-immutability.md) for examples and migration guidance.
+
 ## Overview
 
 The plugin framework provides an extensible way to customize Pods before creation without modifying the core ModelServing API. Key features include:

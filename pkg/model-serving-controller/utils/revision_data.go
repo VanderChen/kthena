@@ -32,7 +32,16 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
 
-const defaultSchedulerName = "volcano"
+// Omitted schedulerName is defaulted to volcano by admission. Explicit empty
+// PodSpec schedulerName selects the Kubernetes default scheduler.
+const defaultSchedulerName = corev1.DefaultSchedulerName
+
+func EffectiveSchedulerName(name string) string {
+	if name == "" {
+		return defaultSchedulerName
+	}
+	return name
+}
 
 type modelServingRevisionPatch struct {
 	Spec modelServingRevisionSpec `json:"spec"`

@@ -137,6 +137,8 @@ func (v *ModelServingValidator) validateModelServingUpdate(ctx context.Context, 
 	allErrs = append(allErrs, validateRoleNamesImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
+	allErrs = append(allErrs, validatePluginsImmutable(oldModelServing, modelServing)...)
+	allErrs = append(allErrs, validateSchedulerNameUpdate(oldModelServing, modelServing)...)
 	return v.validateModelServingErrors(ctx, modelServing, allErrs)
 }
 
@@ -1040,4 +1042,9 @@ func validateRestartGracePeriod(ms *workloadv1alpha1.ModelServing) field.ErrorLi
 		return field.ErrorList{field.Invalid(field.NewPath("spec", "template", "restartGracePeriodSeconds"), *seconds, "must be -1 (disable proactive recovery) or a non-negative number of seconds")}
 	}
 	return nil
+}
+
+// Scheduler changes require migration of shared scheduling resources.
+func validateSchedulerNameUpdate(old, current *workloadv1alpha1.ModelServing) field.ErrorList {
+	return apivalidation.ValidateImmutableField(utils.EffectiveSchedulerName(current.Spec.SchedulerName), utils.EffectiveSchedulerName(old.Spec.SchedulerName), field.NewPath("spec", "schedulerName"))
 }
