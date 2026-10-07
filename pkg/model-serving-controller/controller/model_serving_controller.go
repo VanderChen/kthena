@@ -930,6 +930,9 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	// Helper function to create a ServingGroup
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) error {
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
+		if err := c.checkGroupCreationSlot(ms, groupName); err != nil {
+			return err
+		}
 		klog.V(4).Infof("scaleUpServingGroups: creating/updating PodGroup for ServingGroup=%s", groupName)
 		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
 		if err := c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, groupName, roles); err != nil {
@@ -1642,6 +1645,9 @@ func (c *ModelServingController) getModelServingAndResourceDetails(resource meta
 }
 
 func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) (deleteErr error) {
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
 	selector := labels.SelectorFromSet(map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: groupName,
 		workloadv1alpha1.RoleLabelKey:      roleName,
@@ -1672,6 +1678,9 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 
 	pods, err := c.preparePodDeletion(ctx, ms, selector, deleteRoleScope)
 	if err != nil {
+		return err
+	}
+	if err := c.recheckPreparedDeletion(ctx, ms, pods); err != nil {
 		return err
 	}
 	deleteErr = c.deletePodUIDs(ctx, pods)
@@ -1721,6 +1730,16 @@ func (c *ModelServingController) manageRollingUpdate(
 			return nil
 		}
 		return fmt.Errorf("cannot get ServingGroupList from store, err:%v", err)
+	}
+
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
+	if pending, err := c.groupScaleDownPending(ms, servingGroupList); err != nil {
+		return err
+	} else if pending {
+		c.enqueueModelServingAfter(ms, enqueueAfter)
+		return nil
 	}
 
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
@@ -1951,6 +1970,13 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdate(
 		if len(outdatedRoles) == 0 {
 			continue
 		}
+		if pending, err := c.roleScaleDownPending(ms, sg.Name, roleSpec, roleList); err != nil {
+			return nil, false, err
+		} else if pending {
+			c.enqueueModelServingAfter(ms, enqueueAfter)
+			continue
+		}
+
 		budget, err := roleRolloutBudget(roleSpec, roleList, newUnavailable)
 		if err != nil {
 			klog.ErrorS(err, "Invalid Role rollout budget", "role", roleSpec.Name, "group", sg.Name)
@@ -3299,6 +3325,9 @@ func (c *ModelServingController) createPod(
 		}
 	}
 
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
 	// Invalidate before the request: AlreadyExists and ambiguous write errors
 	// also require a fresh observation before any subsequent rollout decision.
 	invalidateRolloutPodSnapshot(ctx)
@@ -3371,6 +3400,9 @@ func (c *ModelServingController) deleteConflictingPod(ctx context.Context, pod *
 }
 
 func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
 	status := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName)
 	if status == datastore.ServingGroupNotFound {
 		return nil
@@ -3397,6 +3429,9 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	selector := labels.SelectorFromSet(map[string]string{workloadv1alpha1.GroupNameLabelKey: servingGroupName})
 	pods, err := c.preparePodDeletion(ctx, ms, selector, deleteGroupScope)
 	if err != nil {
+		return err
+	}
+	if err = c.recheckPreparedDeletion(ctx, ms, pods); err != nil {
 		return err
 	}
 	if err = c.podGroupManager.DeletePodGroup(ctx, ms, servingGroupName); err != nil {
@@ -3449,6 +3484,9 @@ func (c *ModelServingController) createOrUpdatePodGroupByServingGroupWithRoles(
 	servingGroupName string,
 	roles []workloadv1alpha1.Role,
 ) error {
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
 	podGroupMS := ms.DeepCopy()
 	podGroupMS.Spec.Template.Roles = roles
 	if err, retryAfter := c.podGroupManager.CreateOrUpdatePodGroup(ctx, podGroupMS, servingGroupName); err != nil {
