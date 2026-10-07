@@ -3994,8 +3994,8 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 	}
 }
 
-// TestScaleDownServingGroupsWithPartition tests the scaleDownServingGroups function with partition protection.
-// Partition protects ServingGroups whose ordinal is less than the partition.
+// TestScaleDownServingGroupsWithPartition verifies that explicit shrink is independent of
+// the template partition (approved SG A.3.5 / API scaling contract).
 func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 	tests := []struct {
 		name                   string
@@ -4008,7 +4008,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 		description            string
 	}{
 		{
-			name:            "partition=3 protects first three existing groups",
+			name:            "partition=3 does not override deletion cost",
 			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   3,
@@ -4026,11 +4026,11 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1", "2"}, // R-3 and R-4 are outside the protected prefix.
-			description:            "Partition-protected replicas (R-0, R-1, R-2) should never be deleted even with low deletion cost",
+			expectedRemainingNames: []string{"0", "3", "4"}, // Lower-cost R-2 and R-1 are deleted.
+			description:            "Explicit shrink ranks deletion cost independently of template partition",
 		},
 		{
-			name:             "partition=3 protects not-ready groups in prefix",
+			name:             "partition=3 does not override unavailable first",
 			partition:        ptr.To(intstr.FromInt32(3)),
 			existingIndices:  []int{0, 1, 2, 3, 4},
 			expectedCount:    3,
@@ -4042,8 +4042,8 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1", "2"}, // R-3, R-4 deleted, R-1 protected even though not ready
-			description:            "Partition-protected replicas should never be deleted even if not ready",
+			expectedRemainingNames: []string{"0", "2", "3"}, // R-1 is unavailable; among Ready groups R-4 has the highest ordinal.
+			description:            "Unavailable replicas are selected first even below partition",
 		},
 		{
 			name:            "partition=1 does not protect sparse ordinals above the boundary",
@@ -4102,7 +4102,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 			description:            "A partition larger than the group count protects all existing groups equally",
 		},
 		{
-			name:            "partition=3, scale down below partition - delete protected after non-protected",
+			name:            "partition=3, shrink below partition retains the highest costs",
 			partition:       ptr.To(intstr.FromInt32(3)),
 			existingIndices: []int{0, 1, 2, 3, 4},
 			expectedCount:   2, // Scale down below partition value
@@ -4120,8 +4120,8 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				3: datastore.ServingGroupRunning,
 				4: datastore.ServingGroupRunning,
 			},
-			expectedRemainingNames: []string{"0", "1"}, // First delete R-3, R-4 (non-protected), then R-2 (protected, lowest cost)
-			description:            "When scaling down below partition, delete non-protected first, then protected",
+			expectedRemainingNames: []string{"3", "4"}, // Retain the two highest-cost Ready groups.
+			description:            "All formal replicas share one scale-down ranking",
 		},
 	}
 
@@ -4259,32 +4259,6 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				fmt.Sprintf("[%s] Remaining group indices should match expected. Got: %v, Want: %v",
 					tt.description, actualNames, tt.expectedRemainingNames))
 
-			// Verify partition protection: protected groups should only be deleted after all non-protected groups are deleted.
-			if tt.partition != nil && tt.partition.IntValue() > 0 {
-				protectedOrdinals := make(map[int]struct{})
-				for _, ordinal := range tt.existingIndices {
-					if ordinal < tt.partition.IntValue() {
-						protectedOrdinals[ordinal] = struct{}{}
-					}
-				}
-				// Count how many non-protected groups remain
-				remainingNonProtectedCount := 0
-				for _, g := range groups {
-					_, ordinal := utils.GetParentNameAndOrdinal(g.Name)
-					if _, protected := protectedOrdinals[ordinal]; !protected {
-						remainingNonProtectedCount++
-					}
-				}
-				// If there are remaining non-protected groups, protected groups should not be deleted
-				if remainingNonProtectedCount > 0 {
-					for ordinal := range protectedOrdinals {
-						groupName := utils.GenerateServingGroupName(msName, ordinal)
-						_, exists := controller.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName)
-						assert.True(t, exists,
-							fmt.Sprintf("[%s] Partition-protected replica R-%d should not be deleted when non-protected groups still exist", tt.description, ordinal))
-					}
-				}
-			}
 		})
 	}
 }

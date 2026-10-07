@@ -796,6 +796,24 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 		return err
 	}
 	replicas := modelServingReplicas(ms)
+	if err := c.adoptSurgeReplicas(ctx, ms, surgeServingGroup, "", "", replicas); err != nil {
+		return err
+	}
+	markedPods, err := c.surgePods(ms, surgeServingGroup, "", "")
+	if err != nil {
+		return err
+	}
+	temporary := markedSurgeNames(markedPods, surgeServingGroup, replicas)
+	formal := make([]datastore.ServingGroup, 0, len(servingGroupList))
+	for _, group := range servingGroupList {
+		if !temporary.Has(group.Name) {
+			formal = append(formal, group)
+		}
+	}
+	if len(formal) > replicas {
+		c.enqueueModelServingAfter(ms, enqueueAfter)
+		return c.scaleDownServingGroups(ctx, ms, formal, replicas)
+	}
 	expectedCount := replicas
 	surgeCleanup := false
 	isServingGroupRollingUpdate := ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
@@ -811,9 +829,6 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 		hasOutdated := c.hasUpdateableOutdatedServingGroup(ctx, ms, servingGroupList, newRevision, partition)
 		if hasOutdated {
 			expectedCount += maxSurge
-		}
-		if err := c.adoptSurgeReplicas(ctx, ms, surgeServingGroup, "", "", replicas); err != nil {
-			return err
 		}
 		if !hasOutdated || len(servingGroupList) > expectedCount {
 			surgeCleanup, err = c.finishServingGroupSurge(ctx, ms, servingGroupList, newRevision, maxSurge, partition)
@@ -1164,113 +1179,35 @@ func mergeLatestRoleReplicas(historicalRoles, latestRoles []workloadv1alpha1.Rol
 	return merged
 }
 
-// scaleDownRoles handles Role scaling down with two-level priority-based selection:
-// 1. Primary: Not-ready roles (Creating, NotFound) are deleted first
-// 2. Secondary: Among roles with same status, lower deletion cost = delete first
-// When partition is set, the first N replicas (where N = partition) are protected.
-// Non-protected replicas (after the first N) are deleted first, then protected replicas if needed.
+// scaleDownRoles selects explicit scale-down independently of partition:
+// unavailable first, then deletion cost, then descending ordinal.
 func (c *ModelServingController) scaleDownRoles(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName string, targetRole workloadv1alpha1.Role, roleList []datastore.Role, expectedCount int) error {
-	// Calculate priority information for all Roles
-	allScores := make([]RoleWithScore, 0, len(roleList))
+	scores := make([]RoleWithScore, 0, len(roleList))
 	for _, role := range roleList {
-		if role.Status == datastore.RoleDeleting {
-			// Skip roles that are already being deleted
+		if role.Status == datastore.RoleDeleting || c.rolloutDeletionPending(ms, groupName, targetRole.Name, role.Name) {
 			continue
 		}
-		scoreInfo := c.calculateRoleScore(ms, groupName, targetRole.Name, role.Name)
-		allScores = append(allScores, scoreInfo)
+		scores = append(scores, c.calculateRoleScore(ms, groupName, targetRole.Name, role.Name))
 	}
-
-	if len(allScores) <= expectedCount {
-		klog.V(4).Infof("No need to scale down role %s in ServingGroup %s: current count=%d, expected count=%d", targetRole.Name, groupName, len(allScores), expectedCount)
+	total := max(0, len(scores)-expectedCount)
+	if total == 0 {
 		return nil
 	}
-
-	partition, _, partitionErr := c.getPartition(rolePartition(ms, targetRole), roleReplicas(targetRole))
-	if partitionErr != nil {
-		klog.Errorf("scaleDownRoles: failed to parse partition for role %s: %v", targetRole.Name, partitionErr)
-		partition = 0
-	}
-
-	protectedRoleNames := sets.New[string]()
-	for _, role := range roleList {
-		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-		if ordinal >= 0 && ordinal < partition {
-			protectedRoleNames.Insert(role.Name)
-		}
-	}
-
-	var protectedScores []RoleWithScore
-	var nonProtectedScores []RoleWithScore
-	if partition > 0 {
-		protectedScores = make([]RoleWithScore, 0, len(allScores))
-		nonProtectedScores = make([]RoleWithScore, 0, len(allScores))
-		for _, score := range allScores {
-			if protectedRoleNames.Has(score.Name) {
-				protectedScores = append(protectedScores, score)
-			} else {
-				nonProtectedScores = append(nonProtectedScores, score)
-			}
-		}
-	} else {
-		nonProtectedScores = allScores
-	}
-
-	// Sort both lists by priority tuple: (priority, deletionCost, index)
-	// Lower priority value = higher deletion priority (delete first)
-	// Lower deletion cost = higher deletion priority
-	// Higher index = higher deletion priority (backward compatibility)
-	sortRoles := func(a, b RoleWithScore) int {
-		// Primary: Sort by priority (not-ready first)
+	slices.SortFunc(scores, func(a, b RoleWithScore) int {
 		if a.Priority != b.Priority {
-			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+			return cmp.Compare(a.Priority, b.Priority)
 		}
-
-		// Secondary: Among roles with same priority, lower deletion cost comes first
 		if a.DeletionCost != b.DeletionCost {
-			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+			return cmp.Compare(a.DeletionCost, b.DeletionCost)
 		}
-
-		// Tertiary: Higher index comes first (backward compatibility)
-		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-	}
-
-	slices.SortFunc(nonProtectedScores, sortRoles)
-
-	totalToDelete := max(0, len(allScores)-expectedCount)
-
-	// Role needs to scale down, and the ServingGroup status needs to be set to Scaling
-	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling)
-	klog.V(4).Infof("Setting ServingGroup %s/%s status to Scaling for role %s scaling down", ms.Namespace+"/"+ms.Name, groupName, targetRole.Name)
-	if err != nil {
-		klog.Errorf("failed to set ServingGroup %s/%s status: %v", ms.Namespace+"/"+ms.Name, groupName, err)
+		return cmp.Compare(b.Index, a.Index)
+	})
+	if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupScaling); err != nil {
 		return err
 	}
-
-	// Delete non-protected roles first (replicas after the first partition replicas)
-	numNonProtectedToDelete := min(totalToDelete, len(nonProtectedScores))
-	for i := 0; i < numNonProtectedToDelete; i++ {
-		target := nonProtectedScores[i]
-		klog.V(2).Infof("Scaling down non-protected role %s (priority: %d, deletion cost: %d, index: %d)",
-			target.Name, target.Priority, target.DeletionCost, target.Index)
+	for _, target := range scores[:total] {
 		if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
 			return err
-		}
-	}
-
-	// After all non-protected roles are deleted, proceed to delete protected roles if needed
-	remainingToDelete := totalToDelete - numNonProtectedToDelete
-	if remainingToDelete > 0 && partition > 0 {
-		// Sort protected scores only when we need to delete them
-		slices.SortFunc(protectedScores, sortRoles)
-		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
-		for i := 0; i < numProtectedToDelete; i++ {
-			target := protectedScores[i]
-			klog.V(2).Infof("Scaling down protected role %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
-				target.Name, target.Priority, target.DeletionCost, target.Index, partition)
-			if err := c.DeleteRole(ctx, ms, groupName, targetRole.Name, target.Name); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
@@ -1544,10 +1481,25 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		}
 	}
 
-	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
-		if err := c.adoptSurgeReplicas(ctx, ms, surgeRole, groupName, targetRole.Name, roleReplicas(targetRole)); err != nil {
-			return err
+	if err := c.adoptSurgeReplicas(ctx, ms, surgeRole, groupName, targetRole.Name, roleReplicas(targetRole)); err != nil {
+		return err
+	}
+	markedPods, err := c.surgePods(ms, surgeRole, groupName, targetRole.Name)
+	if err != nil {
+		return err
+	}
+	temporary := markedSurgeNames(markedPods, surgeRole, roleReplicas(targetRole))
+	formal := make([]datastore.Role, 0, len(roleList))
+	for _, role := range roleList {
+		if !temporary.Has(role.Name) {
+			formal = append(formal, role)
 		}
+	}
+	if len(formal) > roleReplicas(targetRole) {
+		c.enqueueModelServingAfter(ms, enqueueAfter)
+		return c.scaleDownRoles(ctx, ms, groupName, targetRole, formal, roleReplicas(targetRole))
+	}
+	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
 		if !c.hasUpdateableOutdatedRole(ctx, ms, groupName, targetRole, roleList) || len(roleList) > expectedCount {
 			handled, err := c.finishRoleSurge(ctx, ms, groupName, targetRole, roleList, servingGroupOrdinal, newRevision, allowTargetStart)
 			if handled || err != nil {
@@ -3111,96 +3063,30 @@ func forEachMissingOrdinal(expectedCount int, existingOrdinals []int, limit int,
 	}
 }
 
-// scaleDownServingGroups scales down the ServingGroups to the expected count with two-level priority-based selection:
-// 1. Primary: Not-ready groups (Creating, NotFound) are deleted first
-// 2. Secondary: Among groups with same status, lower deletion cost = delete first
-// When partition is set, the first N replicas (where N = partition) are protected.
-// Non-protected replicas (after the first N) are deleted first, then protected replicas if needed.
+// scaleDownServingGroups applies explicit replica reduction to the supplied
+// population. Partition protects template rollout, never scale-down selection.
 func (c *ModelServingController) scaleDownServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int) error {
-	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
-
-	protectedGroupNames := sets.New[string]()
+	scores := make([]ServingGroupWithScore, 0, len(servingGroupList))
 	for _, group := range servingGroupList {
-		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-		if ordinal >= 0 && ordinal < partition {
-			protectedGroupNames.Insert(group.Name)
+		if group.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, group.Name, "", "") {
+			continue
 		}
+		scores = append(scores, c.calculateServingGroupScore(ms, group.Name))
 	}
-
-	// Calculate scores for all servingGroups first
-	allScores := make([]ServingGroupWithScore, 0, len(servingGroupList))
-	for _, group := range servingGroupList {
-		scoreInfo := c.calculateServingGroupScore(ms, group.Name)
-		allScores = append(allScores, scoreInfo)
-	}
-
-	var protectedScores []ServingGroupWithScore
-	var nonProtectedScores []ServingGroupWithScore
-	for _, score := range allScores {
-		if protectedGroupNames.Has(score.Name) {
-			protectedScores = append(protectedScores, score)
-		} else {
-			nonProtectedScores = append(nonProtectedScores, score)
-		}
-	}
-
-	// Sort both lists by priority tuple: (priority, deletionCost, index)
-	// Lower priority value = higher deletion priority (delete first)
-	// Lower deletion cost = higher deletion priority
-	// Higher index = higher deletion priority (backward compatibility)
-	sortGroups := func(a, b ServingGroupWithScore) int {
-		// Primary: Sort by priority (not-ready first)
+	slices.SortFunc(scores, func(a, b ServingGroupWithScore) int {
 		if a.Priority != b.Priority {
-			return cmp.Compare(a.Priority, b.Priority) // Ascending: lower priority (not-ready) first
+			return cmp.Compare(a.Priority, b.Priority)
 		}
-
-		// Secondary: Among groups with same priority, lower deletion cost comes first
 		if a.DeletionCost != b.DeletionCost {
-			return cmp.Compare(a.DeletionCost, b.DeletionCost) // Ascending: lower cost first
+			return cmp.Compare(a.DeletionCost, b.DeletionCost)
 		}
-
-		// Tertiary: Higher index comes first (backward compatibility)
-		return cmp.Compare(b.Index, a.Index) // Descending: higher indices first
-	}
-
-	slices.SortFunc(nonProtectedScores, sortGroups)
-
-	totalToDelete := max(0, len(servingGroupList)-expectedCount)
-
-	var err []error
-	// Delete non-protected groups first (replicas after the first partition replicas)
-	numNonProtectedToDelete := min(totalToDelete, len(nonProtectedScores))
-
-	for i := 0; i < numNonProtectedToDelete; i++ {
-		targetGroup := nonProtectedScores[i]
-		klog.V(2).Infof("Scaling down non-protected serving group %s (priority: %d, deletion cost: %d, index: %d)",
-			targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index)
-		if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
-			err = append(err, e)
+		return cmp.Compare(b.Index, a.Index)
+	})
+	for _, target := range scores[:max(0, len(scores)-expectedCount)] {
+		if err := c.deleteServingGroup(ctx, ms, target.Name); err != nil {
+			return err
 		}
 	}
-
-	// After all non-protected groups are deleted, proceed to delete protected groups if needed
-	remainingToDelete := totalToDelete - numNonProtectedToDelete
-	if remainingToDelete > 0 && partition > 0 {
-		// Sort protected scores only when we need to delete them
-		slices.SortFunc(protectedScores, sortGroups)
-		numProtectedToDelete := min(remainingToDelete, len(protectedScores))
-
-		for i := 0; i < numProtectedToDelete; i++ {
-			targetGroup := protectedScores[i]
-			klog.V(2).Infof("Scaling down protected serving group %s (priority: %d, deletion cost: %d, index: %d, partition=%d)",
-				targetGroup.Name, targetGroup.Priority, targetGroup.DeletionCost, targetGroup.Index, partition)
-			if e := c.deleteServingGroup(ctx, ms, targetGroup.Name); e != nil {
-				err = append(err, e)
-			}
-		}
-	}
-
-	if len(err) > 0 {
-		return errors.Join(err...)
-	}
-
 	return nil
 }
 
