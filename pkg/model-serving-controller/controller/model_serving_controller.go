@@ -652,6 +652,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
+	ms = ms.DeepCopy()
 	if err := c.restoreDeletionIntents(ctx, ms); err != nil {
 		return err
 	}
@@ -665,6 +666,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 	ctx, err = c.withRolloutPodSnapshot(ctx, ms)
 	if err != nil {
+		return err
+	}
+	if err := c.ensureGroupMembers(ctx, ms); err != nil {
 		return err
 	}
 	// Pod informer storage can advance before its queued Ready callback runs.
@@ -866,6 +870,9 @@ func (c *ModelServingController) pruneDeletedServingGroups(ctx context.Context, 
 			return nil, fmt.Errorf("complete plugin cleanup for deleted ServingGroup %s: %w", servingGroup.Name, err)
 		}
 		klog.V(2).Infof("ServingGroup %s has been deleted, removing it from store before replica accounting", servingGroup.Name)
+		if err := c.forgetGroupMembers(ctx, ms, servingGroup.Name); err != nil {
+			return nil, err
+		}
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroup.Name)
 	}
 	return kept, nil
@@ -882,6 +889,9 @@ func (c *ModelServingController) hasUpdateableOutdatedServingGroup(
 	partition int,
 ) bool {
 	for _, group := range groups {
+		if groupMembersPending(ms, group.Name) {
+			return true
+		}
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
 		if ordinal >= partition && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
 			return true
@@ -931,6 +941,9 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) error {
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
 		if err := c.checkGroupCreationSlot(ms, groupName); err != nil {
+			return err
+		}
+		if err := c.setGroupMembers(ctx, ms, groupName, revision, roles); err != nil {
 			return err
 		}
 		klog.V(4).Infof("scaleUpServingGroups: creating/updating PodGroup for ServingGroup=%s", groupName)
@@ -1056,6 +1069,9 @@ func (c *ModelServingController) syncRoleReplicas(
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	isServingGroupRollingUpdate := ms.Spec.RolloutStrategy == nil ||
 		ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
+	if err := c.applyGroupMemberChanges(ctx, ms, servingGroupList); err != nil {
+		return err
+	}
 	var revisionErrors []error
 	for _, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
@@ -1093,6 +1109,15 @@ func (c *ModelServingController) syncRoleReplicas(
 			}
 		}
 
+		rolesToManage, err = rolesWithGroupMembers(ms, servingGroup.Name, rolesToManage)
+		if err != nil {
+			return err
+		}
+		if isServingGroupRollingUpdate {
+			if err := c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, servingGroup.Name, rolesToManage); err != nil {
+				return err
+			}
+		}
 		for _, targetRole := range rolesToManage {
 			if err := c.manageRoleReplicasPerGroup(
 				ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse, chain,
@@ -2422,37 +2447,43 @@ func (c *ModelServingController) checkRoleReadyWithContext(ctx context.Context, 
 // templates are loaded from the corresponding ControllerRevision and overlaid
 // with the latest independently scalable replica counts.
 func (c *ModelServingController) rolesForServingGroupReadiness(ms *workloadv1alpha1.ModelServing, servingGroupName string) ([]workloadv1alpha1.Role, error) {
+	lookupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	projected, stateErr := c.withGroupMembersState(lookupCtx, ms)
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	ms = projected
+
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
-		return ms.Spec.Template.Roles, nil
+		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
 	}
 	partition, _, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve partition for ServingGroup %s: %v", servingGroupName, err)
 	}
 	if partition <= 0 {
-		return ms.Spec.Template.Roles, nil
+		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
 	}
 	parentName, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
 	if ordinal < 0 || parentName != ms.Name {
 		return nil, fmt.Errorf("cannot parse ServingGroup ordinal from %s for ModelServing %s", servingGroupName, ms.Name)
 	}
 	if ordinal >= partition {
-		return ms.Spec.Template.Roles, nil
+		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
 	}
 	revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName)
 	if ok {
 		revision = c.revisionForServingGroup(context.Background(), ms, datastore.ServingGroup{Name: servingGroupName, Revision: revision})
 	}
 	if !ok || revision == "" || revision == utils.ModelServingRevision(ms) {
-		return ms.Spec.Template.Roles, nil
+		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
 	}
-	lookupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	roles, err := c.revisionHistory(lookupCtx, ms).roles(lookupCtx, revision)
 	if err != nil {
 		return nil, err
 	}
-	return mergeLatestRoleReplicas(roles, ms.Spec.Template.Roles), nil
+	return rolesWithGroupMembers(ms, servingGroupName, mergeLatestRoleReplicas(roles, ms.Spec.Template.Roles))
 }
 
 func (c *ModelServingController) isServingGroupOutdated(group datastore.ServingGroup, namespace, newRevision string) bool {
@@ -2539,6 +2570,10 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 				klog.Errorf("failed to execute OnServingGroupDelete hook: %v", err)
 			}
 
+			if err := c.forgetGroupMembers(context.TODO(), ms, servingGroupName); err != nil {
+				c.enqueueModelServing(ms)
+				return true
+			}
 			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 			c.enqueueModelServing(ms)
 		}
@@ -3458,6 +3493,9 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 
 	if c.isServingGroupDeleted(ms, servingGroupName) {
 		klog.V(2).Infof("ServingGroup %s has been deleted", servingGroupName)
+		if err = c.forgetGroupMembers(ctx, ms, servingGroupName); err != nil {
+			return err
+		}
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 		// this is needed when a pod is deleted accidentally, and the ServingGroup is deleted completely
 		// and the controller has no chance to supplement it.
