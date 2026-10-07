@@ -21,6 +21,11 @@ import (
 	"errors"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
+
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -75,6 +80,77 @@ func (c *ModelServingController) rolloutDeletionPending(ms *workloadv1alpha1.Mod
 	return false
 }
 
+// Share authoritative observations within a reconcile until a Pod write. A
+// same-round refill must not inherit the retired Pod's version or Ready state.
+// This never writes back into informer-owned storage.
+type rolloutPodSnapshotKey struct{}
+type rolloutPodSnapshot struct {
+	ownerUID types.UID
+	roles    map[string][]*corev1.Pod
+	dirty    bool
+}
+
+func invalidateRolloutPodSnapshot(ctx context.Context) {
+	if snapshot, ok := ctx.Value(rolloutPodSnapshotKey{}).(*rolloutPodSnapshot); ok {
+		snapshot.dirty = true
+	}
+}
+
+func (c *ModelServingController) withRolloutPodSnapshot(ctx context.Context, ms *workloadv1alpha1.ModelServing) (context.Context, error) {
+	if ms.ResourceVersion == "" {
+		return ctx, nil
+	}
+	snapshot, ok := ctx.Value(rolloutPodSnapshotKey{}).(*rolloutPodSnapshot)
+	if ok && snapshot.ownerUID == ms.UID && !snapshot.dirty {
+		return ctx, nil
+	}
+	live, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}.String()})
+	if err != nil {
+		return ctx, err
+	}
+	if !ok || snapshot.ownerUID != ms.UID {
+		snapshot = &rolloutPodSnapshot{ownerUID: ms.UID}
+		ctx = context.WithValue(ctx, rolloutPodSnapshotKey{}, snapshot)
+	}
+	snapshot.roles = map[string][]*corev1.Pod{}
+	for i := range live.Items {
+		pod := &live.Items[i]
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		key := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, pod.Labels[workloadv1alpha1.GroupNameLabelKey], utils.GetRoleName(pod), utils.GetRoleID(pod))
+		snapshot.roles[key] = append(snapshot.roles[key], pod)
+	}
+	snapshot.dirty = false
+	return ctx, nil
+}
+
+func (c *ModelServingController) podsForRoleObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, group, role, instance string) ([]*corev1.Pod, error) {
+	key := fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance)
+	if snapshot, ok := ctx.Value(rolloutPodSnapshotKey{}).(*rolloutPodSnapshot); ok && snapshot.ownerUID == ms.UID {
+		if snapshot.dirty {
+			if _, err := c.withRolloutPodSnapshot(ctx, ms); err != nil {
+				return nil, err
+			}
+		}
+		return snapshot.roles[key], nil
+	}
+	if ms.ResourceVersion == "" {
+		return c.getPodsByIndex(RoleIDKey, key)
+	}
+	live, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{workloadv1alpha1.GroupNameLabelKey: group, workloadv1alpha1.RoleLabelKey: role, workloadv1alpha1.RoleIDKey: instance}.String()})
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*corev1.Pod, 0, len(live.Items))
+	for i := range live.Items {
+		if utils.IsOwnedByModelServingWithUID(&live.Items[i], ms.UID) {
+			result = append(result, &live.Items[i])
+		}
+	}
+	return result, nil
+}
+
 // Refresh only cached Ready claims. Creating instances gain credit through the
 // ordinary readiness path; a missing/erroring observation never grants credit.
 func (c *ModelServingController) refreshRolloutAvailability(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
@@ -86,6 +162,11 @@ func (c *ModelServingController) refreshRolloutAvailability(ctx context.Context,
 	if err != nil {
 		return err
 	}
+	ctx, err = c.withRolloutPodSnapshot(ctx, ms)
+	if err != nil {
+		return err
+	}
+
 	for _, group := range groups {
 		if group.Status == datastore.ServingGroupDeleting {
 			continue

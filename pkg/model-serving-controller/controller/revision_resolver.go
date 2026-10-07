@@ -155,7 +155,7 @@ func (c *ModelServingController) compareRoleTemplate(ctx context.Context, ms *wo
 	if result != templateEquivalent || c.podsInformer == nil {
 		return result
 	}
-	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group.Name, roleName, role.Name))
+	pods, err := c.podsForRoleObservation(ctx, ms, group.Name, roleName, role.Name)
 	if err != nil {
 		return templateUnknown
 	}

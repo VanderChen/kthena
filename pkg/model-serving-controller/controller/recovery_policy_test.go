@@ -32,7 +32,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -79,6 +78,14 @@ func recoveryController(t *testing.T, ms *workloadv1alpha1.ModelServing, pods ..
 	c.initialSync.Store(true)
 	t.Cleanup(c.workqueue.ShutDown)
 	return c, kube
+}
+
+// A failure/Ready transition is an API state change before its informer event.
+func updateRecoveryPod(t *testing.T, c *ModelServingController, pod *corev1.Pod) {
+	t.Helper()
+	_, err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).UpdateStatus(context.Background(), pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
 }
 
 func TestRecoveryPolicyTimerUsesCurrentPolicy(t *testing.T) {
@@ -175,7 +182,7 @@ func TestRecoveryPolicyUnhealthyPods(t *testing.T) {
 					case "failed":
 						pod.Status.Phase = corev1.PodFailed
 					}
-					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					updateRecoveryPod(t, c, pod)
 					c.updatePod(pods[1], pod)
 					require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(utils.GetNamespaceName(ms), "ms-0", "prefill", "prefill-0"))
 					require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "ms-0"))
@@ -209,7 +216,7 @@ func TestRecoveryPolicyChangesDuringGrace(t *testing.T) {
 			pod := pods[0].DeepCopy()
 			pod.Status.Conditions[0].Status = corev1.ConditionFalse
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
-			require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+			updateRecoveryPod(t, c, pod)
 			c.updatePod(pods[0], pod)
 			key := getPodGracePeriodKey(pod)
 			started, waiting := c.graceMap.Load(key)
@@ -227,7 +234,7 @@ func TestRecoveryPolicyChangesDuringGrace(t *testing.T) {
 			case "ready":
 				ready := pod.DeepCopy()
 				ready.Status.Conditions[0].Status = corev1.ConditionTrue
-				require.NoError(t, c.podsInformer.GetIndexer().Update(ready))
+				updateRecoveryPod(t, c, ready)
 				c.updatePod(pod, ready)
 			}
 			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
@@ -275,12 +282,7 @@ func TestRecoveryPolicyPodDeletionScope(t *testing.T) {
 					_, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), pods[1].Name, metav1.GetOptions{})
 					require.NoError(t, err)
 				} else {
-					want := map[string]string{workloadv1alpha1.GroupNameLabelKey: "ms-0"}
-					if policy == workloadv1alpha1.RoleRecreate {
-						want[workloadv1alpha1.RoleLabelKey] = "prefill"
-						want[workloadv1alpha1.RoleIDKey] = "prefill-0"
-					}
-					require.Equal(t, []string{"collection:" + labels.SelectorFromSet(want).String()}, recoveryDeletedPods(kube))
+					require.Equal(t, []string{pods[0].Name}, recoveryDeletedPods(kube))
 				}
 			})
 		}
@@ -294,12 +296,14 @@ func TestRecoveryReadyStartsNewGraceEpisode(t *testing.T) {
 	pod := pods[0].DeepCopy()
 	pod.Status.Conditions[0].Status = corev1.ConditionFalse
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
-	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	updateRecoveryPod(t, c, pod)
 	key := getPodGracePeriodKey(pod)
 	oldStart := time.Now().Add(-time.Minute)
 	c.graceMap.Store(key, oldStart)
 	// Ready clears the old episode before a second unhealthy event arrives.
+	updateRecoveryPod(t, c, pods[0])
 	c.updatePod(pod, pods[0])
+	updateRecoveryPod(t, c, pod)
 	c.updatePod(pods[0], pod)
 	newStart, ok := c.graceMap.Load(key)
 	require.True(t, ok)

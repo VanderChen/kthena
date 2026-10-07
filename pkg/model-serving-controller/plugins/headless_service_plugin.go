@@ -112,7 +112,7 @@ func (p *HeadlessServicePlugin) OnRoleDelete(ctx context.Context, req *HookReque
 	if !isManagedHeadlessService(service, req.ModelServing, req.ServingGroup, req.RoleName, req.RoleID) {
 		return nil
 	}
-	if err := services.Delete(ctx, serviceName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+	if err := services.Delete(ctx, serviceName, *metav1.NewPreconditionDeleteOptions(string(service.UID))); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete Headless Service %s/%s: %w", req.ModelServing.Namespace, serviceName, err)
 	}
 	return nil

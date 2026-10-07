@@ -77,7 +77,7 @@ func TestDesiredRevisionFailureStopsRoleRollout(t *testing.T) {
 				if action.Matches("create", "controllerrevisions") {
 					historyCreated = index
 				}
-				if action.Matches("delete-collection", "pods") {
+				if action.Matches("delete", "pods") {
 					podDeletion = index
 				}
 			}

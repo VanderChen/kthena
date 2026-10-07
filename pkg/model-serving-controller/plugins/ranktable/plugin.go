@@ -287,7 +287,17 @@ func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookReq
 
 	if template.Level == RoleLevelRanktable {
 		cmName := GenerateRanktableConfigMapName(ms.Name, fmt.Sprintf("%s-%s", req.ServingGroup, req.RoleID))
-		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cmName, metav1.DeleteOptions{}); err != nil {
+		cm, err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, cmName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if !metav1.IsControlledBy(cm, ms) {
+			return nil
+		}
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cmName, *metav1.NewPreconditionDeleteOptions(string(cm.UID))); err != nil {
 			if !apierrors.IsNotFound(err) {
 				return fmt.Errorf("failed to delete ranktable configmap %s: %w", cmName, err)
 			}
@@ -320,7 +330,10 @@ func (p *RanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins
 	}
 
 	for _, cm := range cms.Items {
-		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cm.Name, metav1.DeleteOptions{}); err != nil {
+		if !metav1.IsControlledBy(&cm, ms) {
+			continue
+		}
+		if err := req.KubeClient.CoreV1().ConfigMaps(ms.Namespace).Delete(ctx, cm.Name, *metav1.NewPreconditionDeleteOptions(string(cm.UID))); err != nil {
 			if !apierrors.IsNotFound(err) {
 				klog.Errorf("failed to delete ranktable configmap %s/%s: %v", ms.Namespace, cm.Name, err)
 			}

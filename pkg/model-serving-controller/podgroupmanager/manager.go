@@ -498,7 +498,17 @@ func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return nil
 	}
 
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
+	pg, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Get(ctx, servingGroupName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !metav1.IsControlledBy(pg, ms) {
+		return nil
+	}
+	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, *metav1.NewPreconditionDeleteOptions(string(pg.UID))); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return err
 		}
