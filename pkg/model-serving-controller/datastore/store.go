@@ -75,6 +75,8 @@ type Role struct {
 	Revision         string // Revision of the ServingGroup
 	RoleTemplateHash string // Revision of the Role, used for RoleRollingUpdate strategy
 	Status           RoleStatus
+	// Initialized is lifecycle evidence, independent of current availability.
+	Initialized bool
 }
 
 type ServingGroupStatus string
@@ -85,15 +87,18 @@ const (
 	ServingGroupDeleting ServingGroupStatus = "Deleting"
 	ServingGroupScaling  ServingGroupStatus = "Scaling"
 	ServingGroupNotFound ServingGroupStatus = "NotFound"
+	// Observation errors must not authorize an old-unavailable deletion.
+	ServingGroupReadinessUnknown ServingGroupStatus = "ReadinessUnknown"
 )
 
 type RoleStatus string
 
 const (
-	RoleCreating RoleStatus = "Creating"
-	RoleRunning  RoleStatus = "Running"
-	RoleDeleting RoleStatus = "Deleting"
-	RoleNotFound RoleStatus = "NotFound"
+	RoleCreating         RoleStatus = "Creating"
+	RoleRunning          RoleStatus = "Running"
+	RoleDeleting         RoleStatus = "Deleting"
+	RoleNotFound         RoleStatus = "NotFound"
+	RoleReadinessUnknown RoleStatus = "ReadinessUnknown"
 )
 
 var ErrServingGroupNotFound = errors.New("serving group not found")
@@ -216,6 +221,9 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 	}
 
 	role.Status = status
+	if status == RoleRunning {
+		role.Initialized = true
+	}
 	return nil
 }
 

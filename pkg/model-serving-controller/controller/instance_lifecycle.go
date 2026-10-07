@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -38,6 +39,7 @@ import (
 const (
 	groupInstanceAnnotation = "workload.kthena.io/group-instance"
 	roleInstanceAnnotation  = "workload.kthena.io/role-instance"
+	roleCreatedAnnotation   = "workload.kthena.io/role-created"
 	deletionScopeAnnotation = "workload.kthena.io/deletion-scope"
 	deleteGroupScope        = "ServingGroup"
 	deleteRoleScope         = "Role"
@@ -198,6 +200,57 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 	for key, value := range instance {
 		pod.Annotations[key] = value
 	}
+	// A replacement cannot inherit completion evidence from a user template.
+	delete(pod.Annotations, roleCreatedAnnotation)
+}
+
+// Record that all members were created, independently of whether they are
+// Ready. Surviving members retain this evidence across a controller restart;
+// an unfinished initial creation must still be completed without recovery churn.
+func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *workloadv1alpha1.ModelServing, group, role, instance string) error {
+	if ms.ResourceVersion == "" {
+		return nil
+	}
+	pods, err := c.podsForRoleObservation(ctx, ms, group, role, instance)
+	if err != nil {
+		return err
+	}
+	if len(pods) == 0 {
+		return fmt.Errorf("cannot record creation of absent Role %s/%s", group, instance)
+	}
+	var failures []error
+	for _, pod := range pods {
+		if pod.Annotations[roleCreatedAnnotation] == "true" {
+			continue
+		}
+		if pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] != "" {
+			failures = append(failures, fmt.Errorf("Role %s/%s has retiring member %s", group, instance, pod.Name))
+			continue
+		}
+		patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
+			"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
+			"annotations": map[string]string{roleCreatedAnnotation: "true"},
+		}})
+		if err != nil {
+			return err
+		}
+		invalidateRolloutPodSnapshot(ctx)
+		_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+		failures = append(failures, err)
+	}
+	return errors.Join(failures...)
+}
+
+func roleCreationObserved(role datastore.Role, pods []*corev1.Pod) bool {
+	if role.Initialized || role.Status == datastore.RoleRunning {
+		return true
+	}
+	for _, pod := range pods {
+		if pod.Annotations[roleCreatedAnnotation] == "true" {
+			return true
+		}
+	}
+	return false
 }
 
 // preparePodDeletion freezes the finite UID set before any destructive call.

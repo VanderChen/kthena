@@ -151,8 +151,9 @@ func (c *ModelServingController) podsForRoleObservation(ctx context.Context, ms 
 	return result, nil
 }
 
-// Refresh only cached Ready claims. Creating instances gain credit through the
-// ordinary readiness path; a missing/erroring observation never grants credit.
+// Reconcile both directions from complete physical Role observations. A healthy
+// Creating placeholder is not an old-unavailable candidate. Keep uncertainty
+// distinct from observed unavailability so lookup errors cannot grant credit.
 func (c *ModelServingController) refreshRolloutAvailability(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
 	key := utils.GetNamespaceName(ms)
 	groups, err := c.store.GetServingGroupByModelServing(key)
@@ -175,26 +176,40 @@ func (c *ModelServingController) refreshRolloutAvailability(ctx context.Context,
 		if err != nil {
 			return err
 		}
+		unknown := false
 		for roleName, instances := range roles {
 			for _, instance := range instances {
-				if instance.Status != datastore.RoleRunning {
+				if instance.Status == datastore.RoleDeleting {
 					continue
 				}
 				ready, readyErr := c.checkRoleReadyWithContext(ctx, ms, group.Name, roleName, instance.Name)
-				if readyErr == nil && ready {
-					continue
+				state := datastore.RoleCreating
+				if readyErr != nil {
+					state = datastore.RoleReadinessUnknown
+					unknown = true
+				} else if ready {
+					if err := c.markRoleCreated(ctx, ms, group.Name, roleName, instance.Name); err != nil {
+						return err
+					}
+					state = datastore.RoleRunning
 				}
-				if err := c.store.UpdateRoleStatus(key, group.Name, roleName, instance.Name, datastore.RoleCreating); err != nil {
-					return err
+				if state != instance.Status {
+					if err := c.store.UpdateRoleStatus(key, group.Name, roleName, instance.Name, state); err != nil {
+						return err
+					}
 				}
 			}
 		}
-		if group.Status == datastore.ServingGroupRunning {
-			ready, readyErr := c.checkServingGroupReady(ms, group.Name)
-			if readyErr != nil || !ready {
-				if err := c.store.UpdateServingGroupStatus(key, group.Name, datastore.ServingGroupCreating); err != nil {
-					return err
-				}
+		ready, readyErr := c.checkServingGroupReady(ms, group.Name)
+		state := datastore.ServingGroupCreating
+		if unknown || readyErr != nil {
+			state = datastore.ServingGroupReadinessUnknown
+		} else if ready {
+			state = datastore.ServingGroupRunning
+		}
+		if state != group.Status {
+			if err := c.store.UpdateServingGroupStatus(key, group.Name, state); err != nil {
+				return err
 			}
 		}
 	}

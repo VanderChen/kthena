@@ -311,3 +311,100 @@ func TestInstanceLifecycleSnapshotReadErrorCannotRestoreDeletedCapacity(t *testi
 	require.NoError(t, err)
 	require.Empty(t, observed, "a failed refresh must remain invalid until API observation succeeds")
 }
+
+func TestInstanceLifecycleCreatedRoleRecoversOriginalScopeAfterRestart(t *testing.T) {
+	for _, policy := range []api.RecoveryPolicy{api.RoleRecreate, api.ServingGroupRecreate, api.NoneRestartPolicy} {
+		for _, missingIndex := range []int{0, 1} {
+			t.Run(fmt.Sprintf("%s/missing=%d", policy, missingIndex), func(t *testing.T) {
+				ms := lifecycleMS("cold-scope", 1, 1, 0)
+				ms.ResourceVersion, ms.Spec.RecoveryPolicy = "1", policy
+				ms.Spec.Template.Roles[0].WorkerReplicas = 1
+				ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+				other := *ms.Spec.Template.Roles[0].DeepCopy()
+				other.Name, other.WorkerReplicas = "other", 0
+				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, other)
+				c := lifecycleController(t, ms)
+				key, group, revision := utils.GetNamespaceName(ms), "cold-scope-0", utils.ModelServingRevision(ms)
+				c.store.AddServingGroup(key, 0, revision)
+				kube := c.kubeClientSet.(*kubefake.Clientset)
+				uid := 0
+				kube.PrependReactor("create", "pods", func(a kubetesting.Action) (bool, runtime.Object, error) {
+					uid++
+					pod := a.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+					pod.UID = types.UID(fmt.Sprint(uid))
+					return false, nil, nil
+				})
+				require.NoError(t, c.CreatePodsForServingGroup(context.Background(), ms, 0, revision, ms.Spec.Template.Roles))
+				original, err := kube.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+				require.NoError(t, err)
+				missing := utils.GeneratePodName(group, "prefill-0", missingIndex)
+				require.NoError(t, kube.CoreV1().Pods(ms.Namespace).Delete(context.Background(), missing, metav1.DeleteOptions{}))
+				// No deletion callback was delivered while the controller was down.
+				// None of these Pods has become Ready; creation is a separate fact.
+				c.store = datastore.New()
+				for i := range original.Items {
+					pod := &original.Items[i]
+					require.Equal(t, "true", pod.Annotations[roleCreatedAnnotation])
+					if pod.Name == missing {
+						continue
+					}
+					require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+					c.store.AddServingGroupAndRole(key, group, revision, utils.ObjectRoleTemplateHash(pod), utils.GetRoleName(pod), utils.GetRoleID(pod))
+				}
+				kube.ClearActions()
+				ctx, err := c.withRolloutPodSnapshot(context.Background(), ms)
+				require.NoError(t, err)
+				require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
+				require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, ms.Spec.Template.Roles[0], 0, revision, nil, true))
+				for i := range original.Items {
+					pod := &original.Items[i]
+					if pod.Name == missing {
+						continue
+					}
+					wantDelete := policy == api.ServingGroupRecreate || (policy == api.RoleRecreate && utils.GetRoleName(pod) == "prefill")
+					require.Equal(t, wantDelete, lifecycleDeletionMatches(c, pod), "original member %s", pod.Name)
+				}
+			})
+		}
+	}
+}
+
+func TestInstanceLifecyclePartialCreationIsCompletedWithoutRecoveryChurn(t *testing.T) {
+	for _, policy := range []api.RecoveryPolicy{api.RoleRecreate, api.ServingGroupRecreate} {
+		t.Run(string(policy), func(t *testing.T) {
+			ms := lifecycleMS("partial-create", 1, 1, 0)
+			ms.ResourceVersion, ms.Spec.RecoveryPolicy = "1", policy
+			ms.Spec.Template.Roles[0].WorkerReplicas = 1
+			ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+			c := lifecycleController(t, ms)
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			failWorker := true
+			kube.PrependReactor("create", "pods", func(a kubetesting.Action) (bool, runtime.Object, error) {
+				pod := a.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+				pod.UID = types.UID(pod.Name)
+				if failWorker && pod.Name == "partial-create-0-prefill-0-1" {
+					return true, nil, apierrors.NewServiceUnavailable("worker create held")
+				}
+				return false, nil, nil
+			})
+			revision, group := utils.ModelServingRevision(ms), "partial-create-0"
+			require.Error(t, c.CreatePodsForServingGroup(context.Background(), ms, 0, revision, ms.Spec.Template.Roles))
+			entry, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), group+"-prefill-0-0", metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Empty(t, entry.Annotations[roleCreatedAnnotation])
+			c.store = datastore.New()
+			c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), group, revision, utils.ObjectRoleTemplateHash(entry), "prefill", "prefill-0")
+			require.NoError(t, c.podsInformer.GetIndexer().Add(entry))
+			failWorker = false
+			kube.ClearActions()
+			require.NoError(t, c.manageRoleReplicasPerGroup(context.Background(), ms, group, ms.Spec.Template.Roles[0], 0, revision, nil, true))
+			require.False(t, lifecycleDeletionMatches(c, entry))
+			pods, err := kube.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 2)
+			for _, pod := range pods.Items {
+				require.Equal(t, "true", pod.Annotations[roleCreatedAnnotation])
+			}
+		})
+	}
+}

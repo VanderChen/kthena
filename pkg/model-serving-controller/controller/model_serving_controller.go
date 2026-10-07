@@ -668,7 +668,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 	// Pod informer storage can advance before its queued Ready callback runs.
-	// Revoke stale Ready credit before scaling, coordination and rollout use it.
+	// Rebuild complete Ready classification before scaling, coordination and rollout use it.
 	if err := c.refreshRolloutAvailability(ctx, ms); err != nil {
 		return err
 	}
@@ -1381,6 +1381,9 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 	allowTargetStart bool,
 ) error {
 	// TODO: add podGroup update after gang scheduler finished
+	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName) == datastore.ServingGroupDeleting {
+		return nil
+	}
 	// Get all replicas of a role from storage, for example, prefill-0, prefill-1...
 	roleList, err := c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
 	if err != nil {
@@ -1464,8 +1467,11 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 		}
 		if missing {
-			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleObj.Status == datastore.RoleRunning {
-				klog.V(2).Infof("manageRoleReplicasPerGroup: running role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
+			if ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && roleCreationObserved(roleObj, ownedPods) {
+				return c.deleteServingGroup(ctx, ms, groupName)
+			}
+			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleCreationObserved(roleObj, ownedPods) {
+				klog.V(2).Infof("manageRoleReplicasPerGroup: initialized role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 				if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName); groupStatus == datastore.ServingGroupRunning {
 					if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupCreating); err != nil {
 						klog.Warningf("manageRoleReplicasPerGroup: failed to set ServingGroup %s/%s to Creating before RoleRecreate recovery: %v", ms.Namespace, groupName, err)
@@ -1738,7 +1744,7 @@ func (c *ModelServingController) manageRollingUpdate(
 
 	newServingGroupUnavailableCount, readyCount := 0, 0
 	for _, sg := range servingGroupList {
-		if sg.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, sg.Name, "", "") {
+		if sg.Status == datastore.ServingGroupDeleting || sg.Status == datastore.ServingGroupReadinessUnknown || c.rolloutDeletionPending(ms, sg.Name, "", "") {
 			// In-flight deletion still occupies C. Reserve it once until the
 			// slot disappears or its replacement contributes to V.
 			newServingGroupUnavailableCount++
@@ -1979,7 +1985,7 @@ func (c *ModelServingController) outdatedRoles(ctx context.Context, ms *workload
 	// record the number of roles that is in rollingupdate but not ready yet.
 	newUnavailable := 0
 	for i, role := range roleList {
-		if role.Status == datastore.RoleDeleting || c.rolloutDeletionPending(ms, sg.Name, roleSpec.Name, role.Name) {
+		if role.Status == datastore.RoleDeleting || role.Status == datastore.RoleReadinessUnknown || c.rolloutDeletionPending(ms, sg.Name, roleSpec.Name, role.Name) {
 			// Normalize the reconcile-local ledger too: a terminating observation
 			// must not remain Ready credit in roleRolloutBudget.
 			roleList[i].Status = datastore.RoleDeleting
@@ -2101,6 +2107,11 @@ func (c *ModelServingController) handleObservedReadyPod(ms *workloadv1alpha1.Mod
 	if err != nil {
 		klog.Warningf("failed to check role %s/%s readiness, skipping role status update: %v", roleName, roleID, err)
 	} else if roleReady {
+		if newPod.Annotations[roleCreatedAnnotation] != "true" {
+			if err := c.markRoleCreated(context.Background(), ms, servingGroupName, roleName, roleID); err != nil {
+				return err
+			}
+		}
 		currentRoleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
 		if currentRoleStatus != datastore.RoleRunning && currentRoleStatus != datastore.RoleDeleting {
 			if err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID, datastore.RoleRunning); err != nil {
@@ -3254,7 +3265,7 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 			return err
 		}
 	}
-	return nil
+	return c.markRoleCreated(ctx, ms, servingGroupName, role.Name, roleID)
 }
 
 func (c *ModelServingController) createPod(

@@ -3285,6 +3285,9 @@ func TestManageRoleReplicasRoleRecreateMissingPodsDeletesRole(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, controller.podsInformer.GetIndexer().Add(entryPod))
 
+	// Readiness refresh must not erase evidence that this Role previously
+	// completed creation; the missing worker is a fault, not initial startup.
+	require.NoError(t, controller.refreshRolloutAvailability(context.Background(), ms))
 	require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, role, 0, revision, nil, true))
 	require.Contains(t, []datastore.RoleStatus{datastore.RoleDeleting, datastore.RoleNotFound}, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
 	_, err = h.kubeClient.CoreV1().Pods(ms.Namespace).Get(context.Background(), entryPod.Name, metav1.GetOptions{})
