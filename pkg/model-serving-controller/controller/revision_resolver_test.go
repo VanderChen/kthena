@@ -324,7 +324,7 @@ func TestSemanticTemplateComparisonPreservesQuantityEquivalentInstances(t *testi
 			assert.Zero(t, unavailable)
 			assert.False(t, c.hasUpdateableOutdatedRole(ctx, ms, groups[0].Name, ms.Spec.Template.Roles[0], roles))
 			assert.Empty(t, c.findOutdatedRolesInServingGroups(ctx, ms, groups, desired))
-			state := c.resolveRoleRolloutState(ctx, ms, groups[0], ms.Spec.Template.Roles[0], 1, roles, 0, false, nil)
+			state := c.resolveRoleRolloutState(ctx, ms, groups[0], ms.Spec.Template.Roles[0], 1, roles, 0, false, nil, nil)
 			assert.False(t, state.hasOldVersion)
 			assert.Equal(t, targetReady, state.targetState)
 			assert.False(t, roleTemplateChanged(map[string]workloadv1alpha1.Role{"prefill": old.Spec.Template.Roles[0]}, ms.Spec.Template.Roles[0]))

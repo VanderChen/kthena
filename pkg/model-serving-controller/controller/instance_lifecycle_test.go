@@ -699,3 +699,197 @@ func TestInstanceLifecycle_CanaryKeepsLastCompletedBaseline(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "test:v1", restored.Spec.Containers[0].Image)
 }
+
+func TestInstanceLifecycle_SurgeContractionRespectsTotalDeletionBudget(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		for _, targetUnavailable := range []int{2, 1} {
+			for _, pending := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/targetUnavailable=%d/pending=%t", mode, targetUnavailable, pending), func(t *testing.T) {
+					ctx := context.Background()
+					old := lifecycleMS("surge-contraction", 2, 1, 2)
+					old.ResourceVersion = "1"
+					old.Spec.RolloutStrategy.Type = mode
+					if mode == api.RoleRollingUpdate {
+						old.Spec.Replicas = ptr.To[int32](1)
+						old.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+						old.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt(1))
+						old.Spec.Template.Roles[0].MaxSurge = ptr.To(intstr.FromInt(2))
+					}
+					ms := old.DeepCopy()
+					ms.Generation++
+					ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge = ptr.To(intstr.FromInt(0))
+					if mode == api.RoleRollingUpdate {
+						ms.Spec.Template.Roles[0].MaxSurge = ptr.To(intstr.FromInt(0))
+					}
+					ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+					c := lifecycleController(t, ms, old)
+					var extra []*corev1.Pod
+					for i := 0; i < 4; i++ {
+						template := ms
+						if i >= 2 {
+							template = old
+						}
+						group, id, scope := fmt.Sprintf("surge-contraction-%d", i), "prefill-0", surgeServingGroup
+						if mode == api.RoleRollingUpdate {
+							group, id, scope = "surge-contraction-0", fmt.Sprintf("prefill-%d", i), surgeRole
+						}
+						role := *template.Spec.Template.Roles[0].DeepCopy()
+						revision, hash := utils.ModelServingRevision(template), utils.CalRoleTemplateHash(role)
+						pod := utils.GenerateEntryPod(role, ms, group, id, revision, hash)
+						pod.UID, pod.ResourceVersion = types.UID(fmt.Sprintf("pod-%d", i)), "1"
+						if pending && i == 3 {
+							now := metav1.Now()
+							pod.DeletionTimestamp = &now
+						}
+						ready := i < 2 && i >= targetUnavailable
+						condition, roleState, groupState := corev1.ConditionFalse, datastore.RoleCreating, datastore.ServingGroupCreating
+						if ready {
+							condition, roleState, groupState = corev1.ConditionTrue, datastore.RoleRunning, datastore.ServingGroupRunning
+						}
+						pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: condition}}}
+						if i >= 2 {
+							setSurgeScope(pod, scope)
+							extra = append(extra, pod)
+						}
+						_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+						require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+						c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), group, revision, hash, "prefill", id)
+						if ready {
+							c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), group, pod.Name, revision, hash, "prefill", id)
+						}
+						require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), group, "prefill", id, roleState))
+						require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), group, groupState))
+					}
+					c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+					if mode == api.ServingGroupRollingUpdate {
+						require.NoError(t, c.syncServingGroupReplicas(ctx, ms, utils.ModelServingRevision(ms)))
+					} else {
+						require.NoError(t, c.syncRoleReplicas(ctx, ms, utils.ModelServingRevision(ms), nil))
+					}
+					deleted := 0
+					for _, pod := range extra {
+						if lifecycleDeletionMatches(c, pod) {
+							deleted++
+						}
+					}
+					budget := 4 - 1 - targetUnavailable
+					if pending {
+						budget--
+					}
+					t.Logf("temporary deletions=%d; contract maxScaleDown=4-1-%d=%d", deleted, targetUnavailable, budget)
+					require.Equal(t, min(2, budget), deleted)
+				})
+			}
+		}
+	}
+}
+
+func TestInstanceLifecycle_CoordinatedSparseStableOrdinalProgresses(t *testing.T) {
+	for _, partition := range []int{0, 2} {
+		for _, skew := range []string{"50%", "100%"} {
+			t.Run(fmt.Sprintf("P=%d/skew=%s", partition, skew), func(t *testing.T) {
+				ctx := context.Background()
+				old := lifecycleMS("sparse-coordination", 1, 1, 0)
+				old.ResourceVersion = "1"
+				old.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+				decode := *old.Spec.Template.Roles[0].DeepCopy()
+				decode.Name = "decode"
+				old.Spec.Template.Roles = append(old.Spec.Template.Roles, decode)
+				old.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{MaxSkew: ptr.To(intstr.FromString(skew))}}
+				ms := old.DeepCopy()
+				ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+				ms.Generation++
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+					ms.Spec.Template.Roles[i].MaxUnavailable = ptr.To(intstr.FromInt(1))
+					ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromInt(partition))
+				}
+				c := lifecycleController(t, ms, old)
+				key := utils.GetNamespaceName(ms)
+				group := ms.Name + "-0"
+				for _, r := range old.Spec.Template.Roles {
+					for _, n := range []int{0, 3} {
+						id := utils.GenerateRoleID(r.Name, n)
+						pod := utils.GenerateEntryPod(*r.DeepCopy(), ms, group, id, utils.ModelServingRevision(old), utils.CalRoleTemplateHash(r))
+						pod.UID = types.UID(id)
+						pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+						_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+						require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+						c.store.AddRole(key, group, r.Name, id, utils.ModelServingRevision(old), utils.CalRoleTemplateHash(r))
+						require.NoError(t, c.store.UpdateRoleStatus(key, group, r.Name, id, datastore.RoleRunning))
+					}
+				}
+				policy, err := c.resolveRoleRolloutPolicy(ctx, ms, utils.ModelServingRevision(ms))
+				require.NoError(t, err)
+				groups, err := c.store.GetServingGroupByModelServing(key)
+				require.NoError(t, err)
+				selected, _, err := c.rolesToDeleteForRoleRollingUpdate(ctx, ms, groups[0], policy.group(group))
+				require.NoError(t, err)
+				require.Contains(t, selected, roleToDelete{roleName: "prefill", roleID: "prefill-3"}, "healthy retained high ordinal is a stable candidate after a legal sparse scale-down")
+			})
+		}
+	}
+}
+
+func TestInstanceLifecycle_SurgeCompletionRetainsOldDependency(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("surge-dependency", 1, 1, 0)
+	old.ResourceVersion = "1"
+	old.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{MaxSkew: ptr.To(intstr.FromString("100%")), Dependencies: []api.RoleRolloutDependency{{Role: "decode", DependsOn: []string{"prefill"}}}}}
+	decode := *old.Spec.Template.Roles[0].DeepCopy()
+	decode.Name = "decode"
+	old.Spec.Template.Roles = append(old.Spec.Template.Roles, decode)
+	for i := range old.Spec.Template.Roles {
+		old.Spec.Template.Roles[i].MaxUnavailable = ptr.To(intstr.FromInt(1))
+		old.Spec.Template.Roles[i].MaxSurge = ptr.To(intstr.FromInt(0))
+	}
+	ms := old.DeepCopy()
+	ms.Generation++
+	ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+	for i := range ms.Spec.Template.Roles {
+		ms.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+	}
+	c := lifecycleController(t, ms, old)
+	key := utils.GetNamespaceName(ms)
+	group := ms.Name + "-0"
+	add := func(template *api.ModelServing, roleIndex, ordinal int, temporary bool) *corev1.Pod {
+		role := *template.Spec.Template.Roles[roleIndex].DeepCopy()
+		id := utils.GenerateRoleID(role.Name, ordinal)
+		revision, hash := utils.ModelServingRevision(template), utils.CalRoleTemplateHash(role)
+		pod := utils.GenerateEntryPod(role, ms, group, id, revision, hash)
+		pod.UID = types.UID(id)
+		status := datastore.RoleRunning
+		if temporary {
+			setSurgeScope(pod, surgeRole)
+			status = datastore.RoleCreating
+		}
+		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+		c.store.AddServingGroupAndRole(key, group, revision, hash, role.Name, id)
+		require.NoError(t, c.store.UpdateRoleStatus(key, group, role.Name, id, status))
+		return pod
+	}
+	add(ms, 0, 0, false)
+	extra := add(old, 0, 1, true)
+	caller := add(old, 1, 0, false)
+	finish := func() {
+		roles, err := c.store.GetRoleList(key, group, "prefill")
+		require.NoError(t, err)
+		handled, err := c.finishRoleSurge(ctx, ms, group, ms.Spec.Template.Roles[0], roles, 0, utils.ModelServingRevision(ms), true)
+		require.NoError(t, err)
+		require.True(t, handled)
+	}
+	c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+	finish()
+	require.False(t, lifecycleDeletionMatches(c, extra), "old caller still needs the last old dependency")
+	require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, caller.Name, metav1.DeleteOptions{}))
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(caller))
+	c.store.DeleteRole(key, group, "decode", "decode-0")
+	add(ms, 1, 0, false)
+	c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+	finish()
+	require.True(t, lifecycleDeletionMatches(c, extra), "obsolete temporary dependency clears after the old caller is gone")
+}

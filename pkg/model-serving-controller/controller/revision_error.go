@@ -36,8 +36,25 @@ func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, m
 	if err != nil {
 		return err
 	}
-	if len(groups) > modelServingReplicas(ms) {
-		if err := c.scaleDownServingGroups(ctx, ms, groups, modelServingReplicas(ms)); err != nil {
+	replicas := modelServingReplicas(ms)
+	formalGroups := groups
+	if replicas > 0 {
+		pods, err := c.surgePods(ms, surgeServingGroup, "", "")
+		if err != nil {
+			return err
+		}
+		temporary := markedSurgeNames(pods, surgeServingGroup, replicas)
+		formalGroups = make([]datastore.ServingGroup, 0, len(groups))
+		for _, group := range groups {
+			if !temporary.Has(group.Name) {
+				formalGroups = append(formalGroups, group)
+			}
+		}
+	}
+	// Temporary capacity is not an explicit replica reduction. Scaling to
+	// zero is the exception: it removes all capacity without reading history.
+	if len(formalGroups) > replicas {
+		if err := c.scaleDownServingGroups(ctx, ms, formalGroups, replicas); err != nil {
 			return err
 		}
 	}
@@ -55,8 +72,23 @@ func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, m
 			if err != nil {
 				return err
 			}
-			if len(roles) > int(*target.Replicas) {
-				if err := c.scaleDownRoles(ctx, ms, group.Name, target, roles, int(*target.Replicas)); err != nil {
+			replicas := int(*target.Replicas)
+			formalRoles := roles
+			if replicas > 0 {
+				pods, err := c.surgePods(ms, surgeRole, group.Name, target.Name)
+				if err != nil {
+					return err
+				}
+				temporary := markedSurgeNames(pods, surgeRole, replicas)
+				formalRoles = make([]datastore.Role, 0, len(roles))
+				for _, role := range roles {
+					if !temporary.Has(role.Name) {
+						formalRoles = append(formalRoles, role)
+					}
+				}
+			}
+			if len(formalRoles) > replicas {
+				if err := c.scaleDownRoles(ctx, ms, group.Name, target, formalRoles, replicas); err != nil {
 					return err
 				}
 			}

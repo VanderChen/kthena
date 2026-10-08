@@ -247,7 +247,26 @@ func (c *ModelServingController) finishServingGroupSurge(ctx context.Context, ms
 		// Preserve the currently allowed surge for those remaining replacements.
 		toDelete = toDelete[:min(len(toDelete), max(0, len(groups)-replicas-maxSurge))]
 	}
+	budget, err := c.servingGroupRolloutBudget(ctx, ms, groups, revision)
+	if err != nil {
+		return true, err
+	}
+	byName := make(map[string]datastore.ServingGroup, len(groups))
+	for _, group := range groups {
+		byName[group.Name] = group
+	}
 	for _, name := range toDelete {
+		group := byName[name]
+		comparison := c.compareServingGroupTemplate(ctx, ms, group, revision)
+		if comparison == templateUnknown || c.rolloutDeletionPending(ms, name, "", "") {
+			continue
+		}
+		// Removing an unavailable target reduces active and target-unavailable
+		// together. Old instances and Ready capacity consume the shared credit.
+		if (comparison == templateDifferent || group.Status == datastore.ServingGroupRunning) && !budget.take(group.Status == datastore.ServingGroupRunning) {
+			continue
+		}
+
 		if err := c.deleteServingGroup(ctx, ms, name); err != nil {
 			return true, err
 		}
@@ -281,6 +300,23 @@ func (c *ModelServingController) finishRoleSurge(ctx context.Context, ms *worklo
 	if err != nil {
 		return true, err
 	}
+	group := datastore.ServingGroup{Name: groupName}
+	group.Revision, _ = c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), groupName)
+	old, unavailable := c.outdatedRoles(ctx, ms, group, role, roles)
+	budget, err := roleRolloutBudget(role, roles, unavailable)
+	if err != nil {
+		return true, err
+	}
+	retainOld := false
+	if roleCoordination(ms) != nil {
+		policy, err := c.resolveRoleRolloutPolicy(ctx, ms, revision)
+		if err != nil {
+			return true, err
+		}
+		limits, _ := policy.group(groupName).role(role.Name)
+		retainOld = limits.retainOldReplica
+	}
+	remainingOld := len(old)
 	instances := make([]surgeReplica, 0, len(roles))
 	for _, instance := range roles {
 		_, ordinal := utils.GetParentNameAndOrdinal(instance.Name)
@@ -297,9 +333,28 @@ func (c *ModelServingController) finishRoleSurge(ctx context.Context, ms *worklo
 	if c.hasUpdateableOutdatedRole(ctx, ms, groupName, role, roles) {
 		toDelete = toDelete[:min(len(toDelete), max(0, len(roles)-replicas-maxSurge))]
 	}
+	byName := make(map[string]datastore.Role, len(roles))
+	for _, instance := range roles {
+		byName[instance.Name] = instance
+	}
 	for _, name := range toDelete {
+		instance := byName[name]
+		comparison := c.compareRoleTemplate(ctx, ms, group, role.Name, instance)
+		if comparison == templateUnknown || instance.Status == datastore.RoleDeleting {
+			continue
+		}
+		if comparison == templateDifferent && retainOld && remainingOld <= 1 {
+			continue
+		}
+		if (comparison == templateDifferent || instance.Status == datastore.RoleRunning) && !budget.take(instance.Status == datastore.RoleRunning) {
+			continue
+		}
+
 		if err := c.DeleteRole(ctx, ms, groupName, role.Name, name); err != nil {
 			return true, err
+		}
+		if comparison == templateDifferent {
+			remainingOld--
 		}
 	}
 	return true, nil

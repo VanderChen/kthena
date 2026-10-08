@@ -1751,21 +1751,11 @@ func (c *ModelServingController) manageRollingUpdate(
 		return nil
 	}
 
-	newServingGroupUnavailableCount, readyCount := 0, 0
 	for _, sg := range servingGroupList {
 		if sg.Status == datastore.ServingGroupDeleting || sg.Status == datastore.ServingGroupReadinessUnknown || c.rolloutDeletionPending(ms, sg.Name, "", "") {
-			// In-flight deletion still occupies C. Reserve it once until the
-			// slot disappears or its replacement contributes to V.
-			newServingGroupUnavailableCount++
 			continue
 		}
 		comparison := c.compareServingGroupTemplate(ctx, ms, sg, revision)
-		if sg.Status == datastore.ServingGroupRunning {
-			readyCount++
-		} else if comparison != templateDifferent {
-			// Unknown history cannot authorize deletion or grant spare budget.
-			newServingGroupUnavailableCount++
-		}
 		_, ordinal := utils.GetParentNameAndOrdinal(sg.Name)
 		if ordinal < partition || comparison != templateDifferent {
 			continue
@@ -1794,13 +1784,12 @@ func (c *ModelServingController) manageRollingUpdate(
 		return nil
 	}
 
-	maxUnavailable, err := utils.GetMaxUnavailable(ms)
+	// Partition filters candidates, never the availability ledger. Surge
+	// completion consumes this same total and healthy deletion allowance.
+	budget, err := c.servingGroupRolloutBudget(ctx, ms, servingGroupList, revision)
 	if err != nil {
-		return fmt.Errorf("failed to calculate maxUnavailable: %v", err)
+		return err
 	}
-	// Partition filters candidates, never the availability ledger. Total
-	// cleanup credit alone does not authorize deleting healthy old groups.
-	budget := newRolloutBudget(modelServingReplicas(ms), maxUnavailable, len(servingGroupList), readyCount, newServingGroupUnavailableCount)
 	allOutdatedGroups := append(runningOutdatedGroups, notRunningOutdatedGroups...)
 	updateCount, err := c.deleteOutdatedServingGroups(ctx, ms, budget, allOutdatedGroups)
 	if err != nil {

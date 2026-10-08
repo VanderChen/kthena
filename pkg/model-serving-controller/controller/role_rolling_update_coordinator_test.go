@@ -123,8 +123,7 @@ func TestResolveRoleRolloutStateUsesPartitionAndReservesStartedSlots(t *testing.
 		roleList,
 		2,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 2, state.totalToUpdate)
 	assert.Equal(t, 2, state.startedCount)
@@ -152,8 +151,7 @@ func TestResolveRoleRolloutStateUsesExactRolloutOrdinalRange(t *testing.T) {
 		roleList,
 		2,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 2, state.totalToUpdate)
 	assert.Equal(t, 1, state.startedCount)
@@ -179,8 +177,7 @@ func TestResolveRoleRolloutStateReconstructsTerminatingOldReplica(t *testing.T) 
 		map[int]templateComparison{
 			1: templateDifferent,
 			4: templateDifferent, // Scale-down excess is ignored.
-		},
-	)
+		}, nil)
 
 	assert.Equal(t, 2, state.totalToUpdate)
 	assert.Equal(t, 2, state.startedCount)
@@ -231,8 +228,7 @@ func TestResolveRoleRolloutStateDoesNotReserveUnadmittedScaleUp(t *testing.T) {
 		roleList,
 		0,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 2, state.totalToUpdate)
 	assert.Zero(t, state.startedCount)
@@ -287,8 +283,7 @@ func TestResolveRoleRolloutStateTracksReplacementReadyIndependentlyOfScaleUp(t *
 				tt.roleList,
 				0,
 				true,
-				nil,
-			)
+				nil, nil)
 
 			assert.Equal(t, 2, state.totalToUpdate)
 			assert.Equal(t, 1, state.startedCount)
@@ -314,8 +309,7 @@ func TestResolveRoleRolloutStateIgnoresScaleDownExcessForReadyState(t *testing.T
 		},
 		0,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Zero(t, state.startedCount)
 	assert.Zero(t, state.readyCount)
@@ -332,8 +326,7 @@ func TestResolveRoleRolloutStateIgnoresScaleDownExcessForReadyState(t *testing.T
 		},
 		0,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 1, state.startedCount)
 	assert.Zero(t, state.readyCount)
@@ -355,8 +348,7 @@ func TestResolveRoleRolloutStateUsesOrdinaryScaleUpForDependencyReadinessOnly(t 
 		},
 		0,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 2, state.totalToUpdate)
 	assert.Zero(t, state.startedCount)
@@ -378,8 +370,7 @@ func TestResolveRoleRolloutStateRetainsMissingPartitionProtectedOldSlot(t *testi
 		},
 		1,
 		true,
-		nil,
-	)
+		nil, nil)
 
 	assert.Equal(t, 1, state.totalToUpdate)
 	assert.Equal(t, 1, state.startedCount)
@@ -904,7 +895,7 @@ func TestResolveRoleRolloutStateKeepsTerminatingStartAfterRestart(t *testing.T) 
 		[]datastore.Role{
 			{Name: "a-0", RoleTemplateHash: "old", Status: datastore.RoleCreating},
 			{Name: "a-1", RoleTemplateHash: "old", Status: datastore.RoleRunning},
-		}, 0, true, map[int]templateComparison{0: templateDifferent})
+		}, 0, true, map[int]templateComparison{0: templateDifferent}, nil)
 	require.Equal(t, 1, state.startedCount)
 	require.Zero(t, state.readyCount)
 	require.True(t, state.hasOldVersion)

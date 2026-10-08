@@ -45,6 +45,24 @@ func newRolloutBudget(replicas, maxUnavailable, total, ready, unavailable int) r
 	return rolloutBudget{total: max(0, total-minimum-unavailable), healthy: max(0, ready-minimum)}
 }
 
+func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, ms *workloadv1alpha1.ModelServing, groups []datastore.ServingGroup, revision string) (rolloutBudget, error) {
+	maxUnavailable, err := utils.GetMaxUnavailable(ms)
+	if err != nil {
+		return rolloutBudget{}, err
+	}
+	ready, unavailable := 0, 0
+	for _, group := range groups {
+		if group.Status == datastore.ServingGroupDeleting || group.Status == datastore.ServingGroupReadinessUnknown || c.rolloutDeletionPending(ms, group.Name, "", "") {
+			unavailable++
+		} else if group.Status == datastore.ServingGroupRunning {
+			ready++
+		} else if c.compareServingGroupTemplate(ctx, ms, group, revision) != templateDifferent {
+			unavailable++
+		}
+	}
+	return newRolloutBudget(modelServingReplicas(ms), maxUnavailable, len(groups), ready, unavailable), nil
+}
+
 func (b *rolloutBudget) take(ready bool) bool {
 	if b.total <= 0 || (ready && b.healthy <= 0) {
 		return false

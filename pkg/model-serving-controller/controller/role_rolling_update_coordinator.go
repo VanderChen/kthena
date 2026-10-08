@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ import (
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -39,7 +41,8 @@ import (
 // partition remains the rollout target; effective partitions only limit how
 // far the current reconcile may advance.
 type coordinatedRoleState struct {
-	roleName string
+	roleName         string
+	stablePopulation *roleStablePopulation
 
 	userPartition int
 	totalToUpdate int
@@ -67,11 +70,19 @@ type coordinatedRoleBlocker struct {
 // roleRolloutLimits is the small execution contract consumed by the existing
 // Role creation and deletion paths.
 type roleRolloutLimits struct {
+	stablePopulation   *roleStablePopulation
 	rolloutEnd         int
 	effectivePartition int
 	remainingDeletions int
 	allowTargetStart   bool
 	retainOldReplica   bool
+}
+
+func (l roleRolloutLimits) containsStable(ordinal int) bool {
+	if l.stablePopulation != nil {
+		return l.stablePopulation.contains(ordinal)
+	}
+	return ordinal >= 0 && ordinal < l.rolloutEnd
 }
 
 // roleRolloutGroupPolicy contains the Role limits derived from one immutable
@@ -106,13 +117,13 @@ func (p *roleRolloutGroupPolicy) constrainRoleDeletion(
 	eligible := make([]datastore.Role, 0, len(outdatedRoles))
 	for _, role := range outdatedRoles {
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-		if ordinal >= 0 && ordinal < limits.rolloutEnd {
+		if limits.containsStable(ordinal) {
 			updateableOldCount++
 		}
 	}
 	for _, role := range outdatedRoles {
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
-		if ordinal < limits.effectivePartition || ordinal >= limits.rolloutEnd {
+		if ordinal < limits.effectivePartition || !limits.containsStable(ordinal) {
 			// The caller supplies a descending stable prefix. A blocked high
 			// ordinal must never be filtered away to expose a lower candidate.
 			break
@@ -403,6 +414,115 @@ func (c *ModelServingController) roleSpecsFromRevision(
 	return oldRoleByName, nil
 }
 
+// A stable population is the ordinary range with sparse retained identities
+// replacing holes. Store only deviations, not O(desiredReplicas) virtual slots.
+type roleStablePopulation struct {
+	end   int
+	holes sets.Set[int]
+	extra []int
+}
+
+func (p *roleStablePopulation) contains(ordinal int) bool {
+	return (ordinal >= 0 && ordinal < p.end && !p.holes.Has(ordinal)) || slices.Contains(p.extra, ordinal)
+}
+func (p *roleStablePopulation) countFrom(partition int) int {
+	count := max(0, p.end-partition)
+	for ordinal := range p.holes {
+		if ordinal >= partition {
+			count--
+		}
+	}
+	for _, ordinal := range p.extra {
+		if ordinal >= partition {
+			count++
+		}
+	}
+	return count
+}
+func (p *roleStablePopulation) upperBound() int {
+	if len(p.extra) > 0 {
+		return p.extra[len(p.extra)-1] + 1
+	}
+	return p.end
+}
+func (p *roleStablePopulation) boundary(partition, offset int) int {
+	if offset >= p.countFrom(partition) {
+		return p.upperBound()
+	}
+	candidate := partition + offset
+	baseCount := max(0, p.end-partition)
+	for _, hole := range sets.List(p.holes) {
+		if hole < partition {
+			continue
+		}
+		baseCount--
+		if hole <= candidate {
+			candidate++
+		}
+	}
+	if offset < baseCount {
+		return candidate
+	}
+	offset -= baseCount
+	for _, ordinal := range p.extra {
+		if ordinal < partition {
+			continue
+		}
+		if offset == 0 {
+			return ordinal
+		}
+		offset--
+	}
+	return p.upperBound()
+}
+
+// Missing replacements reserve low holes. Temporary surge never participates
+// in stable progress. Ordinary expansion keeps its prior population separately.
+func (c *ModelServingController) stableRolePopulation(ms *workloadv1alpha1.ModelServing, group string, role workloadv1alpha1.Role, previousDesired int, instances []datastore.Role, terminating map[int]templateComparison) (*roleStablePopulation, error) {
+	desired := roleReplicas(role)
+	if desired > previousDesired {
+		return nil, nil
+	}
+	var pods []*corev1.Pod
+	if c.podsInformer != nil {
+		var err error
+		pods, err = c.surgePods(ms, surgeRole, group, role.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
+	temporary := markedSurgeNames(pods, surgeRole, desired)
+	ordinals := sets.New[int]()
+	for _, instance := range instances {
+		_, ordinal := utils.GetParentNameAndOrdinal(instance.Name)
+		if ordinal >= 0 && !temporary.Has(instance.Name) {
+			ordinals.Insert(ordinal)
+		}
+	}
+	for ordinal := range terminating {
+		if ordinal >= 0 && !temporary.Has(utils.GenerateRoleID(role.Name, ordinal)) {
+			ordinals.Insert(ordinal)
+		}
+	}
+	ordered := sets.List(ordinals)
+	if len(ordered) > desired {
+		ordered = ordered[:desired]
+		ordinals = sets.New(ordered...)
+	}
+	population := &roleStablePopulation{end: desired, holes: sets.New[int]()}
+	for _, ordinal := range ordered {
+		if ordinal >= desired {
+			population.extra = append(population.extra, ordinal)
+		}
+	}
+	for ordinal := desired - 1; population.holes.Len() < len(population.extra) && ordinal >= 0; ordinal-- {
+		if !ordinals.Has(ordinal) {
+			population.holes.Insert(ordinal)
+		}
+	}
+	return population, nil
+}
+
 func (c *ModelServingController) resolveRoleRolloutState(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
@@ -413,10 +533,14 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	partition int,
 	templateChanged bool,
 	terminatingReplicas map[int]templateComparison,
+	stablePopulation *roleStablePopulation,
 ) coordinatedRoleState {
 	desired := roleReplicas(roleSpec)
-	stableEnd := min(previousDesired, desired)
-	totalToUpdate := max(stableEnd-partition, 0)
+	if stablePopulation == nil {
+		stablePopulation = &roleStablePopulation{end: min(previousDesired, desired)}
+	}
+	totalToUpdate := stablePopulation.countFrom(partition)
+	protectedOld := stablePopulation.countFrom(0) > totalToUpdate
 	stableTargetReady := 0
 	hasTargetWork := false
 	hasTargetReady := false
@@ -427,7 +551,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 		if ordinal < 0 {
 			continue
 		}
-		inStableRange := ordinal >= partition && ordinal < stableEnd
+		inStableRange := ordinal >= partition && stablePopulation.contains(ordinal)
 		_, terminating := terminatingReplicas[ordinal]
 		oldVersion := c.compareRoleTemplate(ctx, ms, servingGroup, roleSpec.Name, role) != templateEquivalent
 		if oldVersion {
@@ -437,7 +561,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 			}
 			continue
 		}
-		if role.Status == datastore.RoleDeleting || terminating || ordinal >= desired {
+		if role.Status == datastore.RoleDeleting || terminating || (ordinal >= desired && !stablePopulation.contains(ordinal)) {
 			continue
 		}
 		hasTargetWork = true
@@ -462,7 +586,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	// A user partition preserves old-version stable slots. Keep the old-version
 	// request path present even if a protected Role is temporarily absent while
 	// its old template is being recovered.
-	if templateChanged && min(partition, stableEnd) > 0 {
+	if templateChanged && protectedOld {
 		hasOldVersion = true
 	}
 
@@ -476,14 +600,15 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	}
 
 	return coordinatedRoleState{
-		roleName:      roleSpec.Name,
-		userPartition: partition,
-		totalToUpdate: totalToUpdate,
-		startedCount:  startedCount,
-		readyCount:    readyCount,
-		targetState:   targetState,
-		hasOldVersion: hasOldVersion,
-		inProgress:    templateChanged && totalToUpdate > 0 && readyCount < totalToUpdate,
+		stablePopulation: stablePopulation,
+		roleName:         roleSpec.Name,
+		userPartition:    partition,
+		totalToUpdate:    totalToUpdate,
+		startedCount:     startedCount,
+		readyCount:       readyCount,
+		targetState:      targetState,
+		hasOldVersion:    hasOldVersion,
+		inProgress:       templateChanged && totalToUpdate > 0 && readyCount < totalToUpdate,
 	}
 }
 
@@ -601,6 +726,10 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 			if oldRole, existed := oldRoleByName[roleSpec.Name]; existed {
 				previousDesired = roleReplicas(oldRole)
 			}
+			stablePopulation, err := c.stableRolePopulation(ms, servingGroup.Name, roleSpec, previousDesired, roleList, terminatingByRole[roleSpec.Name])
+			if err != nil {
+				return nil, err
+			}
 			states = append(states, c.resolveRoleRolloutState(ctx,
 				ms,
 				servingGroup,
@@ -610,6 +739,7 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 				partition,
 				roleTemplateChanged(oldRoleByName, roleSpec),
 				terminatingByRole[roleSpec.Name],
+				stablePopulation,
 			))
 		}
 		groupPolicy, err := calculateRoleRolloutLimits(states, coordination)
@@ -674,6 +804,7 @@ func calculateRoleRolloutLimits(
 		policy.inProgress = policy.inProgress || state.inProgress
 		var dependencyBlocker, retentionBlocker, skewBlocker *coordinatedRoleBlocker
 		limits := roleRolloutLimits{
+			stablePopulation:   state.stablePopulation,
 			rolloutEnd:         state.userPartition + state.totalToUpdate,
 			effectivePartition: state.userPartition,
 			allowTargetStart:   true,
@@ -727,6 +858,13 @@ func calculateRoleRolloutLimits(
 						state.roleName, strings.Join(oldDependents, ", ")),
 				}
 			}
+		}
+		// Convert the count boundary to an actual ordinal after skew and
+		// dependencies. A sparse ordinal is not a replica count.
+		if state.stablePopulation != nil {
+			limits.rolloutEnd = state.stablePopulation.upperBound()
+			offset := max(0, limits.effectivePartition-state.userPartition)
+			limits.effectivePartition = state.stablePopulation.boundary(state.userPartition, offset)
 		}
 		policy.roles[state.roleName] = limits
 		if policy.blocker == nil {
