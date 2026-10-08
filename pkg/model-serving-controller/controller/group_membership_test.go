@@ -20,12 +20,14 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -186,4 +188,181 @@ func TestEmptyGroupMembersRestartExpansionUsesOneGroupBudget(t *testing.T) {
 	restarted.store.DeleteServingGroup(utils.GetNamespaceName(ms), "empty-members-0")
 	require.NoError(t, restarted.ensureGroupMembers(ctx, ms))
 	require.Equal(t, datastore.ServingGroupNotFound, restarted.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "empty-members-0"))
+}
+
+func TestEmptyGroupExpansionStartsMemberShrink(t *testing.T) {
+	for _, replicas := range []int32{5, 7} {
+		t.Run(fmt.Sprintf("groups=%d", replicas), func(t *testing.T) {
+			ctx := context.Background()
+			old := lifecycleMS("empty-scale", 4, 1, 0)
+			ms := old.DeepCopy()
+			ms.ResourceVersion = "1"
+			ms.Generation++
+			ms.Spec.Replicas = ptr.To(replicas)
+			ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+			ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+			ms.Status.UpdateRevision = ms.Status.CurrentRevision
+			c := lifecycleController(t, ms, old)
+			for i := 0; i < 4; i++ {
+				lifecyclePod(t, c, ms, old, i, fmt.Sprintf("old-%d", i))
+			}
+			require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, pods.Items, 3, "new empty capacity releases exactly one member-change allowance")
+			live, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			projected, err := c.withGroupMembersState(ctx, live)
+			require.NoError(t, err)
+			targets, err := groupTargets(projected)
+			require.NoError(t, err)
+			for i := 0; i < int(replicas); i++ {
+				want := int32(0)
+				if i < 3 {
+					want = 1
+				}
+				require.Equal(t, want, targets[fmt.Sprintf("empty-scale-%d", i)]["prefill"])
+			}
+			require.True(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(api.ModelServingProgressing)))
+			require.Equal(t, ms.Status.CurrentRevision, live.Status.CurrentRevision)
+			require.Equal(t, ms.Status.CurrentRevision, live.Status.UpdateRevision)
+			revisions, err := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, revisions.Items, 1, "replica changes do not create template revisions")
+		})
+	}
+}
+
+func TestGroupMemberPendingStatusAndContinuation(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("pending-members", 4, 1, 0)
+	ms := old.DeepCopy()
+	ms.ResourceVersion = "1"
+	ms.Generation++
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+	ms.Status.UpdateRevision = ms.Status.CurrentRevision
+	c := lifecycleController(t, ms, old)
+	for i := 0; i < 4; i++ {
+		lifecyclePod(t, c, ms, old, i, fmt.Sprintf("old-%d", i))
+	}
+	require.NoError(t, c.ensureGroupMembers(ctx, ms.DeepCopy()))
+	// Status must read the persisted targets, not an informer-only projection.
+	require.Empty(t, c.modelServingsInformer.GetIndexer().List()[0].(*api.ModelServing).Annotations)
+	require.NoError(t, c.updateModelServingStatus(ctx, ms, utils.ModelServingRevision(ms), nil))
+	live, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.EqualValues(t, 4, live.Status.AvailableReplicas, "old applied members remain complete and Ready")
+	require.True(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(api.ModelServingProgressing)))
+	require.False(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(api.ModelServingAvailable)))
+	require.False(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(api.ModelServingUpdateInProgress)))
+	require.Empty(t, live.Annotations, "private member projection is not written onto the owner")
+	c.updateModelServing(ms, live) // Status-only events provide no continuation.
+	require.Eventually(t, func() bool { return c.workqueue.Len() > 0 }, 3*time.Second, 10*time.Millisecond)
+	key, shutdown := c.workqueue.Get()
+	require.False(t, shutdown)
+	require.Equal(t, utils.GetNamespaceName(ms).String(), key)
+	c.workqueue.Done(key)
+}
+
+func TestEmptyGroupCreationDoesNotGrantMissingMemberCredit(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("nonempty-scale", 4, 1, 0)
+	ms := old.DeepCopy()
+	ms.ResourceVersion = "1"
+	ms.Spec.Replicas = ptr.To[int32](5)
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+	c := lifecycleController(t, ms, old)
+	for i := 0; i < 4; i++ {
+		lifecyclePod(t, c, ms, old, i, fmt.Sprintf("old-%d", i))
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+	projected, err := c.withGroupMembersState(ctx, ms)
+	require.NoError(t, err)
+	targets, err := groupTargets(projected)
+	require.NoError(t, err)
+	for i := 0; i < 4; i++ {
+		require.EqualValues(t, 1, targets[fmt.Sprintf("nonempty-scale-%d", i)]["prefill"], "new nonempty group is not Ready yet")
+	}
+	require.EqualValues(t, 2, targets["nonempty-scale-4"]["prefill"])
+	require.NotEqual(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "nonempty-scale-4"))
+}
+
+func TestEmptyGroupSurgeSurvivesRestartAndAdoption(t *testing.T) {
+	ctx := context.Background()
+	ms := lifecycleMS("empty-surge", 2, 0, 1)
+	ms.ResourceVersion = "1"
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	c := lifecycleController(t, ms)
+	require.NoError(t, c.scaleUpServingGroups(ctx, ms, nil, 3, utils.ModelServingRevision(ms)))
+	pending, err := c.hasPendingSurge(ms)
+	require.NoError(t, err)
+	require.True(t, pending, "an empty temporary group has no Pod to carry its origin")
+	live := ms.DeepCopy()
+	live.Annotations = nil
+	restarted := lifecycleController(t, live)
+	restarted.kubeClientSet = c.kubeClientSet
+	require.NoError(t, restarted.ensureGroupMembers(ctx, live))
+	pending, err = restarted.hasPendingSurge(live)
+	require.NoError(t, err)
+	require.True(t, pending, "restart must not turn temporary empty capacity into a stable survivor")
+
+	live.Spec.Replicas = ptr.To[int32](3)
+	live.Generation++
+	_, err = restarted.modelServingClient.WorkloadV1alpha1().ModelServings(live.Namespace).Update(ctx, live, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, restarted.ensureGroupMembers(ctx, live))
+	pending, err = restarted.hasPendingSurge(live)
+	require.NoError(t, err)
+	require.False(t, pending, "expansion adopts the empty group")
+	live.Spec.Replicas = ptr.To[int32](2)
+	pending, err = restarted.hasPendingSurge(live)
+	require.NoError(t, err)
+	require.False(t, pending, "a later shrink cannot turn an adopted stable group back into surge")
+}
+
+func TestEmptyGroupRestartWaitsForTerminatingMembers(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("empty-terminating", 4, 1, 0)
+	old.ResourceVersion = "1"
+	c := lifecycleController(t, old)
+	for i := 0; i < 4; i++ {
+		lifecyclePod(t, c, old, old, i, fmt.Sprintf("old-%d", i))
+	}
+	require.NoError(t, c.ensureGroupMembers(ctx, old))
+	ms := old.DeepCopy()
+	ms.Generation++
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, ms, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	group := "empty-terminating-3"
+	require.NoError(t, c.setGroupMembers(ctx, ms, group, utils.ModelServingRevision(old), ms.Spec.Template.Roles))
+	pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, group+"-prefill-0-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	pod.DeletionTimestamp = ptr.To(metav1.Now())
+	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	// Cold-start Pod handling does not recreate Role records from Terminating Pods.
+	c.store.DeleteServingGroup(utils.GetNamespaceName(ms), group)
+	require.NoError(t, c.ensureGroupMembers(ctx, ms))
+	require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
+	require.NotEqual(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group))
+	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.NoError(t, c.applyGroupMemberChanges(ctx, ms, groups))
+	targets, err := groupTargets(ms)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, targets["empty-terminating-2"]["prefill"], "in-flight deletion still occupies the only unavailable allowance")
+
+	require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+	require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
+	groups, err = c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, err)
+	require.NoError(t, c.applyGroupMemberChanges(ctx, ms, groups))
+	targets, err = groupTargets(ms)
+	require.NoError(t, err)
+	require.Zero(t, targets["empty-terminating-2"]["prefill"], "the next group proceeds after physical deletion completes")
+	require.EqualValues(t, 1, targets["empty-terminating-1"]["prefill"])
 }

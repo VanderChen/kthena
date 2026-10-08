@@ -28,6 +28,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/utils/ptr"
 )
 
@@ -160,9 +161,31 @@ func (c *ModelServingController) persistGroupTargets(ctx context.Context, ms *ap
 		if err != nil {
 			return err
 		}
-		if creating || cm.Data["targets.json"] != string(raw) || cm.Data["revisions.json"] != string(revisionsJSON) {
+		temporary, err := c.servingGroupSurgeNames(ctx, ms)
+		if err != nil {
+			return err
+		}
+		// Only explicit new-group placement establishes temporary origin.
+		// Existing high ordinals retained by scale-down remain stable.
+		for name := range revisions {
+			_, ordinal := utils.GetParentNameAndOrdinal(name)
+			if ordinal >= modelServingReplicas(ms) {
+				temporary.Insert(name)
+			}
+		}
+		for name := range temporary {
+			if _, exists := targets[name]; !exists {
+				temporary.Delete(name)
+			}
+		}
+		surgeJSON, err := json.Marshal(sets.List(temporary))
+		if err != nil {
+			return err
+		}
+		if creating || cm.Data["targets.json"] != string(raw) || cm.Data["revisions.json"] != string(revisionsJSON) || cm.Data[groupSurgeStateKey] != string(surgeJSON) {
 			cm.Data["targets.json"] = string(raw)
 			cm.Data["revisions.json"] = string(revisionsJSON)
+			cm.Data[groupSurgeStateKey] = string(surgeJSON)
 			if creating {
 				_, err = c.kubeClientSet.CoreV1().ConfigMaps(ms.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 			} else {

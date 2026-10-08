@@ -50,11 +50,10 @@ func (c *ModelServingController) groupScaleDownPending(ms *api.ModelServing, gro
 	if c.podsInformer == nil || c.podsLister == nil || len(groups) <= modelServingReplicas(ms) {
 		return false, nil
 	}
-	pods, err := c.surgePods(ms, surgeServingGroup, "", "")
+	temporary, err := c.servingGroupSurgeNames(context.Background(), ms)
 	if err != nil {
 		return false, err
 	}
-	temporary := markedSurgeNames(pods, surgeServingGroup, modelServingReplicas(ms))
 	stable, deleting := 0, false
 	for _, group := range groups {
 		if temporary.Has(group.Name) {

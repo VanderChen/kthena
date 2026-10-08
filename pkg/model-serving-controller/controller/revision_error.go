@@ -39,11 +39,10 @@ func (c *ModelServingController) scaleDownOnRevisionError(ctx context.Context, m
 	replicas := modelServingReplicas(ms)
 	formalGroups := groups
 	if replicas > 0 {
-		pods, err := c.surgePods(ms, surgeServingGroup, "", "")
+		temporary, err := c.servingGroupSurgeNames(ctx, ms)
 		if err != nil {
 			return err
 		}
-		temporary := markedSurgeNames(pods, surgeServingGroup, replicas)
 		formalGroups = make([]datastore.ServingGroup, 0, len(groups))
 		for _, group := range groups {
 			if !temporary.Has(group.Name) {

@@ -851,11 +851,10 @@ func (c *ModelServingController) syncServingGroupReplicas(ctx context.Context, m
 	if err := c.adoptSurgeReplicas(ctx, ms, surgeServingGroup, "", "", replicas); err != nil {
 		return err
 	}
-	markedPods, err := c.surgePods(ms, surgeServingGroup, "", "")
+	temporary, err := c.servingGroupSurgeNames(ctx, ms)
 	if err != nil {
 		return err
 	}
-	temporary := markedSurgeNames(markedPods, surgeServingGroup, replicas)
 	formal := make([]datastore.ServingGroup, 0, len(servingGroupList))
 	for _, group := range servingGroupList {
 		if !temporary.Has(group.Name) {
@@ -986,12 +985,11 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	}
 
 	toCreate := max(0, expectedCount-len(servingGroupList))
-	markedPods, err := c.surgePods(ms, surgeServingGroup, "", "")
+	temporary, err := c.servingGroupSurgeNames(ctx, ms)
 	if err != nil {
 		return err
 	}
 	replicas := modelServingReplicas(ms)
-	temporary := markedSurgeNames(markedPods, surgeServingGroup, replicas)
 	retained := 0
 	for _, group := range servingGroupList {
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
@@ -1030,6 +1028,19 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		}
 		// Insert new ServingGroup to global storage
 		c.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, revision)
+		// A complete empty group has no Pod Ready event. Publish its Ready
+		// capacity before member changes in the existing groups use the budget.
+		if servingGroupRollout(ms) {
+			ready, err := c.checkServingGroupReady(ms, groupName)
+			if err != nil {
+				return err
+			}
+			if ready {
+				if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning); err != nil {
+					return err
+				}
+			}
+		}
 		klog.V(4).Infof("scaleUpServingGroups: ServingGroup=%s added to store (ordinal=%d, revision=%s)", groupName, ordinal, revision)
 		return nil
 	}
@@ -2472,6 +2483,11 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 
 func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
 	klog.V(4).Infof("checkServingGroupReady: modelServing=%s/%s, servingGroup=%s", ms.Namespace, ms.Name, servingGroupName)
+	// After a restart, an empty member target can be restored without Role
+	// records while its old Pods still terminate. They retain the reservation.
+	if c.rolloutDeletionPending(ms, servingGroupName, "", "") {
+		return false, nil
+	}
 	roles, err := c.rolesForServingGroupReadiness(ms, servingGroupName)
 	if err != nil {
 		return false, err
@@ -2953,6 +2969,12 @@ func (c *ModelServingController) updateModelServingStatus(
 		if latestMS.UID != ms.UID || latestMS.Generation != ms.Generation {
 			return fmt.Errorf("ModelServing changed during status update")
 		}
+		// Member targets live in an owned ConfigMap, not the informer object's
+		// annotations. Read them without projecting private state onto status writes.
+		membersMS, err := c.withGroupMembersState(ctx, latestMS)
+		if err != nil {
+			return err
+		}
 
 		// Calculate status based on latestMS
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
@@ -2975,6 +2997,7 @@ func (c *ModelServingController) updateModelServingStatus(
 			return err
 		}
 		rolloutActive := pendingSurge || c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
+		memberChangesPending := false
 		for index := range groups {
 			group := groups[index]
 			_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
@@ -3003,17 +3026,22 @@ func (c *ModelServingController) updateModelServingStatus(
 				continue
 			}
 
-			if group.Status == datastore.ServingGroupRunning {
-				available = available + 1
+			groupReady := group.Status == datastore.ServingGroupRunning
+			if groupReady {
+				available++
 			} else if ok, err := c.checkServingGroupReady(latestMS, group.Name); ok && err == nil {
 				// some scenarios, pod events may not trigger group status updates, such as role scaling down.
 				err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(latestMS), group.Name, datastore.ServingGroupRunning)
 				if err != nil {
 					return fmt.Errorf("failed to set servingGroup %s status: %v", group.Name, err)
 				}
-				available = available + 1
+				groupReady = true
+				available++
 				klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
-			} else {
+			}
+			membersPending := groupMembersPending(membersMS, group.Name)
+			memberChangesPending = memberChangesPending || membersPending
+			if !groupReady || membersPending {
 				progressingGroups = append(progressingGroups, ordinal)
 			}
 
@@ -3040,7 +3068,7 @@ func (c *ModelServingController) updateModelServingStatus(
 		// or a temporary empty group set cannot establish a new baseline.
 		updateRevision := revision
 		currentRevision := copy.Status.CurrentRevision
-		rolloutComplete := !pendingSurge && updated == replicas && available == replicas && len(groups) == replicas
+		rolloutComplete := !pendingSurge && !memberChangesPending && updated == replicas && available == replicas && len(groups) == replicas
 		if rolloutComplete {
 			currentRevision = updateRevision
 		}
@@ -3136,6 +3164,12 @@ func (c *ModelServingController) updateModelServingStatus(
 				}
 				c.emitRoleStatusEvent(latestMS, eventType, coordinationCondition.Reason, coordinationCondition.Message)
 			}
+		}
+
+		if memberChangesPending {
+			// A member change may wait for capacity that becomes Ready in this
+			// reconcile. Empty groups and status-only updates produce no Pod event.
+			c.enqueueModelServingAfter(ms, enqueueAfter)
 		}
 
 		// Retry cleanup even when status has already converged. The last Pod
