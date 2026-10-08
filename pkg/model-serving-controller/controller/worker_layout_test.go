@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
@@ -308,4 +309,129 @@ func TestWorkerLayoutPreservesLiveHistoryAfterGroupRevisionReplay(t *testing.T) 
 	cr, err = utils.GetControllerRevision(ctx, c.kubeClientSet, ms, utils.ModelServingRevision(unused))
 	require.NoError(t, err)
 	require.NotNil(t, cr, "production defers history cleanup until the rollout completes")
+}
+
+func TestNewGroupRolePartitionMatchesRoleScaleUp(t *testing.T) {
+	for _, sizes := range [][2]int32{{1, 0}, {0, 1}} {
+		for _, partition := range []intstr.IntOrString{intstr.FromInt(0), intstr.FromInt(1), intstr.FromString("50%"), intstr.FromString("100%")} {
+			for _, newGroup := range []bool{false, true} {
+				t.Run(fmt.Sprintf("workers-%d-%d/partition-%s/new-group-%t", sizes[0], sizes[1], partition.String(), newGroup), func(t *testing.T) {
+					ctx := context.Background()
+					old := createStandardModelServing("partition-create", 1, 0)
+					old.UID = "partition-create-owner"
+					old.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate}
+					old.Spec.Template.Roles[0].WorkerReplicas = sizes[0]
+					old.Spec.Template.Roles[0].WorkerTemplate = old.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+					ms := old.DeepCopy()
+					ms.Spec.Replicas = ptr.To[int32](2)
+					role := &ms.Spec.Template.Roles[0]
+					role.Replicas = ptr.To[int32](3)
+					role.Partition = &partition
+					role.WorkerReplicas = sizes[1]
+					role.EntryTemplate.Spec.Containers[0].Image = "test-image:target"
+					oldRevision, targetRevision := utils.ModelServingRevision(old), utils.ModelServingRevision(ms)
+					ms.Status.CurrentRevision = oldRevision
+					ms.Status.UpdateRevision = targetRevision
+					c := newRevisionTestController(t, ms)
+					t.Cleanup(c.workqueue.ShutDown)
+					var projected *api.ModelServing
+					c.podGroupManager = &fakePodGroupManager{createOrUpdateFunc: func(_ context.Context, pgMS *api.ModelServing, _ string) (error, time.Duration) {
+						projected = pgMS.DeepCopy()
+						return nil, 0
+					}}
+					for _, version := range []*api.ModelServing{old, ms} {
+						_, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, version, utils.ModelServingRevision(version), version.Spec.Template.Roles)
+						require.NoError(t, err)
+					}
+					key := utils.GetNamespaceName(ms)
+					c.store.AddServingGroup(key, 0, oldRevision)
+					groupName := "partition-create-0"
+					if newGroup {
+						groupName = "partition-create-1"
+						require.NoError(t, c.scaleUpServingGroups(ctx, ms, []datastore.ServingGroup{{Name: "partition-create-0", Revision: oldRevision}}, 2, targetRevision))
+					} else {
+						require.NoError(t, c.scaleUpRoles(ctx, ms, groupName, *role, nil, 3, 0, targetRevision, true))
+					}
+					boundary, _, err := c.getPartition(&partition, 3)
+					require.NoError(t, err)
+					for ordinal := 0; ordinal < 3; ordinal++ {
+						applied, revision := *role, targetRevision
+						if ordinal < boundary {
+							applied, revision = old.Spec.Template.Roles[0], oldRevision
+						}
+						roleID := utils.GenerateRoleID(role.Name, ordinal)
+						pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: api.GroupNameLabelKey + "=" + groupName + "," + api.RoleIDKey + "=" + roleID})
+						require.NoError(t, err)
+						require.Len(t, pods.Items, 1+int(applied.WorkerReplicas))
+						for _, pod := range pods.Items {
+							require.Equal(t, revision, utils.ObjectRevision(&pod))
+							require.Equal(t, utils.CalRoleTemplateHash(applied), utils.ObjectRoleTemplateHash(&pod))
+							if pod.Name == utils.GeneratePodName(groupName, roleID, 0) {
+								require.Equal(t, applied.EntryTemplate.Spec.Containers[0].Image, pod.Spec.Containers[0].Image)
+							}
+						}
+					}
+					instances, err := c.store.GetRoleList(key, groupName, role.Name)
+					require.NoError(t, err)
+					require.Len(t, instances, 3, "historical replica count zero must not replace the current scale target")
+					for _, instance := range instances {
+						_, ordinal := utils.GetParentNameAndOrdinal(instance.Name)
+						applied, revision := *role, targetRevision
+						if ordinal < boundary {
+							applied, revision = old.Spec.Template.Roles[0], oldRevision
+						}
+						require.Equal(t, revision, instance.Revision)
+						require.Equal(t, utils.CalRoleTemplateHash(applied), instance.RoleTemplateHash)
+					}
+					if newGroup {
+						expectedWorkers := sizes[1]
+						if boundary == 3 {
+							expectedWorkers = sizes[0]
+						} else if boundary > 0 {
+							expectedWorkers = min(sizes[0], sizes[1])
+						}
+						require.NotNil(t, projected)
+						require.Equal(t, expectedWorkers, projected.Spec.Template.Roles[0].WorkerReplicas)
+						require.Equal(t, int32(3), *projected.Spec.Template.Roles[0].Replicas)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestNewGroupRolePartitionHistory(t *testing.T) {
+	for _, baseline := range []string{"missing", "completed", "initial"} {
+		t.Run(baseline, func(t *testing.T) {
+			ms := createStandardModelServing("partition-history", 1, 1)
+			ms.UID = "partition-history-owner"
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.RoleRollingUpdate}
+			ms.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt(1))
+			revision := utils.ModelServingRevision(ms)
+			switch baseline {
+			case "missing":
+				ms.Status.CurrentRevision = "missing-history"
+			case "completed":
+				ms.Status.CurrentRevision = revision
+			}
+			c := newRevisionTestController(t, ms)
+			t.Cleanup(c.workqueue.ShutDown)
+			c.podGroupManager = &fakePodGroupManager{}
+			ctx := context.Background()
+			err := c.scaleUpServingGroups(ctx, ms, nil, 1, revision)
+			if baseline == "missing" {
+				require.Error(t, err, "unknown protected history must not create target-version Pods")
+			} else {
+				require.NoError(t, err)
+			}
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			if baseline == "missing" {
+				require.Empty(t, pods.Items)
+			} else {
+				require.Len(t, pods.Items, 1)
+				require.Equal(t, revision, utils.ObjectRevision(&pods.Items[0]))
+			}
+		})
+	}
 }

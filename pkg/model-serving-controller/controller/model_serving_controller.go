@@ -1016,7 +1016,11 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		}
 		klog.V(4).Infof("scaleUpServingGroups: creating/updating PodGroup for ServingGroup=%s", groupName)
 		// Ensure a PodGroup exists for the new ServingGroup when gang scheduling is enabled.
-		if err := c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, groupName, roles); err != nil {
+		podGroupRoles, err := c.podGroupRolesForNewGroup(ctx, ms, roles, revision)
+		if err != nil {
+			return err
+		}
+		if err := c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, groupName, podGroupRoles); err != nil {
 			return err
 		}
 		klog.V(4).Infof("Creating ServingGroup %s at ordinal %d with revision %s", groupName, ordinal, revision)
@@ -1347,20 +1351,9 @@ func (c *ModelServingController) scaleUpRoles(
 	var scaleUpErr error
 	forEachRolloutOrdinal(replicas, stableSlots, existingOrdinals, toCreate, func(ordinal int) bool {
 		if partitionConfigured && partition > 0 && ordinal < partition {
-			// Use CurrentRevision for partition-protected ordinals
-			revisionToUse := newRevision
-			if ms.Status.CurrentRevision != "" {
-				revisionToUse = ms.Status.CurrentRevision
-			}
-			klog.V(4).Infof("scaleUpRoles: ordinal %d missing (partition-protected), revisionToUse=%s, currentRevision=%s",
-				ordinal, revisionToUse, ms.Status.CurrentRevision)
-
-			// The reconcile entry has already persisted the initial snapshot.
-			// Never select an arbitrary earlier revision from history: independent
-			// Roles can legitimately keep several different revisions alive.
-			roleToApply, err := c.revisionHistory(ctx, ms).role(ctx, revisionToUse, targetRole.Name)
+			roleToApply, revisionToUse, err := c.roleTemplateForNewReplica(ctx, ms, targetRole, ordinal, newRevision)
 			if err != nil {
-				scaleUpErr = fmt.Errorf("resolve protected Role %s/%d at revision %s: %w", targetRole.Name, ordinal, revisionToUse, err)
+				scaleUpErr = err
 				return false
 			}
 			hashToUse := utils.CalRoleTemplateHash(roleToApply)
@@ -3311,19 +3304,23 @@ func (c *ModelServingController) runServingGroupDeletePlugins(ctx context.Contex
 func (c *ModelServingController) CreatePodsForServingGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupIndex int, revision string, roles []workloadv1alpha1.Role) error {
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupIndex)
 	for _, role := range roles {
-		roleTemplateHash := utils.CalRoleTemplateHash(role)
 		surgeScope := ""
 		if servingGroupIndex >= modelServingReplicas(ms) {
 			surgeScope = surgeServingGroup
 		}
-		replicas := int(*role.Replicas)
+		replicas := roleReplicas(role)
 		for i := 0; i < replicas; i++ {
-			err := c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, i, servingGroupIndex, revision, roleTemplateHash, surgeScope)
+			applied, roleRevision, err := c.roleTemplateForNewReplica(ctx, ms, role, i, revision)
+			if err != nil {
+				return err
+			}
+			roleTemplateHash := utils.CalRoleTemplateHash(applied)
+			err = c.CreatePodsByRole(ctx, *applied.DeepCopy(), ms, i, servingGroupIndex, roleRevision, roleTemplateHash, surgeScope)
 			if err != nil {
 				return err
 			}
 			roleID := utils.GenerateRoleID(role.Name, i)
-			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, revision, roleTemplateHash)
+			c.store.AddRole(utils.GetNamespaceName(ms), servingGroupName, role.Name, roleID, roleRevision, roleTemplateHash)
 			// Emit event for new role entering Creating state
 			message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Creating", role.Name, roleID, servingGroupName)
 			c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleCreating", message)

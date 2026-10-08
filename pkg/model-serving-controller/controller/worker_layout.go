@@ -26,6 +26,60 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
+// roleTemplateForNewReplica applies Role partition to a complete new instance,
+// whether its ServingGroup already exists or is being created in the same round.
+// Partial repairs use roleTemplateForInstance to preserve their applied layout.
+func (c *ModelServingController) roleTemplateForNewReplica(ctx context.Context, ms *workloadv1alpha1.ModelServing, role workloadv1alpha1.Role, ordinal int, targetRevision string) (workloadv1alpha1.Role, string, error) {
+	partition, _, err := c.getPartition(rolePartition(ms, role), roleReplicas(role))
+	if err != nil {
+		return workloadv1alpha1.Role{}, "", fmt.Errorf("parse partition for Role %s: %w", role.Name, err)
+	}
+	if ordinal >= partition {
+		return role, targetRevision, nil
+	}
+	revision := targetRevision
+	if ms.Status.CurrentRevision != "" {
+		revision = ms.Status.CurrentRevision
+	}
+	// The caller persists the initial target before creation. Once a baseline
+	// exists, missing history must not fall back to the latest template.
+	applied, err := c.revisionHistory(ctx, ms).role(ctx, revision, role.Name)
+	if err != nil {
+		return workloadv1alpha1.Role{}, "", fmt.Errorf("resolve protected Role %s/%d at revision %s: %w", role.Name, ordinal, revision, err)
+	}
+	return applied, revision, nil
+}
+
+// podGroupRolesForNewGroup projects the layouts that will actually be created.
+// Like modelServingForPodGroup, mixed worker layouts use the smaller subgroup
+// size; an entirely protected Role must use its historical size in either direction.
+func (c *ModelServingController) podGroupRolesForNewGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, roles []workloadv1alpha1.Role, revision string) ([]workloadv1alpha1.Role, error) {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+		return roles, nil
+	}
+	projected := make([]workloadv1alpha1.Role, 0, len(roles))
+	for _, role := range roles {
+		effective := role
+		if replicas := roleReplicas(role); replicas > 0 {
+			first, _, err := c.roleTemplateForNewReplica(ctx, ms, role, 0, revision)
+			if err != nil {
+				return nil, err
+			}
+			last, _, err := c.roleTemplateForNewReplica(ctx, ms, role, replicas-1, revision)
+			if err != nil {
+				return nil, err
+			}
+			effective = first
+			if last.WorkerReplicas < first.WorkerReplicas {
+				effective = last
+			}
+			effective.Replicas = role.Replicas
+		}
+		projected = append(projected, effective)
+	}
+	return projected, nil
+}
+
 // roleTemplateForInstance resolves an existing replica's layout. The entry Pod
 // anchors its identity after a controller restart, regardless of informer order.
 // Desired Role replicas and rollout settings do not change this identity.
