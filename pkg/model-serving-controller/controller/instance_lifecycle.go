@@ -218,6 +218,9 @@ func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *worklo
 	if len(pods) == 0 {
 		return fmt.Errorf("cannot record creation of absent Role %s/%s", group, instance)
 	}
+	if err := c.persistRoleCreated(ctx, ms, group, role, instance, pods); err != nil {
+		return err
+	}
 	var failures []error
 	for _, pod := range pods {
 		if pod.Annotations[roleCreatedAnnotation] == "true" {

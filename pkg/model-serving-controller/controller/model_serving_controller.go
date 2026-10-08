@@ -380,6 +380,15 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 		return
 	}
 
+	if !c.initialSync.Load() {
+		// Rebuild existence independently of health or recovery permission.
+		// Failed/restarting old instances must still participate in rollout.
+		roleName := utils.GetRoleName(newPod)
+		roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
+		c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), servingGroupName,
+			utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
+	}
+
 	if newPod.Status.Phase == corev1.PodRunning {
 		if err = c.handleRunningPod(ms, servingGroupName, newPod); err != nil {
 			klog.Errorf("handle running pod %s/%s failed for ModelServing %s/%s: %v", newPod.Namespace, newPod.Name, ms.Namespace, ms.Name, err)
@@ -408,14 +417,6 @@ func (c *ModelServingController) updatePod(_, newObj interface{}) {
 			klog.ErrorS(err, "mark NotReady Pod unavailable", "pod", newPod.Name)
 		}
 		c.enqueueModelServing(ms)
-		if !c.initialSync.Load() {
-			roleName := utils.GetRoleName(newPod)
-			roleTemplateHash := c.resolveRoleTemplateHash(ms, roleName, newPod)
-			c.store.AddServingGroupAndRole(types.NamespacedName{
-				Namespace: ms.Namespace,
-				Name:      ms.Name,
-			}, servingGroupName, utils.ObjectRevision(newPod), roleTemplateHash, roleName, utils.GetRoleID(newPod))
-		}
 	}
 }
 
@@ -669,6 +670,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 	if err := c.ensureGroupMembers(ctx, ms); err != nil {
+		return err
+	}
+	if err := c.restoreCreatedRoles(ctx, ms); err != nil {
 		return err
 	}
 	// Pod informer storage can advance before its queued Ready callback runs.
@@ -2110,10 +2114,8 @@ func (c *ModelServingController) handleObservedReadyPod(ms *workloadv1alpha1.Mod
 	if err != nil {
 		klog.Warningf("failed to check role %s/%s readiness, skipping role status update: %v", roleName, roleID, err)
 	} else if roleReady {
-		if newPod.Annotations[roleCreatedAnnotation] != "true" {
-			if err := c.markRoleCreated(context.Background(), ms, servingGroupName, roleName, roleID); err != nil {
-				return err
-			}
+		if err := c.markRoleCreated(context.Background(), ms, servingGroupName, roleName, roleID); err != nil {
+			return err
 		}
 		currentRoleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
 		if currentRoleStatus != datastore.RoleRunning && currentRoleStatus != datastore.RoleDeleting {

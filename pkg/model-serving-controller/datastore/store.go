@@ -39,6 +39,7 @@ type Store interface {
 	GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
+	MarkRoleInitialized(modelServingName types.NamespacedName, groupName, roleName, roleID string) error
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
 	DeleteModelServing(modelServingName types.NamespacedName)
 	DeleteServingGroup(modelServingName types.NamespacedName, groupName string)
@@ -224,6 +225,22 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 	if status == RoleRunning {
 		role.Initialized = true
 	}
+	return nil
+}
+
+// MarkRoleInitialized restores creation evidence without granting availability.
+func (s *store) MarkRoleInitialized(modelServingName types.NamespacedName, groupName, roleName, roleID string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+	group := s.servingGroup[modelServingName][groupName]
+	if group == nil {
+		return ErrServingGroupNotFound
+	}
+	role := group.roles[roleName][roleID]
+	if role == nil {
+		return fmt.Errorf("Role %s/%s not found in group %s", roleName, roleID, groupName)
+	}
+	role.Initialized = true
 	return nil
 }
 

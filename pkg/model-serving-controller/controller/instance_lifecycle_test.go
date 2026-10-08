@@ -408,3 +408,105 @@ func TestInstanceLifecyclePartialCreationIsCompletedWithoutRecoveryChurn(t *test
 		})
 	}
 }
+
+func TestInstanceLifecycle_ColdStartRetainsFailedInstanceForRollout(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+			for _, recovery := range []string{"none", "grace-minus-one"} {
+				for _, health := range []string{"failed", "restarting", "plain-not-ready"} {
+					t.Run(fmt.Sprintf("changed=%t/%s/%s/%s", changed, mode, recovery, health), func(t *testing.T) {
+						ctx := context.Background()
+						old := lifecycleMS("cold-fault", 1, 1, 0)
+						old.ResourceVersion = "1"
+						old.Spec.RolloutStrategy.Type = mode
+						old.Spec.Template.Roles[0].MaxUnavailable = ptr.To(intstr.FromInt(1))
+						old.Spec.RecoveryPolicy = api.NoneRestartPolicy
+						if recovery == "grace-minus-one" {
+							old.Spec.RecoveryPolicy = api.RoleRecreate
+							old.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+						}
+						ms := old.DeepCopy()
+						if changed {
+							ms.Generation++
+							ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+						}
+						ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+						ms.Status.UpdateRevision = utils.ModelServingRevision(ms)
+						c := lifecycleController(t, ms, old)
+						role := *old.Spec.Template.Roles[0].DeepCopy()
+						pod := utils.GenerateEntryPod(role, ms, "cold-fault-0", "prefill-0", utils.ModelServingRevision(old), utils.CalRoleTemplateHash(role))
+						pod.UID, pod.ResourceVersion = "old-fault", "5"
+						pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}}
+						if health == "failed" {
+							pod.Status.Phase = corev1.PodFailed
+						} else if health == "restarting" {
+							pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: role.EntryTemplate.Spec.Containers[0].Name, RestartCount: 1}}
+						}
+						_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+						require.NoError(t, err)
+						require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+						c.initialSync.Store(false)
+						c.syncAll()
+						c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+						var lastErr error
+						for attempt := 0; attempt < 3; attempt++ {
+							lastErr = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+							if lifecycleDeletionMatches(c, pod) {
+								break
+							}
+						}
+						t.Logf("health=%s observedGroup=%s reconcileError=%v", health, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "cold-fault-0"), lastErr)
+						require.Equal(t, changed, lifecycleDeletionMatches(c, pod), "rollout must recognize an existing unhealthy old instance after restart; None/-1 only disable proactive failure recovery")
+					})
+				}
+			}
+		}
+	}
+}
+func TestColdStartPreservesWholeGroupRecoveryScope(t *testing.T) {
+	for _, cold := range []bool{false, true} {
+		for _, policy := range []api.RecoveryPolicy{api.ServingGroupRecreate, api.NoneRestartPolicy} {
+			t.Run(fmt.Sprintf("cold=%t/policy=%s", cold, policy), func(t *testing.T) {
+				ctx := context.Background()
+				ms := lifecycleMS("lost-role", 1, 1, 0)
+				ms.ResourceVersion = "1"
+				ms.Spec.RecoveryPolicy = policy
+				other := *ms.Spec.Template.Roles[0].DeepCopy()
+				other.Name = "decode"
+				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, other)
+				c := lifecycleController(t, ms)
+				lost := lifecyclePod(t, c, ms, ms, 0, "lost-entry")
+				revision, hash := utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(other)
+				survivor := utils.GenerateEntryPod(*other.DeepCopy(), ms, "lost-role-0", "decode-0", revision, hash)
+				survivor.UID, survivor.ResourceVersion = "survivor", "2"
+				survivor.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, survivor, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.podsInformer.GetIndexer().Add(survivor))
+				c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "lost-role-0", survivor.Name, revision, hash, "decode", "decode-0")
+				require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "lost-role-0", "decode", "decode-0", datastore.RoleRunning))
+				require.NoError(t, c.setGroupMembers(ctx, ms, "lost-role-0", revision, ms.Spec.Template.Roles))
+				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "prefill", "prefill-0"))
+				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "decode", "decode-0"))
+				// Physical loss happens without a PodDeleted callback. A cold
+				// controller retains API objects and member state but loses RAM.
+				require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, lost.Name, metav1.DeleteOptions{}))
+				require.NoError(t, c.podsInformer.GetIndexer().Delete(lost))
+				if cold {
+					fresh := lifecycleController(t, ms)
+					fresh.kubeClientSet = c.kubeClientSet
+					require.NoError(t, fresh.podsInformer.GetIndexer().Add(survivor))
+					fresh.initialSync.Store(false)
+					fresh.syncAll()
+					c = fresh
+				}
+				c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+				err = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+				require.NoError(t, err)
+				deleted := lifecycleDeletionMatches(c, survivor)
+				t.Logf("cold=%t policy=%s survivingRoleDeleted=%t", cold, policy, deleted)
+				require.Equal(t, policy == api.ServingGroupRecreate, deleted, "physical loss of an established Role must keep the requested recovery scope after restart")
+			})
+		}
+	}
+}
