@@ -699,14 +699,29 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return fmt.Errorf("failed to resolve Role rollout policy: %v", err)
 	}
 
+	servingGroupRollout := ms.Spec.RolloutStrategy == nil ||
+		ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
+	// For SG rollout, choose and start every currently legal whole-group
+	// replacement before applying member-count changes. Groups actually marked
+	// Deleting are then skipped by syncRoleReplicas; protected groups may still
+	// receive member changes, while the existing member-change budget continues
+	// to hold any group whose scaling would exceed maxUnavailable.
+	if servingGroupRollout {
+		if err := c.manageRollingUpdate(ctx, ms, revision, rolloutPolicy); err != nil {
+			return fmt.Errorf("failed to handle rollingUpdate: %v", err)
+		}
+	}
+
 	// 2. Sync the roles and their replicas within each ServingGroup, handling partitioned scaling and revisions.
 	if err := c.syncRoleReplicas(ctx, ms, revision, rolloutPolicy); err != nil && !isRevisionResolutionError(err) {
 		return fmt.Errorf("failed to sync role replicas: %v", err)
 	}
 
-	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
-	if err := c.manageRollingUpdate(ctx, ms, revision, rolloutPolicy); err != nil {
-		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
+	// Role rollout still derives deletion eligibility after member reconciliation.
+	if !servingGroupRollout {
+		if err := c.manageRollingUpdate(ctx, ms, revision, rolloutPolicy); err != nil {
+			return fmt.Errorf("failed to handle rollingUpdate: %v", err)
+		}
 	}
 
 	// 4. Calculate and update the overall condition and replica status fields of the ModelServing.

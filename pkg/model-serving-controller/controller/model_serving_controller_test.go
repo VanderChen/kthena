@@ -62,6 +62,85 @@ type resourceSpec struct {
 	labels map[string]string
 }
 
+func TestRootCauseR7TemplateRolloutDoesNotExpandRetiringOldGroup(t *testing.T) {
+	for _, scenario := range []string{"eligible", "protected"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			old := lifecycleMS("member-rollover", 1, 1, 0)
+			old.ResourceVersion = "1"
+			ms := old.DeepCopy()
+			ms.Generation++
+			ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+			ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+			ms.Status.CurrentRevision = utils.ModelServingRevision(old)
+			if scenario == "protected" {
+				ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt(1))
+			}
+			c := lifecycleController(t, ms, old)
+			oldPod := lifecyclePod(t, c, ms, old, 0, "old-ready")
+			require.NoError(t, c.setGroupMembers(ctx, ms, "member-rollover-0", utils.ModelServingRevision(old), old.Spec.Template.Roles))
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			kube.ClearActions()
+			require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
+			createdOld := []string{}
+			for _, action := range kube.Actions() {
+				if action.Matches("create", "pods") {
+					pod := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+					if pod.Spec.Containers[0].Image == "test:v1" {
+						createdOld = append(createdOld, pod.Name)
+					}
+				}
+			}
+			switch scenario {
+			case "protected":
+				require.Len(t, createdOld, 1, "groups not selected for replacement still scale members with the historical template")
+				require.False(t, lifecycleDeletionMatches(c, oldPod))
+			default:
+				require.Empty(t, createdOld, "an eligible obsolete group scheduled for replacement must not first grow old-version members")
+				require.True(t, lifecycleDeletionMatches(c, oldPod), "the same reconcile should start the eligible replacement")
+			}
+		})
+	}
+
+	t.Run("budget-blocked", func(t *testing.T) {
+		ctx := context.Background()
+		old := lifecycleMS("member-budget", 2, 1, 0)
+		old.ResourceVersion = "1"
+		stage := old.DeepCopy()
+		stage.Generation++
+		stage.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+		target := stage.DeepCopy()
+		target.Generation++
+		target.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+		target.Status.CurrentRevision = utils.ModelServingRevision(old)
+		c := lifecycleController(t, target, old, stage)
+		oldPod := lifecyclePod(t, c, target, old, 0, "old-ready")
+		unavailable := lifecyclePod(t, c, target, stage, 1, "new-unavailable")
+		unavailable.Status.Conditions[0].Status = corev1.ConditionFalse
+		_, err := c.kubeClientSet.CoreV1().Pods(target.Namespace).Update(ctx, unavailable, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Update(unavailable))
+		require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(target), "member-budget-1", datastore.ServingGroupCreating))
+		require.NoError(t, c.setGroupMembers(ctx, target, "member-budget-0", utils.ModelServingRevision(old), old.Spec.Template.Roles))
+		require.NoError(t, c.setGroupMembers(ctx, target, "member-budget-1", utils.ModelServingRevision(stage), stage.Spec.Template.Roles))
+		kube := c.kubeClientSet.(*kubefake.Clientset)
+		kube.ClearActions()
+
+		require.NoError(t, c.syncModelServing(ctx, namespacedKey(target.Namespace, target.Name)))
+		created := []*corev1.Pod{}
+		for _, action := range kube.Actions() {
+			if action.Matches("create", "pods") {
+				created = append(created, action.(kubetesting.CreateAction).GetObject().(*corev1.Pod))
+			}
+		}
+		require.Len(t, created, 1)
+		require.Equal(t, "member-budget-1-prefill-1-0", created[0].Name)
+		require.Equal(t, "test:v2", created[0].Spec.Containers[0].Image)
+		require.False(t, lifecycleDeletionMatches(c, oldPod), "the healthy old group is blocked by the unavailable target group")
+		require.False(t, lifecycleDeletionMatches(c, unavailable))
+	})
+}
+
 type testQueue interface {
 	Len() int
 	Get() (item interface{}, shutdown bool)
