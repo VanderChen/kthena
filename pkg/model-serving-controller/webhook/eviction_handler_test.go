@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -31,6 +32,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -40,6 +42,7 @@ import (
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	kthenainformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 func TestEvictionHandler(t *testing.T) {
@@ -72,7 +75,7 @@ func TestEvictionHandler(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range pods {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -309,7 +312,7 @@ func TestEvictionHandlerDeniesWhenTargetPodMissingFromLister(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range podsInCache {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -409,7 +412,7 @@ func TestEvictionHandlerClearsRecoveredServingGroupTracker(t *testing.T) {
 			triggerPodName: "pod-g1-prefill",
 		},
 	}
-	cleanupRecoveredDisruptionEntries(entries, pods)
+	handler.cleanupCompleteDisruptionEntries(ms, entries, pods)
 
 	allowed, reason, unit := handler.checkServingGroupProtection(ms, pods[2], ms.Spec.RolloutStrategy.EvictionStrategy, pods, entries)
 
@@ -805,7 +808,7 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range pods {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -1072,7 +1075,7 @@ func TestEvictionHandlerTrackerTTL(t *testing.T) {
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range pods {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -1161,7 +1164,7 @@ func newTestEvictionHandler(ms *workloadv1alpha1.ModelServing, pods []*corev1.Po
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range pods {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -1174,7 +1177,7 @@ func newTestEvictionHandler(ms *workloadv1alpha1.ModelServing, pods []*corev1.Po
 func newTestEvictionHandlerWithLivePods(ms *workloadv1alpha1.ModelServing, cachePods, livePods []*corev1.Pod, objects ...runtime.Object) (*EvictionHandler, *fake.Clientset) {
 	kubeObjects := make([]runtime.Object, 0, len(livePods)+len(objects))
 	for _, pod := range livePods {
-		kubeObjects = append(kubeObjects, pod)
+		kubeObjects = append(kubeObjects, withEvictionLayout(ms, pod))
 	}
 	kubeObjects = append(kubeObjects, objects...)
 	fakeKubeClient := fake.NewSimpleClientset(kubeObjects...)
@@ -1183,7 +1186,7 @@ func newTestEvictionHandlerWithLivePods(ms *workloadv1alpha1.ModelServing, cache
 	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	for _, p := range cachePods {
-		podInformer.Informer().GetStore().Add(p)
+		podInformer.Informer().GetStore().Add(withEvictionLayout(ms, p))
 	}
 
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
@@ -1267,7 +1270,46 @@ func withModelServingOwner(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing) *
 	return ownedPod
 }
 
+// Older tracker fixtures used descriptive names without revision identities.
+// Give them the same canonical identity as controller-rendered Pods while
+// retaining their readable aliases at the request boundary.
+func withEvictionLayout(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) *corev1.Pod {
+	if len(ms.Spec.Template.Roles) == 0 || utils.ObjectRevision(pod) != "" {
+		return pod
+	}
+	index := 0
+	if strings.Contains(pod.Name, "-worker") {
+		index = 1
+	}
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+	}
+	pod.Annotations["test-alias"] = pod.Name
+	pod.Name = utils.GeneratePodName(pod.Labels[workloadv1alpha1.GroupNameLabelKey], pod.Labels[workloadv1alpha1.RoleIDKey], index)
+	pod.Labels[workloadv1alpha1.RevisionLabelKey] = utils.ModelServingRevision(ms)
+	for _, role := range ms.Spec.Template.Roles {
+		if role.Name == pod.Labels[workloadv1alpha1.RoleLabelKey] {
+			pod.Labels[workloadv1alpha1.RoleTemplateHashLabelKey] = utils.CalRoleTemplateHash(role)
+		}
+	}
+	return pod
+}
+
 func handleEvictionRequest(handler *EvictionHandler, podName string) *admissionv1.AdmissionResponse {
+	pods, _ := handler.podLister.Pods("default").List(labels.Everything())
+	live, _ := handler.kubeClient.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+	if live != nil {
+		for i := range live.Items {
+			pods = append(pods, &live.Items[i])
+		}
+	}
+	for _, pod := range pods {
+		if pod.Annotations["test-alias"] == podName {
+			podName = pod.Name
+			break
+		}
+	}
+
 	ar := &admissionv1.AdmissionReview{
 		Request: &admissionv1.AdmissionRequest{
 			UID: "test-uid",

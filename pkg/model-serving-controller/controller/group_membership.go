@@ -18,7 +18,6 @@ package controller
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -28,7 +27,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
@@ -36,7 +34,7 @@ import (
 // Applied member counts are operation state, not part of the template revision.
 // The owner annotation is only a reconcile-local projection. Authoritative state
 // lives in an owned ConfigMap, independently of user PUTs to the ModelServing.
-const groupMembersAnnotation = "modelserving.volcano.sh/applied-role-replicas"
+const groupMembersAnnotation = utils.AppliedRoleReplicasAnnotation
 
 type groupMemberTargets map[string]map[string]int32
 
@@ -85,23 +83,12 @@ func rolesWithGroupMembers(ms *api.ModelServing, group string, roles []api.Role)
 	return result, nil
 }
 
-// A fixed length name includes the owner's UID to isolate same-name replacements.
 func groupMembersStateName(ms *api.ModelServing) string {
-	return fmt.Sprintf("modelserving-members-%x", sha256.Sum256([]byte(ms.Namespace+"/"+ms.Name+"/"+string(ms.UID))))
+	return utils.GroupMembersStateName(ms)
 }
 
 func (c *ModelServingController) readGroupMembersState(ctx context.Context, ms *api.ModelServing) (*corev1.ConfigMap, error) {
-	cm, err := c.kubeClientSet.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, groupMembersStateName(ms), metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !utils.IsOwnedByModelServingWithUID(cm, ms.UID) || cm.DeletionTimestamp != nil {
-		return nil, fmt.Errorf("invalid member state owner or terminating state: %s", cm.Name)
-	}
-	return cm, nil
+	return utils.ReadGroupMembersState(ctx, c.kubeClientSet, ms)
 }
 
 // Return a copy: event callbacks must never mutate the informer object.

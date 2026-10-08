@@ -79,6 +79,9 @@ type EvictionHandler struct {
 	// disruptionTTL controls how long a recently allowed logical unit remains
 	// in the shared ConfigMap tracker to cover informer cache lag.
 	disruptionTTL time.Duration
+
+	// layout is private to one admission request, never shared by concurrent requests.
+	layout *evictionLayout
 }
 
 func NewEvictionHandler(kubeClient kubernetes.Interface, kthenaClient clientset.Interface, podLister corelisters.PodLister, msLister workloadlisters.ModelServingLister, disruptionTTL ...time.Duration) *EvictionHandler {
@@ -207,6 +210,11 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod) (bool, string) {
+	// Keep historical reads consistent within this request without sharing mutable
+	// caches across concurrent admission handlers.
+	request := *h
+	request.layout = newEvictionLayout(ctx, h.kubeClient, ms)
+	h = &request
 	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
 	lockKey := fmt.Sprintf("%s/%s", ms.Namespace, ms.Name)
 	lockValue, _ := evictionTrackerLocks.LoadOrStore(lockKey, &sync.Mutex{})
@@ -492,60 +500,14 @@ func (h *EvictionHandler) isServingGroupReady(ms *workloadv1alpha1.ModelServing,
 	if isUnitDisrupted(entries, servingGroupUnit(ms, groupName)) {
 		return false
 	}
-	return servingGroupHasExpectedPods(ms, pods) && arePodsReady(pods)
+	return h.layoutFor(ms).servingGroupComplete(groupName, pods) && arePodsReady(pods)
 }
 
 func (h *EvictionHandler) isRoleInstanceReady(ms *workloadv1alpha1.ModelServing, groupName, role, roleID string, pods []*corev1.Pod, entries disruptionEntries) bool {
 	if isUnitDisrupted(entries, roleUnit(ms, groupName, role, roleID)) {
 		return false
 	}
-	return roleInstanceHasExpectedPods(ms, role, pods) && arePodsReady(pods)
-}
-
-func servingGroupHasExpectedPods(ms *workloadv1alpha1.ModelServing, pods []*corev1.Pod) bool {
-	// ModelServing validation requires at least one Role. Keep the fallback for
-	// old objects and focused tests constructed without a complete template.
-	if len(ms.Spec.Template.Roles) == 0 {
-		return len(pods) > 0
-	}
-
-	for _, role := range ms.Spec.Template.Roles {
-		expectedInstances := int(replicasOrDefault(role.Replicas))
-		if expectedInstances == 0 {
-			continue
-		}
-		expectedPodsPerInstance := 1 + int(role.WorkerReplicas)
-		podsPerInstance := make(map[string]int)
-		for _, pod := range pods {
-			if pod.Labels[workloadv1alpha1.RoleLabelKey] != role.Name {
-				continue
-			}
-			roleID := pod.Labels[workloadv1alpha1.RoleIDKey]
-			if roleID != "" {
-				podsPerInstance[roleID]++
-			}
-		}
-
-		completeInstances := 0
-		for _, observedPods := range podsPerInstance {
-			if observedPods >= expectedPodsPerInstance {
-				completeInstances++
-			}
-		}
-		if completeInstances < expectedInstances {
-			return false
-		}
-	}
-	return true
-}
-
-func roleInstanceHasExpectedPods(ms *workloadv1alpha1.ModelServing, roleName string, pods []*corev1.Pod) bool {
-	for _, role := range ms.Spec.Template.Roles {
-		if role.Name == roleName {
-			return len(pods) >= 1+int(role.WorkerReplicas)
-		}
-	}
-	return len(pods) > 0
+	return h.layoutFor(ms).roleComplete(groupName, role, roleID, pods) && arePodsReady(pods)
 }
 
 func arePodsReady(pods []*corev1.Pod) bool {
@@ -659,7 +621,7 @@ func cleanupDisruptionEntries(entries disruptionEntries) {
 }
 
 func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context, ms *workloadv1alpha1.ModelServing, entries disruptionEntries, cachedPods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
-	cleanupRecoveredDisruptionEntries(entries, cachedPods)
+	h.cleanupCompleteDisruptionEntries(ms, entries, cachedPods)
 	if !needsLiveRecoveryCheck(entries, cachedPods) {
 		return cachedPods
 	}
@@ -671,7 +633,7 @@ func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context,
 	}
 	livePods = includeTargetPod(livePods, targetPod)
 	entriesBeforeLiveCleanup := len(entries)
-	cleanupRecoveredDisruptionEntries(entries, livePods)
+	h.cleanupCompleteDisruptionEntries(ms, entries, livePods)
 	if entriesBeforeLiveCleanup != len(entries) {
 		klog.Infof("Cleaned recovered eviction tracker entries with live pod refresh modelServing=%s/%s entriesBefore=%d entriesAfter=%d",
 			ms.Namespace, ms.Name, entriesBeforeLiveCleanup, len(entries))
@@ -680,20 +642,23 @@ func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context,
 	return cachedPods
 }
 
-func cleanupRecoveredDisruptionEntries(entries disruptionEntries, pods []*corev1.Pod) {
+func (h *EvictionHandler) cleanupCompleteDisruptionEntries(ms *workloadv1alpha1.ModelServing, entries disruptionEntries, pods []*corev1.Pod) {
 	for key, entry := range entries {
-		if entry.triggerPodUID == "" {
-			continue
-		}
 		unit, ok := parseDisruptionUnitKey(key)
-		if !ok {
+		if !ok || entry.triggerPodUID == "" {
 			continue
 		}
 		unitPods := podsForDisruptionUnit(unit, pods)
-		if len(unitPods) == 0 || !arePodsReady(unitPods) {
+		if hasPodUID(unitPods, entry.triggerPodUID) {
 			continue
 		}
-		if !hasPodUID(unitPods, entry.triggerPodUID) {
+		complete := false
+		if unit.level == workloadv1alpha1.ProtectionLevelRole {
+			complete = h.isRoleInstanceReady(ms, unit.groupName, unit.role, unit.roleID, unitPods, nil)
+		} else {
+			complete = h.isServingGroupReady(ms, unit.groupName, unitPods, nil)
+		}
+		if complete {
 			delete(entries, key)
 		}
 	}
