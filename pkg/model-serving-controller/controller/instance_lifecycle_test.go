@@ -660,3 +660,42 @@ func TestInstanceLifecycle_EnablingRecoveryRevisitsExistingFault(t *testing.T) {
 		}
 	}
 }
+
+func TestInstanceLifecycle_CanaryKeepsLastCompletedBaseline(t *testing.T) {
+	ctx := context.Background()
+	a := lifecycleMS("canary-baseline", 1, 1, 0)
+	a.ResourceVersion = "1"
+	b := a.DeepCopy()
+	b.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+	ms := b.DeepCopy()
+	ms.Generation++
+	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v3"
+	ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt(1))
+	ms.Spec.RevisionHistoryLimit = ptr.To[int32](0)
+	ms.Status.CurrentRevision = utils.ModelServingRevision(a)
+	ms.Status.UpdateRevision = utils.ModelServingRevision(ms)
+	c := lifecycleController(t, ms, a, b)
+	pod := lifecyclePod(t, c, ms, b, 0, "b-ready-after-c-request")
+	require.NoError(t, c.updateModelServingStatus(c.withRevisionHistory(ctx, ms), ms, utils.ModelServingRevision(ms), nil))
+	actual, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, utils.ModelServingRevision(a), actual.Status.CurrentRevision, "B never completed; protected B must not become the A-to-C recovery baseline")
+
+	// Losing the last physical group is not full completion either. Preserve
+	// the baseline and its history while a protected replacement is missing.
+	require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+	c.store.DeleteServingGroup(utils.GetNamespaceName(ms), ms.Name+"-0")
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(actual))
+	require.NoError(t, c.updateModelServingStatus(c.withRevisionHistory(ctx, actual), actual, utils.ModelServingRevision(ms), nil))
+	actual, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, utils.ModelServingRevision(a), actual.Status.CurrentRevision)
+	history, err := utils.GetControllerRevision(ctx, c.kubeClientSet, ms, utils.ModelServingRevision(a))
+	require.NoError(t, err)
+	require.NotNil(t, history, "historyLimit=0 must retain the protected baseline")
+	require.NoError(t, c.scaleUpServingGroups(ctx, actual, nil, 1, utils.ModelServingRevision(ms)))
+	restored, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "test:v1", restored.Spec.Containers[0].Image)
+}

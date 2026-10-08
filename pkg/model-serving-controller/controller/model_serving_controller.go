@@ -2997,37 +2997,17 @@ func (c *ModelServingController) updateModelServingStatus(
 		coordinationConditionChanged, coordinationCondition := rolloutPolicy.setCondition(copy)
 		shouldUpdate = shouldUpdate || coordinationConditionChanged
 
-		// Update revision fields following StatefulSet's logic:
-		// 1. UpdateRevision is always the new revision being applied
-		// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
-		// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
-		// 4. When all groups are updated, CurrentRevision = UpdateRevision
+		// CurrentRevision records the last completed baseline, even when no
+		// live group uses it. A protected intermediate revision becoming Ready
+		// or a temporary empty group set cannot establish a new baseline.
 		updateRevision := revision
-		var currentRevision string
+		currentRevision := copy.Status.CurrentRevision
 		rolloutComplete := !pendingSurge && updated == replicas && available == replicas && len(groups) == replicas
-
-		// First, try to use existing CurrentRevision from status if it's still valid
-		if copy.Status.CurrentRevision != "" {
-			// Check if CurrentRevision is still valid (exists in non-updated groups)
-			if len(revisionCount) > 0 {
-				// Check if the existing CurrentRevision is still used by some groups
-				if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
-					currentRevision = copy.Status.CurrentRevision
-				}
-			}
-			// Promote only after every desired ServingGroup is updated and ready
-			// and temporary capacity has been fully removed.
-			if rolloutComplete {
-				currentRevision = updateRevision
-			} else if currentRevision == "" && (rolloutActive || available != len(groups) || (rolloutPolicy != nil && rolloutPolicy.inProgress)) {
-				// Desired replicas may all be updated while temporary capacity is
-				// still draining. Keep the previous CurrentRevision until the total
-				// ServingGroup count has converged.
-				currentRevision = copy.Status.CurrentRevision
-			}
+		if rolloutComplete {
+			currentRevision = updateRevision
 		}
 
-		// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
+		// Bootstrap only when no completed baseline has been recorded.
 		if currentRevision == "" {
 			if rolloutComplete || len(revisionCount) == 0 {
 				// All groups are updated or no groups exist

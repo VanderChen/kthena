@@ -4796,8 +4796,10 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 	assert.Equal(t, int32(3), updated.Status.Replicas)
 	assert.Equal(t, int32(3), updated.Status.AvailableReplicas)
 	assert.Equal(t, int32(3), updated.Status.UpdatedReplicas)
-	assert.Equal(t, int32(3), updated.Status.CurrentReplicas)
-	assert.Equal(t, "new-revision", updated.Status.CurrentRevision)
+	// The third physical group must still be reported, but excess capacity
+	// means rollout is incomplete and cannot promote the completed baseline.
+	assert.Equal(t, int32(0), updated.Status.CurrentReplicas)
+	assert.Equal(t, "old-revision", updated.Status.CurrentRevision)
 	assert.Equal(t, "new-revision", updated.Status.UpdateRevision)
 	require.NotEmpty(t, updated.Status.Conditions)
 	assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), updated.Status.Conditions[len(updated.Status.Conditions)-1].Type)
