@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"testing"
@@ -123,6 +124,133 @@ func TestRecoveryGraceLargeValueDoesNotOverflow(t *testing.T) {
 	ms, _ := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
 	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](math.MaxInt64)
 	require.Greater(t, restartGraceRemaining(ms, time.Now().Add(-time.Hour)), time.Duration(0))
+}
+
+func TestRecoveryGraceRestoresPersistedFaultStartAfterRestart(t *testing.T) {
+	ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
+	ms.ResourceVersion = "1"
+	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](60)
+	pod := pods[0].DeepCopy()
+	pod.Status.Phase = corev1.PodFailed
+	pod.Status.Conditions[0].Status = corev1.ConditionFalse
+	started := time.Now().Add(-2 * time.Minute).UTC()
+	raw, err := json.Marshal(map[string]any{pod.Name: map[string]any{"uid": pod.UID, "startedAt": started}})
+	require.NoError(t, err)
+	cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{
+		Name: utils.GroupMembersStateName(ms), Namespace: ms.Namespace,
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
+	}, Data: map[string]string{"recovery.json": string(raw)}}
+	kube := kubefake.NewSimpleClientset(pod.DeepCopy(), cm)
+	c, err := NewModelServingController(kube, kthenafake.NewSimpleClientset(ms.DeepCopy()), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	c.recorder = record.NewFakeRecorder(1000)
+	ctx, cancel := context.WithCancel(context.Background())
+	c.recoveryCtx = ctx
+	t.Cleanup(func() { cancel(); c.workqueue.ShutDown() })
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms.DeepCopy()))
+	require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
+	c.addPod(pod)
+	c.initialSync.Store(true)
+
+	require.Eventually(t, func() bool {
+		return len(recoveryDeletedPods(kube)) == 1
+	}, 2*time.Second, 10*time.Millisecond, "offline time must count toward the persisted grace deadline")
+}
+
+func TestRecoveryEpisodePersistsWhileRecoveryDisabled(t *testing.T) {
+	for _, disabled := range []string{"none", "infinite"} {
+		t.Run(disabled, func(t *testing.T) {
+			ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
+			ms.ResourceVersion = "1"
+			if disabled == "none" {
+				ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+				ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](60)
+			} else {
+				ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+			}
+			c, kube := recoveryController(t, ms, pods...)
+			ctx, cancel := context.WithCancel(context.Background())
+			c.recoveryCtx = ctx
+			t.Cleanup(cancel)
+			failed := pods[0].DeepCopy()
+			failed.Status.Phase = corev1.PodFailed
+			failed.Status.Conditions[0].Status = corev1.ConditionFalse
+			updateRecoveryPod(t, c, failed)
+			c.updatePod(pods[0], failed)
+			_, scheduled := c.graceMap.Load(getPodGracePeriodKey(failed))
+			require.False(t, scheduled)
+			cm, err := kube.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, utils.GroupMembersStateName(ms), metav1.GetOptions{})
+			require.NoError(t, err)
+			episodes, err := readRecoveryEpisodes(cm)
+			require.NoError(t, err)
+			first := episodes[failed.Name]
+			require.Equal(t, failed.UID, first.UID)
+
+			latest := ms.DeepCopy()
+			latest.Generation++
+			latest.Spec.RecoveryPolicy = workloadv1alpha1.RoleRecreate
+			latest.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](60)
+			_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
+			require.NoError(t, c.revisitPodRecovery(ctx, latest))
+			started, scheduled := c.graceMap.Load(getPodGracePeriodKey(failed))
+			require.True(t, scheduled)
+			require.True(t, started.(time.Time).Equal(first.StartedAt.Time))
+
+			ready := failed.DeepCopy()
+			ready.Status.Phase = corev1.PodRunning
+			ready.Status.Conditions[0].Status = corev1.ConditionTrue
+			updateRecoveryPod(t, c, ready)
+			c.updatePod(failed, ready)
+			_, scheduled = c.graceMap.Load(getPodGracePeriodKey(failed))
+			require.False(t, scheduled)
+			cm, err = kube.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, utils.GroupMembersStateName(ms), metav1.GetOptions{})
+			require.NoError(t, err)
+			episodes, err = readRecoveryEpisodes(cm)
+			require.NoError(t, err)
+			require.Empty(t, episodes)
+		})
+	}
+}
+
+func TestRecoveryEpisodeDoesNotCrossPodUID(t *testing.T) {
+	ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
+	ms.ResourceVersion = "1"
+	c, kube := recoveryController(t, ms, pods...)
+	oldStart := time.Now().Add(-time.Hour)
+	started, err := c.ensureRecoveryEpisode(context.Background(), ms, pods[0], oldStart)
+	require.NoError(t, err)
+	require.True(t, started.Equal(oldStart))
+	replacement := pods[0].DeepCopy()
+	replacement.UID = "replacement-pod"
+	newObservation := time.Now()
+	started, err = c.ensureRecoveryEpisode(context.Background(), ms, replacement, newObservation)
+	require.NoError(t, err)
+	require.True(t, started.Equal(newObservation), "a replacement UID starts a new fault episode")
+	cm, err := kube.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), utils.GroupMembersStateName(ms), metav1.GetOptions{})
+	require.NoError(t, err)
+	episodes, err := readRecoveryEpisodes(cm)
+	require.NoError(t, err)
+	require.Equal(t, replacement.UID, episodes[replacement.Name].UID)
+}
+
+func TestRecoveryEpisodeWriteFailureDoesNotScheduleDeletion(t *testing.T) {
+	ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
+	ms.ResourceVersion = "1"
+	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](0)
+	c, kube := recoveryController(t, ms, pods...)
+	kube.PrependReactor("update", "configmaps", func(kubetesting.Action) (bool, runtime.Object, error) {
+		return true, nil, fmt.Errorf("injected recovery state write failure")
+	})
+	failed := pods[0].DeepCopy()
+	failed.Status.Phase = corev1.PodFailed
+	failed.Status.Conditions[0].Status = corev1.ConditionFalse
+	err := c.handleErrorPod(ms, "ms-0", failed)
+	require.ErrorContains(t, err, "injected recovery state write failure")
+	_, scheduled := c.graceMap.Load(getPodGracePeriodKey(failed))
+	require.False(t, scheduled)
+	require.Empty(t, recoveryDeletedPods(kube))
 }
 
 func TestRecoveryFailedPodCreationDoesNotBypassPolicy(t *testing.T) {

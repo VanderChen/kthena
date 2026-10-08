@@ -101,6 +101,7 @@ func getPodGracePeriodKey(pod *corev1.Pod) podGracePeriodKey {
 
 type ModelServingController struct {
 	lifecycle          lifecycleLocks
+	recoveryCtx        context.Context
 	kubeClientSet      kubernetes.Interface
 	modelServingClient clientset.Interface
 
@@ -447,6 +448,10 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		c.enqueueModelServingByChildResourceAfter(pod, enqueueAfter)
 		return
 	}
+	c.graceMap.Delete(getPodGracePeriodKey(pod))
+	if err := c.clearRecoveryEpisode(context.Background(), ms, pod.Name, pod.UID); err != nil {
+		klog.ErrorS(err, "clear deleted Pod recovery episode", "pod", pod.Name)
+	}
 
 	if c.shouldSkipHandling(ms, servingGroupName, pod) || c.stalePodDeletion(ms, pod) {
 		c.enqueueModelServing(ms)
@@ -680,6 +685,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err := c.refreshRolloutAvailability(ctx, ms); err != nil {
 		return err
 	}
+	if err := c.revisitPodRecovery(ctx, ms); err != nil {
+		return err
+	}
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to sync ServingGroup replicas: %v", err)
@@ -726,6 +734,7 @@ func (c *ModelServingController) Run(ctx context.Context, workers int) {
 	if ctx.Err() != nil {
 		return
 	}
+	c.recoveryCtx = ctx
 
 	// start informers
 	go c.podsInformer.RunWithContext(ctx)
@@ -2078,6 +2087,9 @@ func (c *ModelServingController) handleObservedReadyPod(ms *workloadv1alpha1.Mod
 		return nil
 	}
 	c.graceMap.Delete(getPodGracePeriodKey(newPod))
+	if err := c.clearRecoveryEpisode(context.Background(), ms, newPod.Name, ""); err != nil {
+		return fmt.Errorf("clear Ready Pod recovery episode: %w", err)
+	}
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
@@ -2185,17 +2197,81 @@ func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServin
 		return err
 	}
 	c.enqueueModelServing(ms)
+	ctx := c.recoveryCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return c.schedulePodRecovery(ctx, ms, errPod)
+}
+
+// A terminal Failed Pod need not emit another event when recovery is enabled.
+// Revisit it on MS reconcile without re-enqueuing the same key in a hot loop.
+func (c *ModelServingController) revisitPodRecovery(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	pods, err := c.podsLister.Pods(ms.Namespace).List(labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}))
+	if err != nil {
+		return err
+	}
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) || pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] != "" {
+			continue
+		}
+		if utils.IsPodRunningAndReady(pod) {
+			c.graceMap.Delete(getPodGracePeriodKey(pod))
+			if err := c.clearRecoveryEpisode(ctx, ms, pod.Name, ""); err != nil {
+				return err
+			}
+			continue
+		}
+		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group) == datastore.ServingGroupDeleting ||
+			c.store.GetRoleStatus(utils.GetNamespaceName(ms), group, utils.GetRoleName(pod), utils.GetRoleID(pod)) == datastore.RoleDeleting {
+			continue
+		}
+		if utils.IsPodFailed(pod) || utils.ContainerRestarted(pod) {
+			if err := c.schedulePodRecovery(ctx, ms, pod); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (c *ModelServingController) schedulePodRecovery(ctx context.Context, ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) error {
 	key := getPodGracePeriodKey(errPod)
+	observed := time.Now()
+	if current, ok := c.graceMap.Load(key); ok {
+		observed = current.(time.Time)
+	}
+	started := observed
+	// API-observed Pods always have a UID. Some direct unit fixtures omit it;
+	// keep their legacy in-memory behavior rather than persisting an unfenced
+	// deletion authority that could never be safe after restart.
+	if errPod.UID != "" {
+		var err error
+		started, err = c.ensureRecoveryEpisode(ctx, ms, errPod, observed)
+		if err != nil {
+			return err
+		}
+	}
 	if podRecoveryDisabled(ms) {
 		c.graceMap.Delete(key)
 		return nil
 	}
-	started := time.Now()
-	if _, loaded := c.graceMap.LoadOrStore(key, started); loaded {
+	for {
+		current, loaded := c.graceMap.LoadOrStore(key, started)
+		if !loaded {
+			go c.handlePodAfterGraceTime(ms, errPod, started)
+			return nil
+		}
+		if current == started {
+			return nil
+		}
+		if !c.graceMap.CompareAndSwap(key, current, started) {
+			continue
+		}
+		go c.handlePodAfterGraceTime(ms, errPod, started)
 		return nil
 	}
-	go c.handlePodAfterGraceTime(ms, errPod, started)
-	return nil
 }
 
 // markPodUnavailable removes the pod from the running set and transitions its
@@ -2236,8 +2312,14 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 	// A Ready event can end this failure episode and a later failure can start
 	// another. An old task must never remove or execute the new task's wait.
 	defer c.graceMap.CompareAndDelete(key, started)
-	ctx := context.Background()
+	ctx := c.recoveryCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if current, ok := c.graceMap.Load(key); !ok || current != started {
 			return
 		}
@@ -2245,23 +2327,75 @@ func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.Mo
 		if err != nil || latestMS.UID != ms.UID || latestMS.DeletionTimestamp != nil || podRecoveryDisabled(latestMS) {
 			return
 		}
-		if remaining := restartGraceRemaining(latestMS, started); remaining > 0 {
-			// Re-read the informer cache so configuration changes cancel or
-			// reschedule a pending recovery without waiting for the old deadline.
-			time.Sleep(min(remaining, time.Second))
-			continue
+		delay := min(restartGraceRemaining(latestMS, started), time.Second)
+		if delay <= 0 {
+			delay, err = c.recoverPodAfterGrace(ctx, ms, errPod, started)
+			if err != nil {
+				klog.ErrorS(err, "recheck Pod recovery after grace", "pod", errPod.Name)
+				delay = time.Second
+			} else if delay <= 0 {
+				return
+			}
 		}
-		latestPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
-		if err != nil || latestPod.UID != errPod.UID || latestPod.DeletionTimestamp != nil ||
-			!utils.IsOwnedByModelServingWithUID(latestPod, ms.UID) || utils.IsPodRunningAndReady(latestPod) {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
 			return
+		case <-timer.C:
 		}
-		invalidateRolloutPodSnapshot(ctx)
-		if err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, latestPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID))); err != nil {
-			klog.Errorf("cannot delete pod %s after grace time: %v", latestPod.Name, err)
-		}
-		return
 	}
+}
+
+// Cache observations can schedule a check, but cannot authorize destruction.
+func (c *ModelServingController) recoverPodAfterGrace(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod, started time.Time) (time.Duration, error) {
+	defer c.lifecycle.lock(ms.Namespace + "/" + ms.Name)()
+	if current, ok := c.graceMap.Load(getPodGracePeriodKey(pod)); !ok || current != started {
+		return 0, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	latestMS, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if latestMS.UID != ms.UID || latestMS.DeletionTimestamp != nil || podRecoveryDisabled(latestMS) {
+		return 0, nil
+	}
+	if remaining := restartGraceRemaining(latestMS, started); remaining > 0 {
+		return min(remaining, time.Second), nil
+	}
+	latestPod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	if latestPod.UID != pod.UID || latestPod.DeletionTimestamp != nil ||
+		!utils.IsOwnedByModelServingWithUID(latestPod, ms.UID) || utils.IsPodRunningAndReady(latestPod) ||
+		(!utils.IsPodFailed(latestPod) && !utils.ContainerRestarted(latestPod)) {
+		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+	}
+	if err := c.checkRolloutIntent(ctx, latestMS); err != nil {
+		return 0, err
+	}
+	options := metav1.NewPreconditionDeleteOptions(string(pod.UID))
+	if latestPod.ResourceVersion != "" {
+		options.Preconditions.ResourceVersion = &latestPod.ResourceVersion
+	}
+	invalidateRolloutPodSnapshot(ctx)
+	err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, *options)
+	if apierrors.IsNotFound(err) {
+		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
 }
 
 func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {

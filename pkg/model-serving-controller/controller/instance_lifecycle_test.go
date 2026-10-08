@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -38,6 +39,85 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 )
+
+func TestInstanceLifecycle_GraceRevalidatesLiveState(t *testing.T) {
+	for _, change := range []string{"none", "infinite", "extend", "ready", "plain-notready", "pod-uid", "ms-uid", "get-failure", "delete-conflict", "recover"} {
+		t.Run(change, func(t *testing.T) {
+			ctx := context.Background()
+			ms := lifecycleMS("live-grace", 1, 1, 0)
+			ms.ResourceVersion = "1"
+			c := lifecycleController(t, ms)
+			pod := lifecyclePod(t, c, ms, ms, 0, "failed-uid")
+			pod.ResourceVersion = "10"
+			pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", RestartCount: 1}}
+			require.NoError(t, c.podsInformer.GetIndexer().Update(pod.DeepCopy()))
+			latestPod, latestMS := pod.DeepCopy(), ms.DeepCopy()
+			switch change {
+			case "none":
+				latestMS.Spec.RecoveryPolicy = api.NoneRestartPolicy
+			case "infinite":
+				latestMS.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+			case "extend":
+				latestMS.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](120)
+			case "ready":
+				latestPod.Status.Conditions[0].Status = corev1.ConditionTrue
+			case "plain-notready":
+				latestPod.Status.ContainerStatuses = nil
+			case "pod-uid":
+				latestPod.UID = "replacement"
+			case "ms-uid":
+				latestMS.UID = "replacement"
+			}
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, latestMS, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, latestPod, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			if change == "get-failure" {
+				kube.PrependReactor("get", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewServiceUnavailable("injected GET failure")
+				})
+			}
+			if change == "delete-conflict" {
+				kube.PrependReactor("delete", "pods", func(a kubetesting.Action) (bool, runtime.Object, error) {
+					pre := a.(kubetesting.DeleteAction).GetDeleteOptions().Preconditions
+					require.Equal(t, pod.UID, *pre.UID)
+					require.Equal(t, pod.ResourceVersion, *pre.ResourceVersion)
+					return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, pod.Name, fmt.Errorf("Ready changed after GET"))
+				})
+			}
+			started := time.Now().Add(-time.Minute)
+			c.graceMap.Store(getPodGracePeriodKey(pod), started)
+			kube.ClearActions()
+			delay, err := c.recoverPodAfterGrace(ctx, ms, pod, started)
+			if change == "get-failure" || change == "delete-conflict" {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			if change == "extend" {
+				require.Greater(t, delay, time.Duration(0))
+			}
+			require.Equal(t, change == "recover" || change == "delete-conflict", lifecycleDeletionMatches(c, pod))
+		})
+	}
+}
+
+func TestInstanceLifecycle_GraceStopsWithController(t *testing.T) {
+	ms := lifecycleMS("stopped-grace", 1, 1, 0)
+	c := lifecycleController(t, ms)
+	pod := lifecyclePod(t, c, ms, ms, 0, "failed-uid")
+	ctx, cancel := context.WithCancel(context.Background())
+	c.recoveryCtx = ctx
+	started := time.Now().Add(-time.Minute)
+	c.graceMap.Store(getPodGracePeriodKey(pod), started)
+	cancel()
+	c.handlePodAfterGraceTime(ms, pod, started)
+	require.False(t, lifecycleDeletionMatches(c, pod))
+	_, pending := c.graceMap.Load(getPodGracePeriodKey(pod))
+	require.False(t, pending)
+}
 
 func lifecycleMS(name string, n, u, s int32) *api.ModelServing {
 	ms := createStandardModelServing(name, n, 1)
@@ -506,6 +586,76 @@ func TestColdStartPreservesWholeGroupRecoveryScope(t *testing.T) {
 				deleted := lifecycleDeletionMatches(c, survivor)
 				t.Logf("cold=%t policy=%s survivingRoleDeleted=%t", cold, policy, deleted)
 				require.Equal(t, policy == api.ServingGroupRecreate, deleted, "physical loss of an established Role must keep the requested recovery scope after restart")
+			})
+		}
+	}
+}
+
+func TestInstanceLifecycle_EnablingRecoveryRevisitsExistingFault(t *testing.T) {
+	for _, initial := range []string{"none", "infinite", "long-grace"} {
+		for _, health := range []string{"failed", "restarting", "ready-restarted", "plain-notready"} {
+			t.Run(initial+"/"+health, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				t.Cleanup(cancel)
+				ms := lifecycleMS("enable-recovery", 1, 1, 0)
+				ms.ResourceVersion = "1"
+				ms.Spec.RecoveryPolicy = api.NoneRestartPolicy
+				if initial != "none" {
+					ms.Spec.RecoveryPolicy = api.RoleRecreate
+					ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](-1)
+				}
+				if initial == "long-grace" {
+					ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](10000)
+				}
+				c := lifecycleController(t, ms)
+				c.recoveryCtx = ctx
+				pod := lifecyclePod(t, c, ms, ms, 0, "existing-fault")
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+				if health == "failed" {
+					pod.Status.Phase = corev1.PodFailed
+				}
+				if health == "restarting" || health == "ready-restarted" {
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "server", RestartCount: 1}}
+				}
+				if health == "ready-restarted" {
+					pod.Status.Conditions[0].Status = corev1.ConditionTrue
+				}
+				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, pod, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+				// Replay the observation under the original disabled/long grace setting.
+				c.updatePod(nil, pod)
+				latest := ms.DeepCopy()
+				latest.Generation++
+				latest.Spec.RecoveryPolicy = api.RoleRecreate
+				latest.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](100)
+				_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
+				require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
+				started, scheduled := c.graceMap.Load(getPodGracePeriodKey(pod))
+				fault := health == "failed" || health == "restarting"
+				require.Equal(t, fault, scheduled, "MS reconcile must revisit actual faults only")
+				for i := 0; i < 3; i++ {
+					require.NoError(t, c.revisitPodRecovery(context.Background(), latest))
+				}
+				again, ok := c.graceMap.Load(getPodGracePeriodKey(pod))
+				require.Equal(t, scheduled, ok)
+				if scheduled {
+					require.True(t, started.(time.Time).Equal(again.(time.Time)), "reconcile must not reset or duplicate an episode")
+				}
+				if fault {
+					latest = latest.DeepCopy()
+					latest.Generation++
+					latest.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](0)
+					_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
+					require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
+					require.Eventually(t, func() bool { return lifecycleDeletionMatches(c, pod) }, 3*time.Second, 10*time.Millisecond)
+				} else {
+					require.False(t, lifecycleDeletionMatches(c, pod))
+				}
 			})
 		}
 	}

@@ -6899,6 +6899,9 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 	assert.NoError(t, err)
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
+	// Recovery authorization reads the API as well as the informer cache.
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), failedPod.DeepCopy(), metav1.CreateOptions{})
 	assert.NoError(t, err)
@@ -6997,6 +7000,9 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 	err = controller.podsInformer.GetIndexer().Add(restartedPod)
 	assert.NoError(t, err)
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+	// Recovery authorization reads the API as well as the informer cache.
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms.DeepCopy(), metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), restartedPod.DeepCopy(), metav1.CreateOptions{})
@@ -7152,6 +7158,9 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 	assert.NoError(t, err)
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
 	assert.NoError(t, err)
+	// Recovery authorization reads the API as well as the informer cache.
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms.DeepCopy(), metav1.CreateOptions{})
+	assert.NoError(t, err)
 
 	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), runningPod.DeepCopy(), metav1.CreateOptions{})
 	assert.NoError(t, err)
@@ -7242,7 +7251,7 @@ func TestHandlePodAfterGraceTime(t *testing.T) {
 					Name:      podName,
 					UID:       tt.currentPodUID,
 				},
-				Status: corev1.PodStatus{Phase: corev1.PodPending},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
 			}
 			controller, kubeClient := newGracePeriodTestController(t, ms, currentPod)
 
@@ -7264,9 +7273,14 @@ func TestHandlePodAfterGraceTime(t *testing.T) {
 				}
 				return
 			}
-			require.Len(t, actions, 2)
-			deleteAction, ok := actions[0].(kubetesting.DeleteAction)
-			require.True(t, ok)
+			var deletions []kubetesting.DeleteAction
+			for _, action := range actions {
+				if action.Matches("delete", "pods") {
+					deletions = append(deletions, action.(kubetesting.DeleteAction))
+				}
+			}
+			require.Len(t, deletions, 1)
+			deleteAction := deletions[0]
 			require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
 			require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions.UID)
 			assert.Equal(t, failedPod.UID, *deleteAction.GetDeleteOptions().Preconditions.UID)
@@ -7286,6 +7300,7 @@ func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
 			Name:      podName,
 			UID:       podUID,
 		},
+		Status: corev1.PodStatus{Phase: corev1.PodFailed},
 	}
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -7300,9 +7315,14 @@ func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
 	controller.handlePodAfterGraceTime(ms, failedPod, started)
 
 	actions := kubeClient.Actions()
-	require.Len(t, actions, 1)
-	deleteAction, ok := actions[0].(kubetesting.DeleteAction)
-	require.True(t, ok)
+	var deletions []kubetesting.DeleteAction
+	for _, action := range actions {
+		if action.Matches("delete", "pods") {
+			deletions = append(deletions, action.(kubetesting.DeleteAction))
+		}
+	}
+	require.Len(t, deletions, 1)
+	deleteAction := deletions[0]
 	require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
 	require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions.UID)
 	assert.Equal(t, podUID, *deleteAction.GetDeleteOptions().Preconditions.UID)
@@ -7323,7 +7343,7 @@ func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
 	}
 	replacementPod := failedPod.DeepCopy()
 	replacementPod.UID = types.UID("replacement-pod")
-	replacementPod.Status.Phase = corev1.PodPending
+	replacementPod.Status.Phase = corev1.PodFailed
 
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{
@@ -7438,6 +7458,7 @@ func newGracePeriodTestController(t *testing.T, ms *workloadv1alpha1.ModelServin
 	kubeClient := kubefake.NewSimpleClientset(pod.DeepCopy())
 	controller := &ModelServingController{
 		kubeClientSet:      kubeClient,
+		modelServingClient: kthenafake.NewSimpleClientset(ms.DeepCopy()),
 		podsLister:         corelisters.NewPodLister(indexer),
 		modelServingLister: mslisters.NewModelServingLister(msIndexer),
 	}
@@ -7523,6 +7544,9 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 	err = controller.podsInformer.GetIndexer().Add(failedPod)
 	assert.NoError(t, err)
 	err = controller.modelServingsInformer.GetIndexer().Add(ms)
+	assert.NoError(t, err)
+	// Recovery authorization reads the API as well as the informer cache.
+	_, err = kthenaClient.WorkloadV1alpha1().ModelServings(ns).Create(context.Background(), ms.DeepCopy(), metav1.CreateOptions{})
 	assert.NoError(t, err)
 
 	_, err = kubeClient.CoreV1().Pods(ns).Create(context.Background(), failedPod.DeepCopy(), metav1.CreateOptions{})
