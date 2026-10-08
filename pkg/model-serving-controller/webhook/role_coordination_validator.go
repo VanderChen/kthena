@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -31,6 +32,35 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
+
+// Legacy mismatches may receive unrelated updates, but cannot start another
+// rollout or change their capacity/partition without restoring a common ratio.
+func validateCoordinatedPartitions(oldMS, ms *workloadv1alpha1.ModelServing) field.ErrorList {
+	if oldMS != nil {
+		oldRoles := roleSpecsByName(oldMS.Spec.Template.Roles)
+		selected := map[string]struct{}{}
+		if coordination := roleCoordination(ms); coordination != nil {
+			selected = selectedRoleNames(coordination, roleSpecsByName(ms.Spec.Template.Roles))
+		}
+		// Reordering immutable sets/maps is not a configuration change.
+		changed := len(validateRoleCoordinationImmutable(oldMS, ms)) > 0
+		for _, role := range ms.Spec.Template.Roles {
+			if _, ok := selected[role.Name]; !ok {
+				continue
+			}
+			old, exists := oldRoles[role.Name]
+			changed = changed || !exists || replicasOrDefault(old.Replicas) != replicasOrDefault(role.Replicas) ||
+				!apiequality.Semantic.DeepEqual(old.Partition, role.Partition) || !utils.EqualRoleTemplateForRevision(old, role)
+		}
+		if !changed {
+			return nil
+		}
+	}
+	if i, err := utils.CoordinatedPartitionConflict(ms); err != nil {
+		return field.ErrorList{field.Invalid(field.NewPath("spec", "template", "roles").Index(i).Child("partition"), ms.Spec.Template.Roles[i].Partition, err.Error())}
+	}
+	return nil
+}
 
 func validateRoleCoordinationImmutable(oldMS, newMS *workloadv1alpha1.ModelServing) field.ErrorList {
 	canonical := func(ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.RoleCoordination {

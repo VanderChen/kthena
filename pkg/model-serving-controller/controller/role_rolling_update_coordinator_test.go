@@ -627,8 +627,8 @@ func TestCalculateRoleRolloutLimitsUsesUserPartitionAsCompletionFloor(t *testing
 		{Role: "a", DependsOn: []string{"b"}},
 	}
 	states := []coordinatedRoleState{
-		{roleName: "a", userPartition: 1, totalToUpdate: 3, startedCount: 2, readyCount: 2, targetState: targetReady, hasOldVersion: true, inProgress: true},
-		{roleName: "b", userPartition: 2, totalToUpdate: 2, startedCount: 1, readyCount: 1, targetState: targetReady, hasOldVersion: true, inProgress: true},
+		{roleName: "a", userPartition: 1, totalToUpdate: 3, startedCount: 2, readyCount: 2, targetState: targetReady, hasOldVersion: true, inProgress: true, versionChanged: true, versionTotal: 4, versionStarted: 2, versionReady: 2},
+		{roleName: "b", userPartition: 2, totalToUpdate: 2, startedCount: 1, readyCount: 1, targetState: targetReady, hasOldVersion: true, inProgress: true, versionChanged: true, versionTotal: 4, versionStarted: 1, versionReady: 1},
 	}
 
 	decision, err := calculateRoleRolloutLimits(states, coordination)
@@ -748,6 +748,8 @@ func newCoordinatedRoleStateForTest(roleName string, total, ready, inFlight int)
 		targetState:   targetState,
 		hasOldVersion: ready < total,
 		inProgress:    total > 0 && ready < total,
+		versionTotal:  total, versionReady: ready, versionStarted: started,
+		versionOld: total - started, versionChanged: total > 0, tailReady: ready == started,
 	}
 }
 

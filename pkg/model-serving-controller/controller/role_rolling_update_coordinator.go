@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/bits"
 	"slices"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -51,6 +53,13 @@ type coordinatedRoleState struct {
 	targetState   targetVersionState
 	hasOldVersion bool
 	inProgress    bool
+	// Version capacity is independent of the partition-limited work ledger.
+	versionTotal   int
+	versionReady   int
+	versionStarted int
+	versionOld     int
+	versionChanged bool
+	tailReady      bool
 }
 
 type targetVersionState uint8
@@ -214,6 +223,7 @@ const (
 	coordinatedRoleDependencyNotReady          = "DependencyNotReady"
 	coordinatedRoleMaxSkewLimitReached         = "MaxSkewLimitReached"
 	coordinatedRoleOldVersionDependencyPresent = "OldVersionDependencyPresent"
+	coordinatedRoleIncompatiblePartitions      = "IncompatiblePartitions"
 	coordinatedRoleReplicaBaselineAnnotation   = "modelserving.volcano.sh/coordinated-role-replica-baseline"
 )
 
@@ -546,20 +556,42 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	hasTargetReady := false
 	remainingOldToUpdate := 0
 	hasOldVersion := false
+	versionReady, outsideEligibleStarted, versionOld, formalObserved, protectedObserved := 0, 0, 0, 0, 0
+	tailReady := len(terminatingReplicas) == 0
 	for _, role := range roleList {
 		_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
 		if ordinal < 0 {
 			continue
 		}
 		inStableRange := ordinal >= partition && stablePopulation.contains(ordinal)
+		formal := stablePopulation.contains(ordinal) || (ordinal >= previousDesired && ordinal < desired)
+		if formal {
+			formalObserved++
+		}
+		if stablePopulation.contains(ordinal) && ordinal < partition {
+			protectedObserved++
+		}
 		_, terminating := terminatingReplicas[ordinal]
-		oldVersion := c.compareRoleTemplate(ctx, ms, servingGroup, roleSpec.Name, role) != templateEquivalent
+		comparison := c.compareRoleTemplate(ctx, ms, servingGroup, roleSpec.Name, role)
+		oldVersion := comparison != templateEquivalent
+		if comparison == templateUnknown || role.Status != datastore.RoleRunning || terminating {
+			tailReady = false
+		}
 		if oldVersion {
 			hasOldVersion = true
+			if formal {
+				versionOld++
+			} else {
+				// An old temporary/excess instance still carries an old path.
+				tailReady = false
+			}
 			if role.Status != datastore.RoleDeleting && !terminating && inStableRange {
 				remainingOldToUpdate++
 			}
 			continue
+		}
+		if formal && !inStableRange {
+			outsideEligibleStarted++
 		}
 		if role.Status == datastore.RoleDeleting || terminating || (ordinal >= desired && !stablePopulation.contains(ordinal)) {
 			continue
@@ -567,6 +599,9 @@ func (c *ModelServingController) resolveRoleRolloutState(
 		hasTargetWork = true
 		if role.Status == datastore.RoleRunning {
 			hasTargetReady = true
+			if formal {
+				versionReady++
+			}
 			if inStableRange {
 				stableTargetReady++
 			}
@@ -586,7 +621,7 @@ func (c *ModelServingController) resolveRoleRolloutState(
 	// A user partition preserves old-version stable slots. Keep the old-version
 	// request path present even if a protected Role is temporarily absent while
 	// its old template is being recovered.
-	if templateChanged && protectedOld {
+	if templateChanged && protectedOld && protectedObserved < stablePopulation.countFrom(0)-totalToUpdate {
 		hasOldVersion = true
 	}
 
@@ -609,6 +644,12 @@ func (c *ModelServingController) resolveRoleRolloutState(
 		targetState:      targetState,
 		hasOldVersion:    hasOldVersion,
 		inProgress:       templateChanged && totalToUpdate > 0 && readyCount < totalToUpdate,
+		versionTotal:     desired,
+		versionReady:     min(desired, versionReady),
+		versionStarted:   min(desired, startedCount+outsideEligibleStarted),
+		versionOld:       versionOld,
+		versionChanged:   templateChanged,
+		tailReady:        tailReady && formalObserved == desired && versionReady+versionOld == desired,
 	}
 }
 
@@ -746,6 +787,16 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 		if err != nil {
 			return nil, fmt.Errorf("failed to coordinate Role rollout in ServingGroup %s: %w", servingGroup.Name, err)
 		}
+		if _, conflict := utils.CoordinatedPartitionConflict(ms); conflict != nil {
+			// Preserve already-issued replacements, but do not select more old
+			// stable instances for a legacy incompatible configuration.
+			for name, limits := range groupPolicy.roles {
+				limits.remainingDeletions = 0
+				limits.effectivePartition = limits.rolloutEnd
+				groupPolicy.roles[name] = limits
+			}
+			groupPolicy.blocker = &coordinatedRoleBlocker{reason: coordinatedRoleIncompatiblePartitions, message: conflict.Error()}
+		}
 		policy.addGroup(servingGroup.Name, groupPolicy)
 	}
 	return policy, nil
@@ -792,10 +843,11 @@ func calculateRoleRolloutLimits(
 	baseline := slowestReadyProgress(states)
 	progressingRoleCount := 0
 	for i := range states {
-		if states[i].inProgress && states[i].totalToUpdate > 0 {
+		if states[i].versionChanged && states[i].versionTotal > 0 {
 			progressingRoleCount++
 		}
 	}
+	terminal := fullRoleRolloutTailReady(states)
 	policy := roleRolloutGroupPolicy{
 		roles: make(map[string]roleRolloutLimits, len(states)),
 	}
@@ -826,20 +878,29 @@ func calculateRoleRolloutLimits(
 		}
 
 		if state.inProgress && state.totalToUpdate > 0 && limits.allowTargetStart {
-			allowedStarted := state.totalToUpdate
+			allowedStarted := state.versionTotal
 			if progressingRoleCount > 1 {
 				allowedStarted = allowedStartedReplicas(*state, baseline, maxSkewPercent)
 			}
-			// userPartition is already included in totalToUpdate, so this is the
-			// final proportional boundary rather than an independent partition to
-			// combine with userPartition again.
-			limits.effectivePartition = state.userPartition + state.totalToUpdate - allowedStarted
-			limits.remainingDeletions = max(allowedStarted-state.startedCount, 0)
-			if state.startedCount >= allowedStarted && state.startedCount < state.totalToUpdate {
+			limits.remainingDeletions = max(allowedStarted-state.versionStarted, 0)
+			if terminal && limits.remainingDeletions == 0 && state.versionOld == 1 &&
+				len(oldDirectDependents(state.roleName, stateByName, dependents)) == 0 {
+				for _, name := range dependencies[state.roleName] {
+					if dependency := stateByName[name]; dependency != nil && dependency.hasOldVersion {
+						limits.remainingDeletions = 1
+						klog.V(2).InfoS("Allowing one full-rollout terminal rounding step", "role", state.roleName,
+							"targetReady", state.versionReady, "total", state.versionTotal, "maxSkew", maxSkewPercent)
+						break
+					}
+				}
+			}
+			allowedEligible := min(state.totalToUpdate, state.startedCount+limits.remainingDeletions)
+			limits.effectivePartition = state.userPartition + state.totalToUpdate - allowedEligible
+			if limits.remainingDeletions == 0 && state.startedCount < state.totalToUpdate {
 				skewBlocker = &coordinatedRoleBlocker{
 					reason: coordinatedRoleMaxSkewLimitReached,
-					message: fmt.Sprintf("Role %s has started %d of %d update-eligible replicas and reached the current maxSkew allowance of %d",
-						state.roleName, state.startedCount, state.totalToUpdate, allowedStarted),
+					message: fmt.Sprintf("Role %s has started %d of %d formal target replicas and reached the current maxSkew allowance of %d",
+						state.roleName, state.versionStarted, state.versionTotal, allowedStarted),
 				}
 			}
 		}
@@ -880,13 +941,13 @@ func calculateRoleRolloutLimits(
 }
 
 func slowestReadyProgress(states []coordinatedRoleState) coordinatedRoleState {
-	baseline := coordinatedRoleState{readyCount: 1, totalToUpdate: 1}
+	baseline := coordinatedRoleState{versionReady: 1, versionTotal: 1}
 	found := false
 	for _, state := range states {
-		if !state.inProgress || state.totalToUpdate == 0 {
+		if !state.versionChanged || state.versionTotal == 0 {
 			continue
 		}
-		if !found || int64(state.readyCount)*int64(baseline.totalToUpdate) < int64(baseline.readyCount)*int64(state.totalToUpdate) {
+		if !found || int64(state.versionReady)*int64(baseline.versionTotal) < int64(baseline.versionReady)*int64(state.versionTotal) {
 			baseline = state
 			found = true
 		}
@@ -895,20 +956,47 @@ func slowestReadyProgress(states []coordinatedRoleState) coordinatedRoleState {
 }
 
 func allowedStartedReplicas(state, baseline coordinatedRoleState, maxSkewPercent int) int {
-	if state.totalToUpdate <= 0 {
+	if state.versionTotal <= 0 {
 		return 0
 	}
-	if baseline.totalToUpdate <= 0 {
-		return state.totalToUpdate
+	if baseline.versionTotal <= 0 {
+		return state.versionTotal
 	}
-	baselineProgressWithSkew := int64(baseline.readyCount)*100 + int64(maxSkewPercent)*int64(baseline.totalToUpdate)
-	numerator := baselineProgressWithSkew * int64(state.totalToUpdate)
-	denominator := int64(100 * baseline.totalToUpdate)
-	allowed := int((numerator + denominator - 1) / denominator)
-	if allowed > state.totalToUpdate {
-		return state.totalToUpdate
+	progress := uint64(baseline.versionReady)*100 + uint64(maxSkewPercent)*uint64(baseline.versionTotal)
+	denominator := uint64(baseline.versionTotal) * 100
+	if progress >= denominator {
+		return state.versionTotal
 	}
-	return allowed
+	// The product can exceed int64 for legal int32 replica counts.
+	hi, lo := bits.Mul64(progress, uint64(state.versionTotal))
+	allowed, remainder := bits.Div64(hi, lo, denominator)
+	if remainder != 0 {
+		allowed++
+	}
+	return int(allowed)
+}
+
+func fullRoleRolloutTailReady(states []coordinatedRoleState) bool {
+	participants := 0
+	for _, state := range states {
+		if state.versionTotal == 0 {
+			continue
+		}
+		// Unchanged templates do not constrain version progress, but their
+		// unavailable or unknown capacity cannot justify a terminal exception.
+		if !state.tailReady {
+			return false
+		}
+		if !state.versionChanged {
+			continue
+		}
+		participants++
+		if state.userPartition != 0 || state.versionOld > 1 ||
+			state.versionReady+state.versionOld != state.versionTotal || state.versionStarted != state.versionReady {
+			return false
+		}
+	}
+	return participants > 1
 }
 
 func oldDirectDependents(

@@ -101,3 +101,44 @@ While an updateable outdated Role replica exists, the controller temporarily cha
 Role rollout uses the same completion rules within each ServingGroup: restore missing desired Role instances, wait for sufficient Ready capacity, and remove the marked temporary instances using that Role's budgets. Entry and worker Pods carry the marker so cleanup survives controller restart. Unmarked binpack survivors retain their identities; expansion can adopt a temporary Role instance without changing its Pod UIDs.
 
 `RoleRollingUpdate` rejects `recoveryPolicy: ServingGroupRecreate`, because deleting an outdated Role would recreate its entire ServingGroup. Use `RoleRecreate` or `None`. `ServingGroupRollingUpdate` supports all three recovery policies.
+
+### Coordinated Role progress and partition
+
+With `roleCoordination`, progress is the number of complete target-version Ready
+instances divided by the Role's full desired formal capacity. Partition-protected
+instances remain in that capacity; temporary surge does not. For example, two
+target Ready instances among four replicas represent 50% even when `partition: 2`
+means that all eligible replacements have finished. A changed Role at its
+partition stop continues to constrain the other Roles' version progress.
+
+Coordinated Roles must use partitions compatible with one common nominal retained
+proportion. Each Role independently rounds up that proportion against its own
+replica count. For example, 8/4/10 replicas with `partition: "10%"` resolve to
+1/1/1 protected instances. Integer partitions and mixed integer/percentage forms
+are accepted when they admit a common proportion: integer P on N replicas allows
+`(P-1)/N < proportion <= P/N`, with P=0 requiring zero. A Role with zero replicas
+does not constrain the proportion. Three four-replica Roles with partitions
+2/0/0 are rejected. The controller never rewrites or propagates their partitions.
+
+The check applies at creation and when changing coordinated replicas, partitions
+or templates. Existing incompatible objects may receive unrelated updates, but
+must be explicitly corrected before another such change. An active legacy rollout
+reports `IncompatiblePartitions` and stops selecting further stable old deletions;
+already-issued replacements may finish.
+
+Ordinary starts are bounded by
+`ceil((slowest target Ready proportion + maxSkew) * desired formal replicas)`,
+minus already-started formal targets and replacement reservations. Independent
+availability budgets, descending stable-candidate order and dependency retention
+still apply.
+
+Full rollouts have a narrow terminal rule to break a cycle between rounding and
+old dependency retention. When every changing Role has partition zero and at most
+one old formal instance, all capacity is observed and Ready with known history,
+and no replacement or extra old capacity remains, a skew-blocked caller may
+start its final old instance if it depends on retained old capacity and no old
+caller still requires its own old instance. The controller logs this permit and
+reevaluates it from current facts. Budgets and dependency retention remain in
+force. This rule never applies to a partition canary stop. For the 8/4/10 chain
+with `maxSkew: "10%"`, it can temporarily yield 100% versus 75% Ready target
+capacity; it is an explicit final-instance exception to the ordinary skew bound.

@@ -128,7 +128,7 @@ func parseOldModelServingForUpdate(admissionReview *admissionv1.AdmissionReview)
 
 // validateModelServing validates the ModelServing resource
 func (v *ModelServingValidator) validateModelServing(ctx context.Context, modelServing *workloadv1alpha1.ModelServing) (bool, string) {
-	return v.validateModelServingErrors(ctx, modelServing, nil)
+	return v.validateModelServingErrors(ctx, modelServing, validateCoordinatedPartitions(nil, modelServing))
 }
 
 func (v *ModelServingValidator) validateModelServingUpdate(ctx context.Context, oldModelServing, modelServing *workloadv1alpha1.ModelServing) (bool, string) {
@@ -137,6 +137,7 @@ func (v *ModelServingValidator) validateModelServingUpdate(ctx context.Context, 
 	allErrs = append(allErrs, validateRoleNamesImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateRoleCoordinationUpdate(oldModelServing, modelServing)...)
+	allErrs = append(allErrs, validateCoordinatedPartitions(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validatePluginsImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateSchedulerNameUpdate(oldModelServing, modelServing)...)
 	return v.validateModelServingErrors(ctx, modelServing, allErrs)
