@@ -40,9 +40,6 @@ const (
 	groupInstanceAnnotation = "workload.kthena.io/group-instance"
 	roleInstanceAnnotation  = "workload.kthena.io/role-instance"
 	roleCreatedAnnotation   = "workload.kthena.io/role-created"
-	deletionScopeAnnotation = "workload.kthena.io/deletion-scope"
-	deleteGroupScope        = "ServingGroup"
-	deleteRoleScope         = "Role"
 )
 
 // Informer callbacks and workqueue reconciles both change lifecycle state. The
@@ -104,9 +101,6 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 }
 
 func (c *ModelServingController) stalePodDeletion(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) bool {
-	if pod.Annotations[deletionScopeAnnotation] != "" {
-		return true
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
@@ -182,7 +176,7 @@ func (c *ModelServingController) instanceAnnotations(ctx context.Context, ms *wo
 		if utils.GetRoleName(pod) != role || utils.GetRoleID(pod) != instance {
 			continue
 		}
-		if pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] != "" {
+		if pod.DeletionTimestamp != nil {
 			return nil, fmt.Errorf("Role %s/%s still has retiring Pod UID %s", group, instance, pod.UID)
 		}
 		if !roleFound {
@@ -200,7 +194,7 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 	for key, value := range instance {
 		pod.Annotations[key] = value
 	}
-	// A replacement cannot inherit completion evidence from a user template.
+	// Templates and plugins cannot supply lifecycle evidence for a new Pod.
 	delete(pod.Annotations, roleCreatedAnnotation)
 }
 
@@ -226,7 +220,7 @@ func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *worklo
 		if pod.Annotations[roleCreatedAnnotation] == "true" {
 			continue
 		}
-		if pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] != "" {
+		if pod.DeletionTimestamp != nil {
 			failures = append(failures, fmt.Errorf("Role %s/%s has retiring member %s", group, instance, pod.Name))
 			continue
 		}
@@ -254,92 +248,4 @@ func roleCreationObserved(role datastore.Role, pods []*corev1.Pod) bool {
 		}
 	}
 	return false
-}
-
-// preparePodDeletion freezes the finite UID set before any destructive call.
-// The annotation distinguishes intentional deletion from a new recovery event,
-// including after restart. UID/resourceVersion preconditions protect the mark
-// itself; a replaced object must not inherit an old deletion intent.
-func (c *ModelServingController) preparePodDeletion(ctx context.Context, ms *workloadv1alpha1.ModelServing, selector labels.Selector, scope string) ([]corev1.Pod, error) {
-	list, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
-	if err != nil {
-		return nil, err
-	}
-	var selected []corev1.Pod
-	for i := range list.Items {
-		pod := &list.Items[i]
-		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-			continue
-		}
-		if pod.DeletionTimestamp == nil && pod.Annotations[deletionScopeAnnotation] != scope {
-			patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
-				"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
-				"annotations": map[string]string{deletionScopeAnnotation: scope},
-			}})
-			if err != nil {
-				return nil, err
-			}
-			_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-			if apierrors.IsNotFound(err) {
-				continue
-			}
-			if err != nil {
-				return nil, err
-			}
-		}
-		selected = append(selected, *pod)
-	}
-	return selected, nil
-}
-
-func (c *ModelServingController) deletePodUIDs(ctx context.Context, pods []corev1.Pod) error {
-	for i := range pods {
-		pod := &pods[i]
-		if pod.DeletionTimestamp != nil {
-			continue
-		}
-		invalidateRolloutPodSnapshot(ctx)
-		if err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name,
-			*metav1.NewPreconditionDeleteOptions(string(pod.UID))); err != nil && !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// Restore unfinished deletion state from Pods, before scaling can recreate any
-// missing member. A mark is persisted on every member before the first DELETE.
-func (c *ModelServingController) restoreDeletionIntents(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
-	list, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}.AsSelector().String(),
-	})
-	if err != nil {
-		return err
-	}
-	key := utils.GetNamespaceName(ms)
-	for i := range list.Items {
-		pod := &list.Items[i]
-		scope := pod.Annotations[deletionScopeAnnotation]
-		if scope == "" || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-			continue
-		}
-		group, role, instance := pod.Labels[workloadv1alpha1.GroupNameLabelKey], utils.GetRoleName(pod), utils.GetRoleID(pod)
-		c.store.AddServingGroupAndRole(key, group, utils.ObjectRevision(pod), utils.ObjectRoleTemplateHash(pod), role, instance)
-		if scope == deleteGroupScope {
-			if err := c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupDeleting); err != nil {
-				return err
-			}
-			if err := c.deleteServingGroup(ctx, ms, group); err != nil {
-				return err
-			}
-		} else if scope == deleteRoleScope {
-			if err := c.store.UpdateRoleStatus(key, group, role, instance, datastore.RoleDeleting); err != nil {
-				return err
-			}
-			if err := c.DeleteRole(ctx, ms, group, role, instance); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }

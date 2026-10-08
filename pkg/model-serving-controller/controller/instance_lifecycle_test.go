@@ -27,6 +27,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
+	extensions "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -117,6 +118,47 @@ func TestInstanceLifecycle_GraceStopsWithController(t *testing.T) {
 	require.False(t, lifecycleDeletionMatches(c, pod))
 	_, pending := c.graceMap.Load(getPodGracePeriodKey(pod))
 	require.False(t, pending)
+}
+
+func TestInstanceLifecycle_RenderingCannotSupplyLifecycleEvidence(t *testing.T) {
+	for _, plugin := range []bool{false, true} {
+		t.Run(fmt.Sprintf("plugin=%t", plugin), func(t *testing.T) {
+			ctx := context.Background()
+			ms := lifecycleMS("metadata-intent", 1, 1, 0)
+			ms.ResourceVersion = "1"
+			role := &ms.Spec.Template.Roles[0]
+			role.WorkerReplicas = 1
+			role.EntryTemplate.Metadata = &api.Metadata{Annotations: map[string]string{
+				roleCreatedAnnotation:   "true",
+				groupInstanceAnnotation: "template-group", roleInstanceAnnotation: "template-role",
+				surgeAnnotation: surgeServingGroup, "custom.example/config": "preserved",
+			}}
+			role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			if plugin {
+				ms.Spec.Plugins = []api.PluginSpec{{Name: "demo-pod-tweaks", Config: &extensions.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/role-created":"true","workload.kthena.io/group-instance":"plugin-group","workload.kthena.io/role-instance":"plugin-role","modelserving.volcano.sh/surge":"serving-group","custom.example/plugin":"preserved"}}`)}}}
+			}
+			c := lifecycleController(t, ms)
+			require.NoError(t, c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, 0, 0, utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(*role), ""))
+			created := 0
+			for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
+				if !action.Matches("create", "pods") {
+					continue
+				}
+				created++
+				pod := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+				require.Empty(t, pod.Annotations[roleCreatedAnnotation], "completion must follow actual creation")
+				require.Empty(t, pod.Annotations[surgeAnnotation])
+				require.NotEmpty(t, pod.Annotations[groupInstanceAnnotation])
+				require.NotContains(t, []string{"template-group", "plugin-group"}, pod.Annotations[groupInstanceAnnotation])
+				require.NotContains(t, []string{"template-role", "plugin-role"}, pod.Annotations[roleInstanceAnnotation])
+				require.Equal(t, "preserved", pod.Annotations["custom.example/config"])
+				if plugin {
+					require.Equal(t, "preserved", pod.Annotations["custom.example/plugin"])
+				}
+			}
+			require.Equal(t, 2, created, "both entry and worker must be checked")
+		})
+	}
 }
 
 func lifecycleMS(name string, n, u, s int32) *api.ModelServing {
@@ -250,50 +292,6 @@ func TestInstanceLifecycle_QueuedReadyRevivesDeletingGroup(t *testing.T) {
 	t.Log("latest Pod terminating; queued Ready event preserves Deleting lifecycle fence")
 }
 
-func TestInstanceLifecycleDeletionUIDPrecondition(t *testing.T) {
-	ms := lifecycleMS("uid-delete", 1, 1, 0)
-	c := lifecycleController(t, ms)
-	original := lifecyclePod(t, c, ms, ms, 0, "original-uid")
-	kube := c.kubeClientSet.(*kubefake.Clientset)
-	selected, err := c.preparePodDeletion(context.Background(), ms, labels.SelectorFromSet(original.Labels), deleteRoleScope)
-	require.NoError(t, err)
-	require.Len(t, selected, 1)
-	marked, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), original.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, deleteRoleScope, marked.Annotations[deletionScopeAnnotation])
-	replacement := original.DeepCopy()
-	replacement.UID = "replacement-uid"
-	require.NoError(t, kube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), replacement, ms.Namespace))
-	kube.PrependReactor("delete", "pods", func(a kubetesting.Action) (bool, runtime.Object, error) {
-		action := a.(kubetesting.DeleteAction)
-		require.NotNil(t, action.GetDeleteOptions().Preconditions)
-		require.Equal(t, original.UID, *action.GetDeleteOptions().Preconditions.UID)
-		return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "pods"}, original.Name, fmt.Errorf("UID changed"))
-	})
-	require.True(t, apierrors.IsConflict(c.deletePodUIDs(context.Background(), selected)))
-	got, err := kube.CoreV1().Pods(ms.Namespace).Get(context.Background(), original.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, replacement.UID, got.UID)
-}
-
-func TestInstanceLifecycleRestoresDeletionBeforeCreatingMembers(t *testing.T) {
-	ms := lifecycleMS("restart-delete", 1, 1, 0)
-	c := lifecycleController(t, ms)
-	pod := lifecyclePod(t, c, ms, ms, 0, "retiring-uid")
-	_, err := c.preparePodDeletion(context.Background(), ms, labels.SelectorFromSet(pod.Labels), deleteRoleScope)
-	require.NoError(t, err)
-	// Restart with an empty store but the original persisted Pod deletion intent.
-	c.store = datastore.New()
-	require.NoError(t, c.restoreDeletionIntents(context.Background(), ms))
-	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-	require.True(t, apierrors.IsNotFound(err))
-	for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
-		if action.Matches("delete", "pods") {
-			require.Equal(t, pod.UID, *action.(kubetesting.DeleteAction).GetDeleteOptions().Preconditions.UID)
-		}
-	}
-}
-
 func TestInstanceLifecycleRemovedWorkerCannotRecoverReplacement(t *testing.T) {
 	for _, policy := range []api.RecoveryPolicy{api.RoleRecreate, api.ServingGroupRecreate} {
 		t.Run(string(policy), func(t *testing.T) {
@@ -375,7 +373,9 @@ func TestInstanceLifecycleSnapshotReadErrorCannotRestoreDeletedCapacity(t *testi
 	pod := lifecyclePod(t, c, ms, ms, 0, "retired")
 	ctx, err := c.withRolloutPodSnapshot(context.Background(), ms)
 	require.NoError(t, err)
-	require.NoError(t, c.deletePodUIDs(ctx, []corev1.Pod{*pod}))
+	op, err := c.preparePodDeletionPlan(ctx, ms, labels.SelectorFromSet(pod.Labels), deleteRoleScope)
+	require.NoError(t, err)
+	require.NoError(t, c.deletePlannedPods(ctx, ms, op))
 	failed := false
 	c.kubeClientSet.(*kubefake.Clientset).PrependReactor("list", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
 		if !failed {
@@ -540,53 +540,6 @@ func TestInstanceLifecycle_ColdStartRetainsFailedInstanceForRollout(t *testing.T
 					})
 				}
 			}
-		}
-	}
-}
-func TestColdStartPreservesWholeGroupRecoveryScope(t *testing.T) {
-	for _, cold := range []bool{false, true} {
-		for _, policy := range []api.RecoveryPolicy{api.ServingGroupRecreate, api.NoneRestartPolicy} {
-			t.Run(fmt.Sprintf("cold=%t/policy=%s", cold, policy), func(t *testing.T) {
-				ctx := context.Background()
-				ms := lifecycleMS("lost-role", 1, 1, 0)
-				ms.ResourceVersion = "1"
-				ms.Spec.RecoveryPolicy = policy
-				other := *ms.Spec.Template.Roles[0].DeepCopy()
-				other.Name = "decode"
-				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, other)
-				c := lifecycleController(t, ms)
-				lost := lifecyclePod(t, c, ms, ms, 0, "lost-entry")
-				revision, hash := utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(other)
-				survivor := utils.GenerateEntryPod(*other.DeepCopy(), ms, "lost-role-0", "decode-0", revision, hash)
-				survivor.UID, survivor.ResourceVersion = "survivor", "2"
-				survivor.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
-				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, survivor, metav1.CreateOptions{})
-				require.NoError(t, err)
-				require.NoError(t, c.podsInformer.GetIndexer().Add(survivor))
-				c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "lost-role-0", survivor.Name, revision, hash, "decode", "decode-0")
-				require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "lost-role-0", "decode", "decode-0", datastore.RoleRunning))
-				require.NoError(t, c.setGroupMembers(ctx, ms, "lost-role-0", revision, ms.Spec.Template.Roles))
-				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "prefill", "prefill-0"))
-				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "decode", "decode-0"))
-				// Physical loss happens without a PodDeleted callback. A cold
-				// controller retains API objects and member state but loses RAM.
-				require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, lost.Name, metav1.DeleteOptions{}))
-				require.NoError(t, c.podsInformer.GetIndexer().Delete(lost))
-				if cold {
-					fresh := lifecycleController(t, ms)
-					fresh.kubeClientSet = c.kubeClientSet
-					require.NoError(t, fresh.podsInformer.GetIndexer().Add(survivor))
-					fresh.initialSync.Store(false)
-					fresh.syncAll()
-					c = fresh
-				}
-				c.kubeClientSet.(*kubefake.Clientset).ClearActions()
-				err = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
-				require.NoError(t, err)
-				deleted := lifecycleDeletionMatches(c, survivor)
-				t.Logf("cold=%t policy=%s survivingRoleDeleted=%t", cold, policy, deleted)
-				require.Equal(t, policy == api.ServingGroupRecreate, deleted, "physical loss of an established Role must keep the requested recovery scope after restart")
-			})
 		}
 	}
 }
@@ -892,4 +845,52 @@ func TestInstanceLifecycle_SurgeCompletionRetainsOldDependency(t *testing.T) {
 	c.kubeClientSet.(*kubefake.Clientset).ClearActions()
 	finish()
 	require.True(t, lifecycleDeletionMatches(c, extra), "obsolete temporary dependency clears after the old caller is gone")
+}
+
+func TestColdStartPreservesWholeGroupRecoveryScope(t *testing.T) {
+	for _, cold := range []bool{false, true} {
+		for _, policy := range []api.RecoveryPolicy{api.ServingGroupRecreate, api.NoneRestartPolicy} {
+			t.Run(fmt.Sprintf("cold=%t/policy=%s", cold, policy), func(t *testing.T) {
+				ctx := context.Background()
+				ms := lifecycleMS("lost-role", 1, 1, 0)
+				ms.ResourceVersion = "1"
+				ms.Spec.RecoveryPolicy = policy
+				other := *ms.Spec.Template.Roles[0].DeepCopy()
+				other.Name = "decode"
+				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, other)
+				c := lifecycleController(t, ms)
+				lost := lifecyclePod(t, c, ms, ms, 0, "lost-entry")
+				revision, hash := utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(other)
+				survivor := utils.GenerateEntryPod(*other.DeepCopy(), ms, "lost-role-0", "decode-0", revision, hash)
+				survivor.UID, survivor.ResourceVersion = "survivor", "2"
+				survivor.Status = corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}
+				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(ctx, survivor, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.podsInformer.GetIndexer().Add(survivor))
+				c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "lost-role-0", survivor.Name, revision, hash, "decode", "decode-0")
+				require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "lost-role-0", "decode", "decode-0", datastore.RoleRunning))
+				require.NoError(t, c.setGroupMembers(ctx, ms, "lost-role-0", revision, ms.Spec.Template.Roles))
+				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "prefill", "prefill-0"))
+				require.NoError(t, c.markRoleCreated(ctx, ms, "lost-role-0", "decode", "decode-0"))
+				// Physical loss happens without a PodDeleted callback. A cold
+				// controller retains API objects and member state but loses RAM.
+				require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, lost.Name, metav1.DeleteOptions{}))
+				require.NoError(t, c.podsInformer.GetIndexer().Delete(lost))
+				if cold {
+					fresh := lifecycleController(t, ms)
+					fresh.kubeClientSet = c.kubeClientSet
+					require.NoError(t, fresh.podsInformer.GetIndexer().Add(survivor))
+					fresh.initialSync.Store(false)
+					fresh.syncAll()
+					c = fresh
+				}
+				c.kubeClientSet.(*kubefake.Clientset).ClearActions()
+				err = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+				require.NoError(t, err)
+				deleted := lifecycleDeletionMatches(c, survivor)
+				t.Logf("cold=%t policy=%s survivingRoleDeleted=%t", cold, policy, deleted)
+				require.Equal(t, policy == api.ServingGroupRecreate, deleted, "physical loss of an established Role must keep the requested recovery scope after restart")
+			})
+		}
+	}
 }

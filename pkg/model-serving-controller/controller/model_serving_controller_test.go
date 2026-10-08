@@ -7791,7 +7791,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 	}
 }
 
-func TestDeleteRoleRollbackOnFailure(t *testing.T) {
+func TestDeleteRolePreservesDeletionPhaseOnFailure(t *testing.T) {
 	tests := []struct {
 		name                 string
 		initialRoleStatus    datastore.RoleStatus
@@ -7802,22 +7802,22 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 		description          string
 	}{
 		{
-			name:                 "pod_deletion_fails_with_rollback",
+			name:                 "pod_deletion_result_uncertain",
 			initialRoleStatus:    datastore.RoleRunning,
 			podDeletionError:     fmt.Errorf("failed to delete pods"),
 			serviceDeletionError: nil,
-			expectedFinalStatus:  datastore.RoleRunning,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
-			description:          "failed to delete pods, should rollback to original status and re-enqueue",
+			description:          "unconfirmed DELETE response must retain its reservation and pause the SG",
 		},
 		{
-			name:                 "service_deletion_fails_with_rollback",
+			name:                 "service_deletion_fails_after_commit",
 			initialRoleStatus:    datastore.RoleCreating,
 			podDeletionError:     nil,
 			serviceDeletionError: fmt.Errorf("failed to delete services"),
-			expectedFinalStatus:  datastore.RoleCreating,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
-			description:          "failed to delete services, should rollback to original status and re-enqueue",
+			description:          "accepted Pod DELETE remains committed while service cleanup retries",
 		},
 		{
 			name:                 "both_operations_success_no_rollback",
@@ -7833,9 +7833,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			initialRoleStatus:    datastore.RoleNotFound,
 			podDeletionError:     apierrors.NewInternalError(fmt.Errorf("internal error")),
 			serviceDeletionError: nil,
-			expectedFinalStatus:  datastore.RoleNotFound,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
-			description:          "pod API error, should re-enqueue",
+			description:          "unconfirmed API result remains paused and re-enqueued",
 		},
 	}
 
@@ -7932,6 +7932,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 
 			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
 
+			if tt.podDeletionError != nil || tt.serviceDeletionError != nil {
+				require.True(t, controller.podDeletionPlanActive(ms, groupName))
+			}
 			finalStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus)
 
@@ -8408,7 +8411,7 @@ func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
 	}
 }
 
-func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
+func TestDeleteServingGroupPreservesDeletionPhaseOnFailure(t *testing.T) {
 	tests := []struct {
 		name                  string
 		initialSgStatus       datastore.ServingGroupStatus
@@ -8421,37 +8424,37 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 		description           string
 	}{
 		{
-			name:                  "pod_group_deletion_fails_with_rollback",
+			name:                  "pod_group_deletion_fails_after_commit",
 			initialSgStatus:       datastore.ServingGroupRunning,
 			podGroupDeletionError: fmt.Errorf("failed to delete pod group"),
 			podDeletionError:      nil,
 			serviceDeletionError:  nil,
-			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete pod group, should rollback to original status and re-enqueue",
+			description:           "accepted Pod DELETE remains committed while PodGroup cleanup retries",
 		},
 		{
-			name:                  "pod_deletion_fails_with_rollback",
+			name:                  "pod_deletion_result_uncertain",
 			initialSgStatus:       datastore.ServingGroupCreating,
 			podGroupDeletionError: nil,
 			podDeletionError:      fmt.Errorf("failed to delete pods"),
 			serviceDeletionError:  nil,
-			expectedFinalStatus:   datastore.ServingGroupCreating,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete pods, should rollback to original status and re-enqueue",
+			description:           "unconfirmed DELETE response retains the process-local plan and retries",
 		},
 		{
-			name:                  "service_deletion_fails_with_rollback",
+			name:                  "service_deletion_fails_after_commit",
 			initialSgStatus:       datastore.ServingGroupRunning,
 			podGroupDeletionError: nil,
 			podDeletionError:      nil,
 			serviceDeletionError:  fmt.Errorf("failed to delete services"),
-			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete services, should rollback to original status and re-enqueue",
+			description:           "accepted Pod DELETE remains committed while service cleanup retries",
 		},
 		{
 			name:                  "all_operations_success_no_rollback",
@@ -8584,6 +8587,9 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				assert.NoError(t, err)
 			}
 
+			if tt.podDeletionError != nil || tt.serviceDeletionError != nil || tt.podGroupDeletionError != nil {
+				require.True(t, controller.podDeletionPlanActive(ms, sgName))
+			}
 			finalStatus := controller.store.GetServingGroupStatus(nsn, sgName)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus, "final ServingGroup status should match expected")
 
@@ -8619,19 +8625,17 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				podGroupDeleteNames = append(podGroupDeleteNames, deleteAction.GetName())
 			}
 
-			assert.Equal(t, []string{sgName}, podGroupDeleteNames)
-
-			if tt.podGroupDeletionError != nil {
-				assert.Empty(t, podDeleteSelectors)
-				assert.Empty(t, serviceDeleteNames)
-				return
-			}
-
 			assert.Equal(t, []string{expectedDeleteSelector}, podDeleteSelectors)
 			if tt.podDeletionError != nil {
+				assert.Empty(t, podGroupDeleteNames)
 				assert.Empty(t, serviceDeleteNames)
 			} else {
-				assert.Equal(t, []string{service.Name}, serviceDeleteNames)
+				assert.Equal(t, []string{sgName}, podGroupDeleteNames)
+				if tt.podGroupDeletionError != nil {
+					assert.Empty(t, serviceDeleteNames)
+				} else {
+					assert.Equal(t, []string{service.Name}, serviceDeleteNames)
+				}
 			}
 		})
 	}

@@ -119,6 +119,34 @@ func (c *ModelServingController) ensureRecoveryEpisode(
 	return started, nil
 }
 
+func (c *ModelServingController) recoveryEpisodeMatches(
+	ctx context.Context,
+	ms *api.ModelServing,
+	podName string,
+	uid types.UID,
+) (bool, error) {
+	cm, err := c.readGroupMembersState(ctx, ms)
+	if err != nil || cm == nil {
+		return false, err
+	}
+	episodes, err := readRecoveryEpisodes(cm)
+	if err != nil {
+		return false, err
+	}
+	episode, ok := episodes[podName]
+	return ok && episode.UID == uid, nil
+}
+
+func (c *ModelServingController) clearRecoveryObservations(pod *corev1.Pod) {
+	name := types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}
+	c.recoveryObservations.Range(func(key, _ interface{}) bool {
+		if key.(podGracePeriodKey).NamespacedName == name {
+			c.recoveryObservations.Delete(key)
+		}
+		return true
+	})
+}
+
 // An empty UID clears any episode for the current Pod name. A non-empty UID
 // fences stale Ready/Delete callbacks from clearing a replacement Pod's fault.
 func (c *ModelServingController) clearRecoveryEpisode(

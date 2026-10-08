@@ -18,17 +18,13 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 var errStaleRolloutIntent = errors.New("ModelServing changed before applying rollout intent")
@@ -98,38 +94,10 @@ func (c *ModelServingController) checkGroupCreationSlot(ms *api.ModelServing, gr
 		return err
 	}
 	for _, pod := range pods {
-		if utils.IsOwnedByModelServingWithUID(pod, ms.UID) && (pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] == deleteGroupScope) {
+		if utils.IsOwnedByModelServingWithUID(pod, ms.UID) && pod.DeletionTimestamp != nil {
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 			return fmt.Errorf("ServingGroup %s still has retiring Pod UID %s", group, pod.UID)
 		}
 	}
 	return nil
-}
-
-// If intent changes while preparing the finite set, it is still cancelable:
-// no destructive API request has been sent. Do not leave recovery marks behind.
-func (c *ModelServingController) recheckPreparedDeletion(ctx context.Context, ms *api.ModelServing, pods []corev1.Pod) error {
-	err := c.checkRolloutIntent(ctx, ms)
-	if err == nil {
-		return nil
-	}
-	for _, pod := range pods {
-		current, getErr := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(getErr) {
-			continue
-		}
-		if getErr != nil {
-			err = errors.Join(err, getErr)
-			continue
-		}
-		if current.UID != pod.UID || current.DeletionTimestamp != nil {
-			continue
-		}
-		patch, _ := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
-			"uid": current.UID, "resourceVersion": current.ResourceVersion, "annotations": map[string]interface{}{deletionScopeAnnotation: nil},
-		}})
-		_, patchErr := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-		err = errors.Join(err, patchErr)
-	}
-	return err
 }

@@ -25,11 +25,10 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
-	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	"testing"
 )
@@ -77,37 +76,31 @@ func TestRolloutIntentWaitsForShrinkCompletion(t *testing.T) {
 	t.Log("C=5 N=3 U=1 I=2 Q=1 B=1: shrink sg-3/4 still physically exist; phase barrier prevents sg-2 deletion")
 }
 
-func TestRolloutIntentChangeWhilePreparingCancelsMarks(t *testing.T) {
+func TestRolloutIntentChangeBeforeFirstDeleteAbandonsPlan(t *testing.T) {
 	for _, groupScope := range []bool{false, true} {
 		t.Run(fmt.Sprintf("group=%t", groupScope), func(t *testing.T) {
-			ms := lifecycleMS("cancel-mark", 1, 1, 0)
+			ctx := context.Background()
+			ms := lifecycleMS("cancel-plan", 1, 1, 0)
 			ms.ResourceVersion = "1"
 			c := lifecycleController(t, ms)
 			pod := lifecyclePod(t, c, ms, ms, 0, "retained-uid")
 			client := c.kubeClientSet.(*kubefake.Clientset)
-			first := true
-			client.PrependReactor("patch", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
-				if first {
-					first = false
-					latest := ms.DeepCopy()
-					latest.Generation++
-					latest.Spec.Replicas = ptr.To[int32](3)
-					_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(context.Background(), latest, metav1.UpdateOptions{})
-					require.NoError(t, err)
-				}
-				return false, nil, nil
-			})
-			var err error
+			scope := deleteRoleScope
 			if groupScope {
-				err = c.deleteServingGroup(context.Background(), ms, ms.Name+"-0")
-			} else {
-				err = c.DeleteRole(context.Background(), ms, ms.Name+"-0", "prefill", "prefill-0")
+				scope = deleteGroupScope
 			}
+			plan, err := c.preparePodDeletionPlan(ctx, ms, labels.SelectorFromSet(pod.Labels), scope)
+			require.NoError(t, err)
+			latest := ms.DeepCopy()
+			latest.Generation++
+			latest.Spec.Replicas = ptr.To[int32](3)
+			_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, latest, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			client.ClearActions()
+			err = c.deletePlannedPods(ctx, ms, plan)
 			require.ErrorIs(t, err, errStaleRolloutIntent)
 			require.False(t, lifecycleDeletionMatches(c, pod))
-			current, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-			require.NoError(t, err)
-			require.Empty(t, current.Annotations[deletionScopeAnnotation], "a canceled preparation must not become recovery on the next reconcile")
+			require.False(t, c.podDeletionPlanActive(ms, ms.Name+"-0"))
 		})
 	}
 }

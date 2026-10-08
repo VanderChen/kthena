@@ -417,6 +417,39 @@ func TestRecoveryPolicyPodDeletionScope(t *testing.T) {
 	}
 }
 
+func TestRecoveryDeleteEventScopeAcrossControllerRestart(t *testing.T) {
+	for _, restarted := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restarted=%t", restarted), func(t *testing.T) {
+			ctx := context.Background()
+			ms, pods := recoveryFixture(workloadv1alpha1.ServingGroupRecreate, 1)
+			ms.ResourceVersion = "1"
+			failed := pods[1].DeepCopy()
+			failed.Status.Phase = corev1.PodFailed
+			failed.Status.Conditions[0].Status = corev1.ConditionFalse
+			c, kube := recoveryController(t, ms, pods...)
+			_, err := c.ensureRecoveryEpisode(ctx, ms, failed, time.Now().Add(-time.Minute))
+			require.NoError(t, err)
+			if !restarted {
+				c.recoveryObservations.Store(getPodGracePeriodKey(failed), struct{}{})
+			}
+			require.NoError(t, kube.CoreV1().Pods(ms.Namespace).Delete(ctx, failed.Name, metav1.DeleteOptions{}))
+			require.NoError(t, c.podsInformer.GetIndexer().Delete(failed))
+			kube.ClearActions()
+
+			c.deletePod(failed)
+			if restarted {
+				require.Empty(t, recoveryDeletedPods(kube), "a new process converges from the surviving Pod")
+				require.Positive(t, c.workqueue.Len())
+			} else {
+				require.Equal(t, []string{pods[0].Name}, recoveryDeletedPods(kube), "continuous ServingGroupRecreate keeps its configured scope")
+			}
+			matched, err := c.recoveryEpisodeMatches(ctx, ms, failed.Name, failed.UID)
+			require.NoError(t, err)
+			require.False(t, matched)
+		})
+	}
+}
+
 func TestRecoveryReadyStartsNewGraceEpisode(t *testing.T) {
 	ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
 	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](60)
