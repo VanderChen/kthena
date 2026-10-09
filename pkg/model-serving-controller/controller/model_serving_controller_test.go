@@ -133,9 +133,15 @@ func TestRootCauseR7TemplateRolloutDoesNotExpandRetiringOldGroup(t *testing.T) {
 				created = append(created, action.(kubetesting.CreateAction).GetObject().(*corev1.Pod))
 			}
 		}
-		require.Len(t, created, 1)
-		require.Equal(t, "member-budget-1-prefill-1-0", created[0].Name)
-		require.Equal(t, "test:v2", created[0].Spec.Containers[0].Image)
+		require.Len(t, created, 2, "both groups scale despite the exhausted template rollout budget")
+		images := map[string]string{}
+		for _, pod := range created {
+			images[pod.Name] = pod.Spec.Containers[0].Image
+		}
+		require.Equal(t, map[string]string{
+			"member-budget-0-prefill-1-0": "test:v1",
+			"member-budget-1-prefill-1-0": "test:v2",
+		}, images)
 		require.False(t, lifecycleDeletionMatches(c, oldPod), "the healthy old group is blocked by the unavailable target group")
 		require.False(t, lifecycleDeletionMatches(c, unavailable))
 	})
@@ -2990,9 +2996,9 @@ func TestSyncRoleReplicasRecordedConfigurationBoundaries(t *testing.T) {
 		wantReplicas   int
 		wantImage      string
 	}{
-		{name: "outdated group", mode: workloadv1alpha1.ServingGroupRollingUpdate, wantReplicas: 1, wantImage: "old"},
-		{name: "default SG strategy", wantReplicas: 1, wantImage: "old"},
-		{name: "sparse ordinal is not protected", mode: workloadv1alpha1.ServingGroupRollingUpdate, ordinal: 5, partition: 1, wantReplicas: 1, wantImage: "old"},
+		{name: "outdated group", mode: workloadv1alpha1.ServingGroupRollingUpdate, wantReplicas: 2, wantImage: "old"},
+		{name: "default SG strategy", wantReplicas: 2, wantImage: "old"},
+		{name: "sparse ordinal is not protected", mode: workloadv1alpha1.ServingGroupRollingUpdate, ordinal: 5, partition: 1, wantReplicas: 2, wantImage: "old"},
 		{name: "protected group still scales", mode: workloadv1alpha1.ServingGroupRollingUpdate, partition: 1, wantReplicas: 2, wantImage: "old"},
 		{name: "current group still scales", mode: workloadv1alpha1.ServingGroupRollingUpdate, current: true, wantReplicas: 2, wantImage: "new"},
 		{name: "Role rolling keeps latest counts", mode: workloadv1alpha1.RoleRollingUpdate, wantReplicas: 2, wantImage: "new"},
@@ -3059,7 +3065,7 @@ func TestSyncRoleReplicasRecordedConfigurationBoundaries(t *testing.T) {
 	}
 }
 
-func TestSyncRoleReplicasKeepsOutdatedServingGroupOnRecordedRoleConfiguration(t *testing.T) {
+func TestSyncRoleReplicasScalesOutdatedGroupWithRecordedTemplates(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	controller, err := NewModelServingController(
 		kubeClient,
@@ -3146,20 +3152,17 @@ func TestSyncRoleReplicasKeepsOutdatedServingGroupOnRecordedRoleConfiguration(t 
 
 	pRoles, err := controller.store.GetRoleList(key, groupName, "p")
 	require.NoError(t, err)
-	require.Len(t, pRoles, 2)
-	for _, role := range pRoles {
-		assert.NotEqual(t, datastore.RoleDeleting, role.Status)
-	}
-
+	require.Empty(t, pRoles, "explicit P shrink applies to the outdated group")
 	dRoles, err := controller.store.GetRoleList(key, groupName, "d")
 	require.NoError(t, err)
-	assert.Empty(t, dRoles, "the target D replica must not be created in an outdated ServingGroup")
-
+	require.Len(t, dRoles, 1, "D expands using the group's historical template")
 	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
 	require.NoError(t, err)
-	for i := range pods.Items {
-		assert.NotEqual(t, "d", pods.Items[i].Labels[workloadv1alpha1.RoleLabelKey])
-		assert.Equal(t, oldRevision, pods.Items[i].Labels[workloadv1alpha1.RevisionLabelKey])
+	require.Len(t, pods.Items, 2, "historical D retains its worker even though latest D has none")
+	for _, pod := range pods.Items {
+		assert.Equal(t, "d", pod.Labels[workloadv1alpha1.RoleLabelKey])
+		assert.Equal(t, oldRevision, pod.Labels[workloadv1alpha1.RevisionLabelKey])
+		assert.Contains(t, []string{"d:old", "d-worker:old"}, pod.Spec.Containers[0].Image)
 	}
 }
 
@@ -4863,9 +4866,14 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, controller.modelServingsInformer.GetIndexer().Add(ms))
 
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "new-revision", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	key := utils.GetNamespaceName(ms)
 	for ordinal := 0; ordinal < 3; ordinal++ {
 		controller.store.AddServingGroup(key, ordinal, "new-revision")
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		controller.store.AddRole(key, group, "decode", "decode-0", "new-revision", "hash")
+		require.NoError(t, controller.store.UpdateRoleStatus(key, group, "decode", "decode-0", datastore.RoleRunning))
 		require.NoError(t, controller.store.UpdateServingGroupStatus(key, utils.GenerateServingGroupName(ms.Name, ordinal), datastore.ServingGroupRunning))
 	}
 
@@ -5079,11 +5087,22 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			err = controller.modelServingsInformer.GetIndexer().Add(ms)
 			assert.NoError(t, err)
 
+			_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.newRevision, ms.Spec.Template.Roles)
+			require.NoError(t, err)
+			seen := map[string]bool{tt.newRevision: true}
+			for _, revision := range tt.existingGroups {
+				if !seen[revision] {
+					recordDifferentRevision(t, controller, ms, revision)
+					seen[revision] = true
+				}
+			}
 			// Create servingGroups with specified revisions
 			for ordinal, revision := range tt.existingGroups {
 				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, revision)
 				// Mark groups as Running to simulate real scenario
 				groupName := utils.GenerateServingGroupName(msName, ordinal)
+				controller.store.AddRole(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", revision, "hash")
+				require.NoError(t, controller.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, "prefill", "prefill-0", datastore.RoleRunning))
 				controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning)
 			}
 

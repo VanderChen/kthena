@@ -149,7 +149,7 @@ func TestEvictionHistoricalCompleteness(t *testing.T) {
 	}
 }
 
-func TestEvictionUsesAppliedMembersAndCompleteTrackerRecovery(t *testing.T) {
+func TestEvictionUsesLatestMembersDespiteStalePersistedCounts(t *testing.T) {
 	for _, applied := range []int32{1, 2} {
 		t.Run(fmt.Sprintf("applied-%d", applied), func(t *testing.T) {
 			ctx := context.Background()
@@ -167,18 +167,16 @@ func TestEvictionUsesAppliedMembersAndCompleteTrackerRecovery(t *testing.T) {
 			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: utils.GroupMembersStateName(ms), Namespace: ms.Namespace, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, api.SchemeGroupVersion.WithKind("ModelServing"))}}, Data: map[string]string{"targets.json": string(raw)}}
 			h, _ := newTestEvictionHandlerWithLivePods(ms, pods, pods, cm)
 			allowed, reason := h.checkEvictionWithTracker(ctx, ms, target[0])
-			require.Equal(t, applied == 1, allowed, reason)
+			require.False(t, allowed, reason)
 			// A replacement UID is not enough to clear a disruption whose member target
 			// still requires another complete instance.
 			unit := servingGroupUnit(ms, "test-ms-0")
 			entries := disruptionEntries{unit.key(): {expiresAt: time.Now().Add(time.Minute), triggerPodUID: "gone"}}
 			h.cleanupCompleteDisruptionEntries(ms, entries, old)
-			require.Equal(t, applied == 2, len(entries) == 1)
-			if applied == 2 {
-				pods = append(pods, evictionLayoutPods(ms, "test-ms-0", "inference-1")...)
-				h.cleanupCompleteDisruptionEntries(ms, entries, pods)
-				require.Empty(t, entries)
-			}
+			require.Len(t, entries, 1)
+			pods = append(pods, evictionLayoutPods(ms, "test-ms-0", "inference-1")...)
+			h.cleanupCompleteDisruptionEntries(ms, entries, pods)
+			require.Empty(t, entries)
 		})
 	}
 }

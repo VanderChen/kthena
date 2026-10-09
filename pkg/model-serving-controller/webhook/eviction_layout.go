@@ -18,7 +18,6 @@ package webhook
 
 import (
 	"context"
-	"encoding/json"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
@@ -31,13 +30,10 @@ import (
 // evictionLayout resolves observed layouts, not the latest desired worker count.
 // Failures are cached too: unknown history never grants availability credit.
 type evictionLayout struct {
-	ctx         context.Context
-	client      kubernetes.Interface
-	ms          *api.ModelServing
-	roles       map[string][]api.Role
-	members     map[string]map[string]int32
-	membersRead bool
-	membersErr  error
+	ctx    context.Context
+	client kubernetes.Interface
+	ms     *api.ModelServing
+	roles  map[string][]api.Role
 }
 
 func newEvictionLayout(ctx context.Context, client kubernetes.Interface, ms *api.ModelServing) *evictionLayout {
@@ -108,39 +104,12 @@ func (l *evictionLayout) roleComplete(group, role, roleID string, pods []*corev1
 	return false
 }
 
-func (l *evictionLayout) appliedMembers(group string) (map[string]int32, error) {
-	if l.ms.Spec.RolloutStrategy != nil && l.ms.Spec.RolloutStrategy.Type == api.RoleRollingUpdate {
-		return nil, nil
-	}
-	if !l.membersRead {
-		l.membersRead = true
-		cm, err := utils.ReadGroupMembersState(l.ctx, l.client, l.ms)
-		l.membersErr = err
-		raw := l.ms.Annotations[utils.AppliedRoleReplicasAnnotation]
-		if cm != nil {
-			raw = cm.Data["targets.json"]
-		}
-		if err == nil && raw != "" {
-			l.membersErr = json.Unmarshal([]byte(raw), &l.members)
-		}
-	}
-	return l.members[group], l.membersErr
-}
-
 func (l *evictionLayout) servingGroupComplete(group string, pods []*corev1.Pod) bool {
 	if len(l.ms.Spec.Template.Roles) == 0 {
 		return len(pods) > 0
 	}
-	members, err := l.appliedMembers(group)
-	if err != nil {
-		klog.Warningf("Cannot resolve eviction member targets for %s/%s group %s: %v", l.ms.Namespace, l.ms.Name, group, err)
-		return false
-	}
 	for _, role := range l.ms.Spec.Template.Roles {
 		expected := replicasOrDefault(role.Replicas)
-		if count, ok := members[role.Name]; ok {
-			expected = count
-		}
 		if expected < 0 {
 			return false
 		}

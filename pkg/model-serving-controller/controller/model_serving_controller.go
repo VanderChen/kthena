@@ -728,8 +728,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// For SG rollout, choose and start every currently legal whole-group
 	// replacement before applying member-count changes. Groups actually marked
 	// Deleting are then skipped by syncRoleReplicas; protected groups may still
-	// receive member changes, while the existing member-change budget continues
-	// to hold any group whose scaling would exceed maxUnavailable.
+	// receive independent member changes without a cross-group Ready barrier.
 	if servingGroupRollout {
 		if err := c.manageRollingUpdate(ctx, ms, revision, rolloutPolicy); err != nil {
 			return fmt.Errorf("failed to handle rollingUpdate: %v", err)
@@ -956,9 +955,6 @@ func (c *ModelServingController) hasUpdateableOutdatedServingGroup(
 	partition int,
 ) bool {
 	for _, group := range groups {
-		if groupMembersPending(ms, group.Name) {
-			return true
-		}
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
 		if ordinal >= partition && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
 			return true
@@ -1029,7 +1025,7 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 		// Insert new ServingGroup to global storage
 		c.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, revision)
 		// A complete empty group has no Pod Ready event. Publish its Ready
-		// capacity before member changes in the existing groups use the budget.
+		// state even when no Pod event can report it.
 		if servingGroupRollout(ms) {
 			ready, err := c.checkServingGroupReady(ms, groupName)
 			if err != nil {
@@ -1152,9 +1148,6 @@ func (c *ModelServingController) syncRoleReplicas(
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	isServingGroupRollingUpdate := ms.Spec.RolloutStrategy == nil ||
 		ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
-	if err := c.applyGroupMemberChanges(ctx, ms, servingGroupList); err != nil {
-		return err
-	}
 	var revisionErrors []error
 	for _, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
@@ -1185,17 +1178,10 @@ func (c *ModelServingController) syncRoleReplicas(
 					revisionErrors = append(revisionErrors, err)
 					continue
 				}
-				rolesToManage = oldRoles
-				if isPartitionProtected {
-					rolesToManage = mergeLatestRoleReplicas(oldRoles, ms.Spec.Template.Roles)
-				}
+				rolesToManage = mergeLatestRoleReplicas(oldRoles, ms.Spec.Template.Roles)
 			}
 		}
 
-		rolesToManage, err = rolesWithGroupMembers(ms, servingGroup.Name, rolesToManage)
-		if err != nil {
-			return err
-		}
 		if isServingGroupRollingUpdate {
 			if err := c.createOrUpdatePodGroupByServingGroupWithRoles(ctx, ms, servingGroup.Name, rolesToManage); err != nil {
 				return err
@@ -1212,6 +1198,9 @@ func (c *ModelServingController) syncRoleReplicas(
 				}
 				return err
 			}
+		}
+		if err := c.recordGroupMemberScale(ctx, ms, servingGroup.Name); err != nil {
+			return err
 		}
 	}
 	return errors.Join(revisionErrors...)
@@ -2589,41 +2578,36 @@ func (c *ModelServingController) checkRoleReadyWithContext(ctx context.Context, 
 func (c *ModelServingController) rolesForServingGroupReadiness(ms *workloadv1alpha1.ModelServing, servingGroupName string) ([]workloadv1alpha1.Role, error) {
 	lookupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	projected, stateErr := c.withGroupMembersState(lookupCtx, ms)
-	if stateErr != nil {
-		return nil, stateErr
-	}
-	ms = projected
 
 	if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
-		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
+		return ms.Spec.Template.Roles, nil
 	}
 	partition, _, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve partition for ServingGroup %s: %v", servingGroupName, err)
 	}
 	if partition <= 0 {
-		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
+		return ms.Spec.Template.Roles, nil
 	}
 	parentName, ordinal := utils.GetParentNameAndOrdinal(servingGroupName)
 	if ordinal < 0 || parentName != ms.Name {
 		return nil, fmt.Errorf("cannot parse ServingGroup ordinal from %s for ModelServing %s", servingGroupName, ms.Name)
 	}
 	if ordinal >= partition {
-		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
+		return ms.Spec.Template.Roles, nil
 	}
 	revision, ok := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), servingGroupName)
 	if ok {
 		revision = c.revisionForServingGroup(context.Background(), ms, datastore.ServingGroup{Name: servingGroupName, Revision: revision})
 	}
 	if !ok || revision == "" || revision == utils.ModelServingRevision(ms) {
-		return rolesWithGroupMembers(ms, servingGroupName, ms.Spec.Template.Roles)
+		return ms.Spec.Template.Roles, nil
 	}
 	roles, err := c.revisionHistory(lookupCtx, ms).roles(lookupCtx, revision)
 	if err != nil {
 		return nil, err
 	}
-	return rolesWithGroupMembers(ms, servingGroupName, mergeLatestRoleReplicas(roles, ms.Spec.Template.Roles))
+	return mergeLatestRoleReplicas(roles, ms.Spec.Template.Roles), nil
 }
 
 func (c *ModelServingController) isServingGroupOutdated(group datastore.ServingGroup, namespace, newRevision string) bool {
@@ -2969,12 +2953,6 @@ func (c *ModelServingController) updateModelServingStatus(
 		if latestMS.UID != ms.UID || latestMS.Generation != ms.Generation {
 			return fmt.Errorf("ModelServing changed during status update")
 		}
-		// Member targets live in an owned ConfigMap, not the informer object's
-		// annotations. Read them without projecting private state onto status writes.
-		membersMS, err := c.withGroupMembersState(ctx, latestMS)
-		if err != nil {
-			return err
-		}
 
 		// Calculate status based on latestMS
 		groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(latestMS))
@@ -3026,10 +3004,8 @@ func (c *ModelServingController) updateModelServingStatus(
 				continue
 			}
 
-			groupReady := group.Status == datastore.ServingGroupRunning
-			if groupReady {
-				available++
-			} else if ok, err := c.checkServingGroupReady(latestMS, group.Name); ok && err == nil {
+			groupReady := false
+			if ok, err := c.checkServingGroupReady(latestMS, group.Name); ok && err == nil {
 				// some scenarios, pod events may not trigger group status updates, such as role scaling down.
 				err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(latestMS), group.Name, datastore.ServingGroupRunning)
 				if err != nil {
@@ -3039,7 +3015,7 @@ func (c *ModelServingController) updateModelServingStatus(
 				available++
 				klog.V(2).Infof("Update servingGroup %s status to Running", group.Name)
 			}
-			membersPending := groupMembersPending(membersMS, group.Name)
+			membersPending := c.groupMembersPending(latestMS, group.Name)
 			memberChangesPending = memberChangesPending || membersPending
 			if !groupReady || membersPending {
 				progressingGroups = append(progressingGroups, ordinal)
@@ -3167,8 +3143,8 @@ func (c *ModelServingController) updateModelServingStatus(
 		}
 
 		if memberChangesPending {
-			// A member change may wait for capacity that becomes Ready in this
-			// reconcile. Empty groups and status-only updates produce no Pod event.
+			// Retry incomplete scaling even when empty groups or status-only
+			// updates provide no subsequent Pod event.
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 		}
 

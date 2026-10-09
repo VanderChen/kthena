@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
-	"sort"
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -29,12 +28,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/utils/ptr"
 )
 
-// Applied member counts are operation state, not part of the template revision.
-// The owner annotation is only a reconcile-local projection. Authoritative state
-// lives in an owned ConfigMap, independently of user PUTs to the ModelServing.
+// Member records preserve empty group identity and history across restarts.
+// Counts are never a scaling admission barrier or a source of Ready credit:
+// those use the latest spec. The annotation is only a reconcile-local projection.
+// The owned ConfigMap also carries independent recovery and surge state.
 const groupMembersAnnotation = utils.AppliedRoleReplicasAnnotation
 
 type groupMemberTargets map[string]map[string]int32
@@ -61,29 +60,6 @@ func groupTargets(ms *api.ModelServing) (groupMemberTargets, error) {
 	}
 	return result, nil
 }
-func rolesWithGroupMembers(ms *api.ModelServing, group string, roles []api.Role) ([]api.Role, error) {
-	if !servingGroupRollout(ms) {
-		return roles, nil
-	}
-	targets, err := groupTargets(ms)
-	if err != nil {
-		return nil, err
-	}
-	applied, exists := targets[group]
-	if !exists {
-		return roles, nil
-	}
-	result := make([]api.Role, 0, len(roles))
-	for _, role := range roles {
-		copy := role.DeepCopy()
-		if count, ok := applied[role.Name]; ok {
-			copy.Replicas = ptr.To(count)
-		}
-		result = append(result, *copy)
-	}
-	return result, nil
-}
-
 func groupMembersStateName(ms *api.ModelServing) string {
 	return utils.GroupMembersStateName(ms)
 }
@@ -276,27 +252,7 @@ func (c *ModelServingController) ensureGroupMembers(ctx context.Context, ms *api
 			continue
 		}
 		counts := memberCounts(ms.Spec.Template.Roles)
-		// Bootstrap a complete pre-upgrade group. Never reinterpret an incomplete
-		// or unknown group as having a smaller desired layout after a cold start.
-		if group.Status == datastore.ServingGroupRunning {
-			for _, role := range ms.Spec.Template.Roles {
-				instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, role.Name)
-				if err != nil {
-					return err
-				}
-				complete := true
-				for _, instance := range instances {
-					ready, err := c.checkRoleReadyWithContext(ctx, ms, group.Name, role.Name, instance.Name)
-					if err != nil || !ready {
-						complete = false
-						break
-					}
-				}
-				if complete {
-					counts[role.Name] = int32(len(instances))
-				}
-			}
-		}
+
 		targets[group.Name] = counts
 	}
 	for group := range targets {
@@ -307,10 +263,17 @@ func (c *ModelServingController) ensureGroupMembers(ctx context.Context, ms *api
 	return c.persistGroupTargets(ctx, ms, targets, nil)
 }
 
-// A member change reserves one complete SG's availability before updating its
-// PodGroup or Pods. Untouched groups continue using their own applied counts.
-func (c *ModelServingController) applyGroupMemberChanges(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup) error {
+// Record only after the group's scaling requests have been issued. In particular,
+// keep an empty group's old zero-count identity until its new Pods are created;
+// a failed expansion and restart must not lose the group's historical revision.
+func (c *ModelServingController) recordGroupMemberScale(ctx context.Context, ms *api.ModelServing, group string) error {
 	if !servingGroupRollout(ms) {
+		return nil
+	}
+	// Member reconciliation can trigger whole-group recovery. Do not recreate
+	// state that its completed deletion has just removed.
+	status := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group)
+	if status == datastore.ServingGroupDeleting || status == datastore.ServingGroupNotFound {
 		return nil
 	}
 	projected, err := c.withGroupMembersState(ctx, ms)
@@ -322,58 +285,29 @@ func (c *ModelServingController) applyGroupMemberChanges(ctx context.Context, ms
 	if err != nil {
 		return err
 	}
-	unavailable, err := utils.GetMaxUnavailable(ms)
-	if err != nil {
-		return err
-	}
-	ready := 0
-	for _, group := range groups {
-		if group.Status == datastore.ServingGroupRunning {
-			ready++
-		}
-	}
-	budget := max(0, ready-max(0, modelServingReplicas(ms)-unavailable))
-	sort.Slice(groups, func(i, j int) bool {
-		_, a := utils.GetParentNameAndOrdinal(groups[i].Name)
-		_, b := utils.GetParentNameAndOrdinal(groups[j].Name)
-		return a > b
-	})
-	desired := memberCounts(ms.Spec.Template.Roles)
-	for _, group := range groups {
-		if group.Status == datastore.ServingGroupDeleting || group.Status == datastore.ServingGroupReadinessUnknown {
-			continue
-		}
-		applied, exists := targets[group.Name]
-		if !exists || maps.Equal(applied, desired) {
-			continue
-		}
-		if group.Status == datastore.ServingGroupRunning && budget == 0 {
-			continue
-		}
-		if group.Status == datastore.ServingGroupRunning {
-			budget--
-		}
-		targets[group.Name] = maps.Clone(desired)
-		if err := c.persistGroupTargets(ctx, ms, targets, nil); err != nil {
-			return err
-		}
-		if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), group.Name, datastore.ServingGroupScaling); err != nil {
-			return err
-		}
-	}
-	return nil
+	targets[group] = memberCounts(ms.Spec.Template.Roles)
+	// Existing high retained groups must not acquire temporary surge identity.
+	return c.persistGroupTargets(ctx, ms, targets, nil)
 }
 
-func groupMembersPending(ms *api.ModelServing, group string) bool {
+// Scaling progress is measured from actual instances, not a persisted target
+// that can already equal the spec while old Pods still terminate.
+func (c *ModelServingController) groupMembersPending(ms *api.ModelServing, group string) bool {
 	if !servingGroupRollout(ms) {
 		return false
 	}
-	targets, err := groupTargets(ms)
-	if err != nil {
-		return false
+	for _, role := range ms.Spec.Template.Roles {
+		instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, role.Name)
+		if err != nil || len(instances) != roleReplicas(role) {
+			return true
+		}
+		for _, instance := range instances {
+			if instance.Status == datastore.RoleDeleting {
+				return true
+			}
+		}
 	}
-	applied, exists := targets[group]
-	return exists && !maps.Equal(applied, memberCounts(ms.Spec.Template.Roles))
+	return c.rolloutDeletionPending(ms, group, "", "")
 }
 
 // Forget state only after all physical resources are gone. This prevents a
