@@ -43,7 +43,8 @@ type RolloutStrategyApplyConfiguration struct {
 	// It must not be set when type is RoleRollingUpdate; configure maxUnavailable
 	// maxSurge, and partition on each Role instead.
 	RollingUpdateConfiguration *RollingUpdateConfigurationApplyConfiguration `json:"rollingUpdateConfiguration,omitempty"`
-	EvictionStrategy           *EvictionStrategySpecApplyConfiguration       `json:"evictionStrategy,omitempty"`
+	// EvictionStrategy defines the protection policy during node eviction.
+	EvictionStrategy *EvictionStrategySpecApplyConfiguration `json:"evictionStrategy,omitempty"`
 }
 
 // RolloutStrategyApplyConfiguration constructs a declarative configuration of the RolloutStrategy type for use with

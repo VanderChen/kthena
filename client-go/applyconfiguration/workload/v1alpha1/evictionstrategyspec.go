@@ -25,10 +25,22 @@ import (
 
 // EvictionStrategySpecApplyConfiguration represents a declarative configuration of the EvictionStrategySpec type for use
 // with apply.
+//
+// EvictionStrategySpec defines the protection policy during node eviction.
 type EvictionStrategySpecApplyConfiguration struct {
-	ProtectionLevel  *workloadv1alpha1.ProtectionLevelType `json:"protectionLevel,omitempty"`
-	MinAvailable     *intstr.IntOrString                   `json:"minAvailable,omitempty"`
-	RoleMinAvailable map[string]intstr.IntOrString         `json:"roleMinAvailable,omitempty"`
+	// ProtectionLevel defines the protection level: ServingGroup or Role.
+	// - ServingGroup: guarantees that the number of ready ServingGroups is not below the threshold.
+	// - Role: guarantees that the number of ready instances for each role is not below the threshold.
+	ProtectionLevel *workloadv1alpha1.ProtectionLevelType `json:"protectionLevel,omitempty"`
+	// MinAvailable defines the minimum number of available ServingGroup instances.
+	// It is used only when protectionLevel is ServingGroup.
+	// It can be an absolute number (ex: 3) or a percentage of total instances (ex: 80%).
+	MinAvailable *intstr.IntOrString `json:"minAvailable,omitempty"`
+	// RoleMinAvailable defines role-specific minimum available role instances.
+	// It is used only when protectionLevel is Role. Map keys must match names in spec.template.roles.
+	// If a role is absent from this map, it is not protected by the eviction budget.
+	// Values can be absolute numbers (ex: 3) or percentages of total role instances (ex: 80%).
+	RoleMinAvailable map[string]intstr.IntOrString `json:"roleMinAvailable,omitempty"`
 }
 
 // EvictionStrategySpecApplyConfiguration constructs a declarative configuration of the EvictionStrategySpec type for use with
