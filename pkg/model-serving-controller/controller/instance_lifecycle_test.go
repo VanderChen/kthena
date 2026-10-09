@@ -435,7 +435,7 @@ func TestInstanceLifecycleCreationBeforeReadyControlsMissingPodRecovery(t *testi
 					}
 					for i := range original.Items {
 						pod := &original.Items[i]
-						require.Equal(t, "true", pod.Annotations[roleCreatedAnnotation])
+						require.NotContains(t, pod.Annotations, roleCreatedAnnotation)
 						if pod.Name == missing {
 							continue
 						}
@@ -495,7 +495,7 @@ func TestInstanceLifecyclePartialCreationIsCompletedWithoutRecoveryChurn(t *test
 			require.NoError(t, err)
 			require.Len(t, pods.Items, 2)
 			for _, pod := range pods.Items {
-				require.Equal(t, "true", pod.Annotations[roleCreatedAnnotation])
+				require.NotContains(t, pod.Annotations, roleCreatedAnnotation)
 			}
 		})
 	}

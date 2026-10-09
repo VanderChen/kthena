@@ -25,8 +25,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Completion is recorded only on surviving Pods after checking the full
-// historical layout. A wholly absent Role after restart is simply refilled.
+// Validate the full historical layout before recording process-local creation
+// completion. A wholly absent Role after restart is simply refilled.
 func (c *ModelServingController) validateRoleCreation(ctx context.Context, ms *api.ModelServing, group, role, instance string, pods []*corev1.Pod) error {
 	observed := datastore.Role{Name: instance, Revision: utils.ObjectRevision(pods[0]), RoleTemplateHash: utils.ObjectRoleTemplateHash(pods[0])}
 	template, revision, hash, err := c.roleTemplateForInstance(ctx, ms, group, role, observed, pods)

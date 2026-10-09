@@ -18,8 +18,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -28,7 +26,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -194,7 +191,8 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 	for key, value := range instance {
 		pod.Annotations[key] = value
 	}
-	// Templates and plugins cannot supply lifecycle evidence for a new Pod.
+	// Do not propagate the retired completion marker from templates/plugins.
+	// Completion evidence exists only in this controller process.
 	delete(pod.Annotations, roleCreatedAnnotation)
 }
 
@@ -219,30 +217,7 @@ func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *worklo
 	// before recording completion; later AddRole calls preserve this evidence.
 	key := utils.GetNamespaceName(ms)
 	c.store.AddRole(key, group, role, instance, utils.ObjectRevision(pods[0]), utils.ObjectRoleTemplateHash(pods[0]))
-	if err := c.store.MarkRoleInitialized(key, group, role, instance); err != nil {
-		return err
-	}
-	var failures []error
-	for _, pod := range pods {
-		if pod.Annotations[roleCreatedAnnotation] == "true" {
-			continue
-		}
-		if pod.DeletionTimestamp != nil {
-			failures = append(failures, fmt.Errorf("Role %s/%s has retiring member %s", group, instance, pod.Name))
-			continue
-		}
-		patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
-			"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
-			"annotations": map[string]string{roleCreatedAnnotation: "true"},
-		}})
-		if err != nil {
-			return err
-		}
-		invalidateRolloutPodSnapshot(ctx)
-		_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
-		failures = append(failures, err)
-	}
-	return errors.Join(failures...)
+	return c.store.MarkRoleInitialized(key, group, role, instance)
 }
 
 // Only completion observed in this process can broaden an absence into

@@ -23,6 +23,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -61,21 +62,35 @@ func TestCreatedRoleFactsRequireCompleteLayout(t *testing.T) {
 					return true, nil, fmt.Errorf("injected Pod patch failure")
 				})
 			}
+			// A previous Ready observation must not pre-initialize this assertion.
+			key := utils.GetNamespaceName(ms)
+			c.store = datastore.New()
+			c.store.AddServingGroup(key, 0, utils.ModelServingRevision(ms))
+			c.store.AddRole(key, "created-0", "prefill", "prefill-0", utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(role))
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			kube.ClearActions()
 			err := c.markRoleCreated(ctx, ms, "created-0", "prefill", "prefill-0")
-			if state == "complete-notready" {
+			complete := state == "complete-notready" || state == "pod-patch-failure"
+			if complete {
 				require.NoError(t, err)
-				current, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
-				require.NoError(t, err)
-				require.Equal(t, "true", current.Annotations[roleCreatedAnnotation])
-				cms, err := c.kubeClientSet.CoreV1().ConfigMaps(ms.Namespace).List(ctx, metav1.ListOptions{})
-				require.NoError(t, err)
-				require.Empty(t, cms.Items)
+
 			} else {
 				require.Error(t, err)
-				current, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
-				require.NoError(t, err)
-				require.NotEqual(t, "true", current.Annotations[roleCreatedAnnotation])
 			}
+			roles, err := c.store.GetRoleList(key, "created-0", "prefill")
+			require.NoError(t, err)
+			require.Len(t, roles, 1)
+			require.Equal(t, complete, roles[0].Initialized, "only a complete layout grants process-local recovery evidence")
+			require.Equal(t, datastore.RoleCreating, roles[0].Status, "completion does not imply Ready")
+			for _, action := range kube.Actions() {
+				require.False(t, action.Matches("patch", "pods") || action.Matches("update", "pods"), "creation observation must not write Pods")
+			}
+			current, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, entry, current, "observing completion must not mutate the Pod")
+			cms, err := kube.CoreV1().ConfigMaps(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Empty(t, cms.Items)
 		})
 	}
 }
