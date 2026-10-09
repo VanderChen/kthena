@@ -43,10 +43,9 @@ const (
 )
 
 type revisionSnapshot struct {
-	roles        []workloadv1alpha1.Role
-	modelServing *workloadv1alpha1.ModelServing
-	err          error
-	revision     *appsv1.ControllerRevision
+	roles    []workloadv1alpha1.Role
+	err      error
+	revision *appsv1.ControllerRevision
 }
 
 // revisionHistory is a read-only interpretation of persisted identities. Its
@@ -108,15 +107,7 @@ func (h *revisionHistory) compareObservedRole(ctx context.Context, ms *workloadv
 			return templateEquivalent
 		}
 		_, err := h.roles(ctx, revision)
-		if err == nil {
-			equal, err := utils.EqualRevisionConfiguration(h.snapshots[revision].modelServing, ms)
-			if err != nil {
-				return templateUnknown
-			}
-			if !equal {
-				return templateDifferent
-			}
-		} else if !apierrors.IsNotFound(err) {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return templateUnknown
 		}
 		return templateEquivalent
@@ -131,7 +122,7 @@ func (h *revisionHistory) compareObservedRole(ctx context.Context, ms *workloadv
 		for _, historical := range roles {
 			if historical.Name == roleName {
 				result = templateDifferent
-				if equal, configErr := utils.EqualRevisionConfiguration(h.snapshots[revision].modelServing, ms); configErr == nil && equal && utils.EqualRoleTemplateForRevision(historical, *desired) {
+				if utils.EqualRoleTemplateForRevision(historical, *desired) {
 					result = templateEquivalent
 				}
 				break
@@ -190,7 +181,7 @@ func (c *ModelServingController) revisionHistory(ctx context.Context, ms *worklo
 	return &revisionHistory{controller: c, ms: ms, snapshots: make(map[string]revisionSnapshot)}
 }
 
-func (h *revisionHistory) decode(ctx context.Context, cr *appsv1.ControllerRevision) revisionSnapshot {
+func (h *revisionHistory) decode(cr *appsv1.ControllerRevision) revisionSnapshot {
 	if cr == nil {
 		return revisionSnapshot{err: fmt.Errorf("ControllerRevision is missing")}
 	}
@@ -201,15 +192,7 @@ func (h *revisionHistory) decode(ctx context.Context, cr *appsv1.ControllerRevis
 	if err == nil && len(roles) == 0 {
 		err = fmt.Errorf("ControllerRevision %s contains no Roles", cr.Name)
 	}
-	var historical *workloadv1alpha1.ModelServing
-	if err == nil {
-		baseline, baselineErr := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr)
-		err = baselineErr
-		if err == nil {
-			historical, err = utils.ModelServingForControllerRevision(h.ms, baseline)
-		}
-	}
-	return revisionSnapshot{roles: roles, modelServing: historical, err: err, revision: cr}
+	return revisionSnapshot{roles: roles, err: err, revision: cr}
 }
 
 func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloadv1alpha1.Role, error) {
@@ -224,7 +207,7 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 		} else if cr == nil {
 			snapshot.err = apierrors.NewNotFound(schema.GroupResource{Group: "apps", Resource: "controllerrevisions"}, utils.GenerateControllerRevisionName(h.ms.Name, revision))
 		} else {
-			snapshot = h.decode(ctx, cr)
+			snapshot = h.decode(cr)
 		}
 	}
 	if snapshot.err != nil {
@@ -261,8 +244,8 @@ func (h *revisionHistory) role(ctx context.Context, revision, name string) (work
 // desiredRevision keeps an existing identity when its immutable template is
 // equivalent, even if a newer binary calculates a different hash. The current
 // status wins deterministically; otherwise use the newest equivalent history.
-// Legacy scheduler/plugins are pinned once in a separate migration baseline;
-// source Role data and live Pod identities remain unchanged.
+// Scheduler/plugins are immutable owner configuration, so only Role templates
+// participate in semantic history comparisons.
 func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 	list, err := h.controller.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(map[string]string{utils.ControllerRevisionLabelKey: h.ms.Name}).String(),
@@ -299,14 +282,10 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 		if revision == "" || cr.Name != utils.GenerateControllerRevisionName(h.ms.Name, revision) {
 			continue
 		}
-		snapshot := h.decode(ctx, cr)
+		snapshot := h.decode(cr)
 		if snapshot.err == nil {
 			h.snapshots[revision] = snapshot
-			configurationEqual, err := utils.EqualRevisionConfiguration(snapshot.modelServing, h.ms)
-			if err != nil {
-				return "", err
-			}
-			if configurationEqual && utils.EqualRoleTemplatesForRevision(snapshot.roles, h.ms.Spec.Template.Roles) {
+			if utils.EqualRoleTemplatesForRevision(snapshot.roles, h.ms.Spec.Template.Roles) {
 				return h.selectTarget(ctx, revision)
 			}
 		}
@@ -316,7 +295,7 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("persist desired ControllerRevision: %w", err)
 	}
-	snapshot := h.decode(ctx, cr)
+	snapshot := h.decode(cr)
 	if snapshot.err != nil {
 		return "", fmt.Errorf("resolve persisted desired ControllerRevision: %w", snapshot.err)
 	}
@@ -376,7 +355,7 @@ func (c *ModelServingController) compareServingGroupTemplate(ctx context.Context
 			}
 			return templateUnknown
 		}
-		if equal, configErr := utils.EqualRevisionConfiguration(history.snapshots[group.Revision].modelServing, ms); configErr == nil && equal && utils.EqualRoleTemplatesForRevision(roles, ms.Spec.Template.Roles) {
+		if utils.EqualRoleTemplatesForRevision(roles, ms.Spec.Template.Roles) {
 			return templateEquivalent
 		}
 		return templateDifferent

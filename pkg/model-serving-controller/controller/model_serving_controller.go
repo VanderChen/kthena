@@ -3280,12 +3280,8 @@ func (c *ModelServingController) CreatePodsByRole(ctx context.Context, role work
 	servingGroupName := utils.GenerateServingGroupName(ms.Name, servingGroupOrdinal)
 	// TODO(hzxuzhonghu): build the plugin chain only once per ModelServing
 	// This is not critical now, so we leave it for future optimization.
-	// Render scheduler/plugins from the same immutable history as the Role.
-	historical, err := c.modelServingForRevision(ctx, ms, revision)
-	if err != nil {
-		return err
-	}
-	ms = historical
+	// Scheduler/plugins are fixed for this owner. The caller separately resolves
+	// the Role template from history when recovering a protected replica.
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)

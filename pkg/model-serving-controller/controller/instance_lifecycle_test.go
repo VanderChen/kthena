@@ -135,7 +135,7 @@ func TestInstanceLifecycle_RenderingCannotSupplyLifecycleEvidence(t *testing.T) 
 			}}
 			role.WorkerTemplate = role.EntryTemplate.DeepCopy()
 			if plugin {
-				ms.Spec.Plugins = []api.PluginSpec{{Name: "demo-pod-tweaks", Config: &extensions.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/role-created":"true","workload.kthena.io/group-instance":"plugin-group","workload.kthena.io/role-instance":"plugin-role","modelserving.volcano.sh/surge":"serving-group","custom.example/plugin":"preserved"}}`)}}}
+				ms.Spec.Plugins = []api.PluginSpec{{Name: "demo-pod-tweaks", Type: api.PluginTypeBuiltIn, Config: &extensions.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/role-created":"true","workload.kthena.io/group-instance":"plugin-group","workload.kthena.io/role-instance":"plugin-role","modelserving.volcano.sh/surge":"serving-group","custom.example/plugin":"preserved"}}`)}}}
 			}
 			c := lifecycleController(t, ms)
 			require.NoError(t, c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, 0, 0, utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(*role), ""))

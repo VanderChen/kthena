@@ -57,9 +57,6 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		"data": templateData,
 	}
 	data, err := json.Marshal(wrappedData)
-	if roles, ok := templateData.([]workloadv1alpha1.Role); ok {
-		data, err = BuildControllerRevisionData(ms, roles)
-	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal template data: %v", err)
 	}
@@ -77,16 +74,6 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		if roles, ok := templateData.([]workloadv1alpha1.Role); ok {
 			historical, err := GetRolesFromControllerRevision(existing)
 			sameTemplate = err == nil && EqualRoleTemplatesForRevision(historical, roles)
-			if sameTemplate && existing.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
-				historicalMS, configErr := ModelServingForControllerRevision(ms, existing)
-				if configErr != nil {
-					return nil, configErr
-				}
-				sameTemplate, configErr = EqualRevisionConfiguration(historicalMS, ms)
-				if configErr != nil {
-					return nil, configErr
-				}
-			}
 		}
 		if !sameTemplate {
 			return nil, fmt.Errorf("ControllerRevision %s/%s already exists with different template data", ms.Namespace, controllerRevisionName)
@@ -119,9 +106,6 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		},
 	}
 
-	if _, ok := templateData.([]workloadv1alpha1.Role); ok {
-		cr.Annotations = map[string]string{ControllerRevisionDataVersionAnnotation: ControllerRevisionDataVersionV1}
-	}
 	// Create ControllerRevision
 	created, err := client.AppsV1().ControllerRevisions(ms.Namespace).Create(ctx, cr, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
@@ -153,17 +137,7 @@ func GetControllerRevision(
 	cr, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			baseline, baselineErr := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, controllerRevisionName+"-baseline", metav1.GetOptions{})
-			if apierrors.IsNotFound(baselineErr) {
-				return nil, nil
-			}
-			if baselineErr != nil {
-				return nil, baselineErr
-			}
-			if !metav1.IsControlledBy(baseline, ms) || baseline.Annotations[legacyRevisionSource] != controllerRevisionName || baseline.Annotations[ControllerRevisionDataVersionAnnotation] != ControllerRevisionDataVersionV1 || baseline.Labels[ControllerRevisionRevisionLabelKey] != revision {
-				return nil, fmt.Errorf("legacy baseline %s has conflicting identity", baseline.Name)
-			}
-			return baseline, nil
+			return nil, nil
 		}
 		return nil, err
 	}
@@ -179,6 +153,18 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 		return nil, fmt.Errorf("ControllerRevision or its data is nil")
 	}
 
+	version := cr.Annotations[ControllerRevisionDataVersionAnnotation]
+	var patch *modelServingRevisionPatch
+	if version == ControllerRevisionDataVersionV1 {
+		var err error
+		patch, err = decodeRevisionPatch(cr.Data.Raw)
+		if err != nil {
+			return nil, err
+		}
+	} else if version != "" {
+		return nil, fmt.Errorf("unsupported revision data version %q", version)
+	}
+
 	// Try to unmarshal as wrapped data first.
 	var wrapper map[string]json.RawMessage
 	if err := json.Unmarshal(cr.Data.Raw, &wrapper); err == nil {
@@ -191,11 +177,7 @@ func GetRolesFromControllerRevision(cr *appsv1.ControllerRevision) ([]workloadv1
 		}
 	}
 
-	if cr.Annotations[ControllerRevisionDataVersionAnnotation] == ControllerRevisionDataVersionV1 {
-		patch, err := decodeRevisionPatch(cr.Data.Raw)
-		if err != nil {
-			return nil, err
-		}
+	if patch != nil {
 		roles := make([]workloadv1alpha1.Role, 0, len(patch.Spec.Template.Roles))
 		for _, role := range patch.Spec.Template.Roles {
 			roles = append(roles, revisionRole(role))

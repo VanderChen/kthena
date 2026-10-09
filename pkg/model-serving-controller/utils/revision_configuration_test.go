@@ -18,7 +18,6 @@ package utils
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -37,27 +36,27 @@ func configurationFixture() *api.ModelServing {
 	}}
 }
 
-func TestRevisionConfigurationIdentityAndRecordedCounts(t *testing.T) {
+func TestRevisionIgnoresImmutableConfigurationAndKeepsRecordedCounts(t *testing.T) {
 	ctx := context.Background()
 	ms := configurationFixture()
 	client := fake.NewSimpleClientset()
 	revision := ModelServingRevision(ms)
 	cr, err := CreateControllerRevision(ctx, client, ms, revision, ms.Spec.Template.Roles)
 	require.NoError(t, err)
+	require.NotContains(t, string(cr.Data.Raw), "schedulerName")
+	require.NotContains(t, string(cr.Data.Raw), "plugins")
 	for _, change := range []func(*api.ModelServing){
 		func(m *api.ModelServing) { m.Spec.SchedulerName = "custom" },
 		func(m *api.ModelServing) { m.Spec.Plugins = nil },
 	} {
 		changed := ms.DeepCopy()
 		change(changed)
-		require.NotEqual(t, revision, ModelServingRevision(changed))
-		_, err = CreateControllerRevision(ctx, client, changed, revision, changed.Spec.Template.Roles)
-		require.Error(t, err, "same Roles cannot hide changed globals under the old identity")
-		restored, err := ModelServingForControllerRevision(changed, cr)
+		require.Equal(t, revision, ModelServingRevision(changed))
+		// Immutable owner configuration neither changes Role identity nor
+		// requires a second historical snapshot.
+		same, err := CreateControllerRevision(ctx, client, changed, revision, changed.Spec.Template.Roles)
 		require.NoError(t, err)
-		equal, err := EqualRevisionConfiguration(ms, restored)
-		require.NoError(t, err)
-		require.True(t, equal)
+		require.Equal(t, cr.Data.Raw, same.Data.Raw)
 	}
 	scaled := ms.DeepCopy()
 	scaled.Spec.Template.Roles[0].Replicas = ptr.To[int32](7)
@@ -73,37 +72,15 @@ func TestRevisionConfigurationIdentityAndRecordedCounts(t *testing.T) {
 	require.Equal(t, revision, ModelServingRevision(equivalent))
 }
 
-func TestLegacyConfigurationBaselineIsPinnedAndFailClosed(t *testing.T) {
-	ctx := context.Background()
+func TestRevisionRoleDecodeRejectsUnsupportedOrMalformedV1(t *testing.T) {
 	ms := configurationFixture()
-	client := fake.NewSimpleClientset()
-	source, err := CreateControllerRevision(ctx, client, ms, "legacy", ms.Spec.Template.Roles)
+	cr, err := CreateControllerRevision(context.Background(), fake.NewSimpleClientset(), ms, "history", ms.Spec.Template.Roles)
 	require.NoError(t, err)
-	source.Annotations = nil
-	source.UID = "source-uid"
-	source.Data.Raw, err = json.Marshal(map[string]any{"data": ms.Spec.Template.Roles})
-	require.NoError(t, err)
-	source, err = client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, source, metav1.UpdateOptions{})
-	require.NoError(t, err)
-	original := append([]byte(nil), source.Data.Raw...)
-	baseline, err := EnsureRevisionBaseline(ctx, client, ms, source)
-	require.NoError(t, err)
-	changed := ms.DeepCopy()
-	changed.Spec.Plugins = nil
-	changed.Spec.SchedulerName = "custom"
-	pinned, err := EnsureRevisionBaseline(ctx, client, changed, source)
-	require.NoError(t, err)
-	require.Equal(t, baseline.Data.Raw, pinned.Data.Raw)
-	historical, err := ModelServingForControllerRevision(changed, pinned)
-	require.NoError(t, err)
-	equal, err := EqualRevisionConfiguration(ms, historical)
-	require.NoError(t, err)
-	require.True(t, equal)
-	require.EqualValues(t, 3, *historical.Spec.Template.Roles[0].Replicas)
-	live, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, original, live.Data.Raw)
-	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, baseline.Name, metav1.DeleteOptions{}))
-	_, err = EnsureRevisionBaseline(ctx, client, changed, source)
-	require.ErrorContains(t, err, "previously established")
+	cr.Annotations = map[string]string{ControllerRevisionDataVersionAnnotation: "v2"}
+	_, err = GetRolesFromControllerRevision(cr)
+	require.ErrorContains(t, err, "unsupported revision data version")
+	cr.Annotations[ControllerRevisionDataVersionAnnotation] = ControllerRevisionDataVersionV1
+	cr.Data.Raw = []byte(`{"data":[{"name":"p","replicas":3}]}`)
+	_, err = GetRolesFromControllerRevision(cr)
+	require.ErrorContains(t, err, "no roles", "a wrapped Roles array must not hide a corrupt v1 patch")
 }

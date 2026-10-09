@@ -145,7 +145,7 @@ func (h *revisionHistory) recordMissingRevisionRollout(ctx context.Context, targ
 	cr.Annotations[rolloutFromRolesAnnotation] = roleValue
 	updated, err := h.controller.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).Update(ctx, cr, metav1.UpdateOptions{})
 	if err == nil {
-		h.snapshots[target] = h.decode(ctx, updated)
+		h.snapshots[target] = h.decode(updated)
 	}
 	return err
 }
@@ -163,7 +163,7 @@ func (h *revisionHistory) canReplaceMissing(ctx context.Context, revision, role 
 			if err != nil || cr == nil {
 				continue
 			}
-			snapshot = h.decode(ctx, cr)
+			snapshot = h.decode(cr)
 			h.snapshots[target] = snapshot
 		}
 		cr := snapshot.revision
