@@ -228,7 +228,7 @@ func (s *store) UpdateRoleStatus(modelServingName types.NamespacedName, groupNam
 	return nil
 }
 
-// MarkRoleInitialized restores creation evidence without granting availability.
+// MarkRoleInitialized records observed creation without granting availability.
 func (s *store) MarkRoleInitialized(modelServingName types.NamespacedName, groupName, roleName, roleID string) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()

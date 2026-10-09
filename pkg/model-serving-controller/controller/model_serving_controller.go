@@ -117,18 +117,14 @@ type ModelServingController struct {
 	modelServingsInformer cache.SharedIndexInformer
 
 	// nolint
-	workqueue workqueue.RateLimitingInterface
-	store     datastore.Store
-	graceMap  sync.Map // key: podGracePeriodKey, value:time
-	// recoveryObservations distinguishes a fault seen by this process from a
-	// durable fault episode left by a previous controller. It carries no scope
-	// or deletion plan and intentionally disappears on restart.
-	recoveryObservations sync.Map    // key: podGracePeriodKey, value:struct{}
-	deletionPlans        sync.Map    // key: podDeletionPlanKey, value: *podDeletionPlan
-	roleDeleteMap        sync.Map    // key: namespace/name/group/role/roleID, value:int
-	initialSync          atomic.Bool // indicates whether the initial sync has been completed
-	pluginsRegistry      *plugins.Registry
-	recorder             record.EventRecorder
+	workqueue       workqueue.RateLimitingInterface
+	store           datastore.Store
+	graceMap        sync.Map    // key: podGracePeriodKey, value:time
+	deletionPlans   sync.Map    // key: podDeletionPlanKey, value: *podDeletionPlan
+	roleDeleteMap   sync.Map    // key: namespace/name/group/role/roleID, value:int
+	initialSync     atomic.Bool // indicates whether the initial sync has been completed
+	pluginsRegistry *plugins.Registry
+	recorder        record.EventRecorder
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -454,19 +450,7 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		return
 	}
 	recoveryKey := getPodGracePeriodKey(pod)
-	_, observedInThisProcess := c.recoveryObservations.LoadAndDelete(recoveryKey)
-	previousFault, recoveryErr := c.recoveryEpisodeMatches(context.Background(), ms, pod.Name, pod.UID)
 	c.graceMap.Delete(recoveryKey)
-	if recoveryErr != nil {
-		klog.ErrorS(recoveryErr, "read deleted Pod recovery episode", "pod", pod.Name)
-		c.enqueueModelServing(ms)
-		return
-	}
-	if err := c.clearRecoveryEpisode(context.Background(), ms, pod.Name, pod.UID); err != nil {
-		klog.ErrorS(err, "clear deleted Pod recovery episode", "pod", pod.Name)
-		c.enqueueModelServing(ms)
-		return
-	}
 
 	if c.shouldSkipHandling(ms, servingGroupName, pod) || c.stalePodDeletion(ms, pod) {
 		c.enqueueModelServing(ms)
@@ -502,15 +486,6 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 	}
 
 	if c.handleDeletionInProgress(ms, servingGroupName, roleName, roleID) {
-		return
-	}
-	// A previous controller may have deleted the failed Pod and stopped before
-	// its Delete event was handled. Do not turn that delayed event into a replay
-	// of the former Role/ServingGroup recovery batch. Reconcile the surviving
-	// objects instead. During one continuous process, the observation marker is
-	// present and the configured recovery scope remains unchanged.
-	if previousFault && !observedInThisProcess {
-		c.enqueueModelServing(ms)
 		return
 	}
 
@@ -698,10 +673,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	if err != nil {
 		return err
 	}
-	if err := c.ensureGroupMembers(ctx, ms); err != nil {
-		return err
-	}
-	if err := c.restoreCreatedRoles(ctx, ms); err != nil {
+	if err := c.forgetEmptyServingGroups(ctx, ms, revision); err != nil {
 		return err
 	}
 	// Pod informer storage can advance before its queued Ready callback runs.
@@ -936,9 +908,6 @@ func (c *ModelServingController) pruneDeletedServingGroups(ctx context.Context, 
 		}
 		klog.V(2).Infof("ServingGroup %s has been deleted, removing it from store before replica accounting", servingGroup.Name)
 		c.clearDeletionPlan(ms, deleteGroupScope, servingGroup.Name, "", "")
-		if err := c.forgetGroupMembers(ctx, ms, servingGroup.Name); err != nil {
-			return nil, err
-		}
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroup.Name)
 	}
 	return kept, nil
@@ -1003,9 +972,6 @@ func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *w
 	createServingGroup := func(ordinal int, revision string, roles []workloadv1alpha1.Role) error {
 		groupName := utils.GenerateServingGroupName(ms.Name, ordinal)
 		if err := c.checkGroupCreationSlot(ms, groupName); err != nil {
-			return err
-		}
-		if err := c.setGroupMembers(ctx, ms, groupName, revision, roles); err != nil {
 			return err
 		}
 		klog.V(4).Infof("scaleUpServingGroups: creating/updating PodGroup for ServingGroup=%s", groupName)
@@ -1198,9 +1164,6 @@ func (c *ModelServingController) syncRoleReplicas(
 				}
 				return err
 			}
-		}
-		if err := c.recordGroupMemberScale(ctx, ms, servingGroup.Name); err != nil {
-			return err
 		}
 	}
 	return errors.Join(revisionErrors...)
@@ -1478,10 +1441,10 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			}
 		}
 		if missing {
-			if ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && roleCreationObserved(roleObj, ownedPods) {
+			if ms.Spec.RecoveryPolicy == workloadv1alpha1.ServingGroupRecreate && roleCreationObserved(roleObj) {
 				return c.deleteServingGroup(ctx, ms, groupName)
 			}
-			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleCreationObserved(roleObj, ownedPods) {
+			if ms.Spec.RecoveryPolicy == workloadv1alpha1.RoleRecreate && roleCreationObserved(roleObj) {
 				klog.V(2).Infof("manageRoleReplicasPerGroup: initialized role %s/%s in ServingGroup %s is missing pods (%d/%d), deleting role for RoleRecreate recovery", targetRole.Name, roleObj.Name, groupName, len(ownedPods), expectedPods)
 				if groupStatus := c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), groupName); groupStatus == datastore.ServingGroupRunning {
 					if err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupCreating); err != nil {
@@ -2114,10 +2077,6 @@ func (c *ModelServingController) handleObservedReadyPod(ms *workloadv1alpha1.Mod
 		return nil
 	}
 	c.graceMap.Delete(getPodGracePeriodKey(newPod))
-	c.clearRecoveryObservations(newPod)
-	if err := c.clearRecoveryEpisode(context.Background(), ms, newPod.Name, ""); err != nil {
-		return fmt.Errorf("clear Ready Pod recovery episode: %w", err)
-	}
 	chain, err := c.buildPluginChain(ms)
 	if err != nil {
 		return fmt.Errorf("build plugin chain: %w", err)
@@ -2245,9 +2204,6 @@ func (c *ModelServingController) revisitPodRecovery(ctx context.Context, ms *wor
 		}
 		if utils.IsPodRunningAndReady(pod) {
 			c.graceMap.Delete(getPodGracePeriodKey(pod))
-			if err := c.clearRecoveryEpisode(ctx, ms, pod.Name, ""); err != nil {
-				return err
-			}
 			continue
 		}
 		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
@@ -2266,22 +2222,11 @@ func (c *ModelServingController) revisitPodRecovery(ctx context.Context, ms *wor
 
 func (c *ModelServingController) schedulePodRecovery(ctx context.Context, ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) error {
 	key := getPodGracePeriodKey(errPod)
-	c.recoveryObservations.Store(key, struct{}{})
 	observed := time.Now()
 	if current, ok := c.graceMap.Load(key); ok {
 		observed = current.(time.Time)
 	}
 	started := observed
-	// API-observed Pods always have a UID. Some direct unit fixtures omit it;
-	// keep their legacy in-memory behavior rather than persisting an unfenced
-	// deletion authority that could never be safe after restart.
-	if errPod.UID != "" {
-		var err error
-		started, err = c.ensureRecoveryEpisode(ctx, ms, errPod, observed)
-		if err != nil {
-			return err
-		}
-	}
 	if podRecoveryDisabled(ms) {
 		c.graceMap.Delete(key)
 		return nil
@@ -2399,7 +2344,7 @@ func (c *ModelServingController) recoverPodAfterGrace(ctx context.Context, ms *w
 	}
 	latestPod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+		return 0, nil
 	}
 	if err != nil {
 		return 0, err
@@ -2407,7 +2352,7 @@ func (c *ModelServingController) recoverPodAfterGrace(ctx context.Context, ms *w
 	if latestPod.UID != pod.UID || latestPod.DeletionTimestamp != nil ||
 		!utils.IsOwnedByModelServingWithUID(latestPod, ms.UID) || utils.IsPodRunningAndReady(latestPod) ||
 		(!utils.IsPodFailed(latestPod) && !utils.ContainerRestarted(latestPod)) {
-		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+		return 0, nil
 	}
 	if err := c.checkRolloutIntent(ctx, latestMS); err != nil {
 		return 0, err
@@ -2422,15 +2367,12 @@ func (c *ModelServingController) recoverPodAfterGrace(ctx context.Context, ms *w
 	invalidateRolloutPodSnapshot(ctx)
 	err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, *options)
 	if apierrors.IsNotFound(err) {
-		return 0, c.clearRecoveryEpisode(ctx, latestMS, pod.Name, pod.UID)
+		return 0, nil
 	}
 	if err != nil {
 		return 0, err
 	}
-	// The durable fault episode is consumed by the Pod Delete event. If this
-	// process handles that event, recoveryObservations preserves the configured
-	// Role/SG scope. If the process stops first, the next controller treats the
-	// event as an interrupted old batch and converges from current objects.
+	// The Delete callback in this process handles the configured recovery scope.
 	return 0, nil
 }
 
@@ -2472,8 +2414,7 @@ func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServ
 
 func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
 	klog.V(4).Infof("checkServingGroupReady: modelServing=%s/%s, servingGroup=%s", ms.Namespace, ms.Name, servingGroupName)
-	// After a restart, an empty member target can be restored without Role
-	// records while its old Pods still terminate. They retain the reservation.
+	// Physical deletion still reserves capacity, even with zero desired Roles.
 	if c.rolloutDeletionPending(ms, servingGroupName, "", "") {
 		return false, nil
 	}
@@ -2695,10 +2636,6 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 			}
 
 			c.clearDeletionPlan(ms, deleteGroupScope, servingGroupName, "", "")
-			if err := c.forgetGroupMembers(context.TODO(), ms, servingGroupName); err != nil {
-				c.enqueueModelServing(ms)
-				return true
-			}
 			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 			c.enqueueModelServing(ms)
 		}
@@ -3044,7 +2981,7 @@ func (c *ModelServingController) updateModelServingStatus(
 		// or a temporary empty group set cannot establish a new baseline.
 		updateRevision := revision
 		currentRevision := copy.Status.CurrentRevision
-		rolloutComplete := !pendingSurge && !memberChangesPending && updated == replicas && available == replicas && len(groups) == replicas
+		rolloutComplete := !allRolesZero(latestMS) && !pendingSurge && !memberChangesPending && updated == replicas && available == replicas && len(groups) == replicas
 		if rolloutComplete {
 			currentRevision = updateRevision
 		}
@@ -3096,7 +3033,7 @@ func (c *ModelServingController) updateModelServingStatus(
 			// should set currentReplicas = updatedReplicas when rolling update is over.
 			if rolloutComplete && copy.Status.UpdatedReplicas == int32(replicas) &&
 				copy.Status.AvailableReplicas == int32(replicas) &&
-				copy.Status.Replicas == int32(replicas) {
+				copy.Status.Replicas == int32(replicas) && copy.Status.CurrentReplicas != copy.Status.UpdatedReplicas {
 				shouldUpdate = true
 				copy.Status.CurrentReplicas = copy.Status.UpdatedReplicas
 			}
@@ -3565,9 +3502,6 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	if c.isServingGroupDeleted(ms, servingGroupName) {
 		klog.V(2).Infof("ServingGroup %s has been deleted", servingGroupName)
 		c.clearDeletionPlan(ms, deleteGroupScope, servingGroupName, "", "")
-		if err = c.forgetGroupMembers(ctx, ms, servingGroupName); err != nil {
-			return err
-		}
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
 		// this is needed when a pod is deleted accidentally, and the ServingGroup is deleted completely
 		// and the controller has no chance to supplement it.

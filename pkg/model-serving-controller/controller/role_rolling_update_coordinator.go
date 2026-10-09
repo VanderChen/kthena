@@ -286,6 +286,10 @@ func (p *roleRolloutPolicy) setCondition(ms *workloadv1alpha1.ModelServing) (boo
 		condition.Status = metav1.ConditionTrue
 		condition.Reason = blocker.reason
 		condition.Message = fmt.Sprintf("ServingGroup %s: %s", blocker.servingGroupName, blocker.message)
+		// Keep a bounded diagnostic, independent of the number of dependencies.
+		if text := []rune(condition.Message); len(text) > 512 {
+			condition.Message = string(text[:509]) + "..."
+		}
 	} else if p != nil && p.enabled && p.inProgress {
 		condition.Reason = "ProgressAvailable"
 		condition.Message = "Coordinated Role rollout can make progress"

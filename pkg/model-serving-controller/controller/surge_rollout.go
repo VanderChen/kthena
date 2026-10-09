@@ -37,44 +37,19 @@ import (
 // not turn surge replicas into permanent high ordinals. This is not part of the
 // user template or its revision hash. Unmarked binpack survivors remain stable.
 const (
-	surgeAnnotation    = "modelserving.volcano.sh/surge"
-	surgeServingGroup  = "serving-group"
-	surgeRole          = "role"
-	groupSurgeStateKey = "surge-groups.json"
+	surgeAnnotation   = "modelserving.volcano.sh/surge"
+	surgeServingGroup = "serving-group"
+	surgeRole         = "role"
 )
 
-// Empty SGs cannot carry Pod annotations. Their owned member-state ConfigMap
-// preserves temporary origin, including after the last member is removed.
+// Only actual Pods carry temporary origin. Empty groups are reconstructed
+// from the desired state and have no persistent surge identity.
 func (c *ModelServingController) servingGroupSurgeNames(ctx context.Context, ms *workloadv1alpha1.ModelServing) (sets.Set[string], error) {
 	pods, err := c.surgePods(ms, surgeServingGroup, "", "")
 	if err != nil {
 		return nil, err
 	}
-	replicas := modelServingReplicas(ms)
-	names := markedSurgeNames(pods, surgeServingGroup, replicas)
-	if !servingGroupRollout(ms) || ms.ResourceVersion == "" {
-		return names, nil
-	}
-	cm, err := c.readGroupMembersState(ctx, ms)
-	if err != nil || cm == nil {
-		return names, err
-	}
-	var saved []string
-	if raw := cm.Data[groupSurgeStateKey]; raw != "" {
-		if err := json.Unmarshal([]byte(raw), &saved); err != nil {
-			return nil, fmt.Errorf("invalid ServingGroup surge state: %w", err)
-		}
-	}
-	for _, name := range saved {
-		parent, ordinal := utils.GetParentNameAndOrdinal(name)
-		if parent != ms.Name || ordinal < 0 {
-			return nil, fmt.Errorf("invalid temporary ServingGroup %q", name)
-		}
-		if ordinal >= replicas {
-			names.Insert(name)
-		}
-	}
-	return names, nil
+	return markedSurgeNames(pods, surgeServingGroup, modelServingReplicas(ms)), nil
 }
 
 func setSurgeScope(pod *corev1.Pod, scope string) {

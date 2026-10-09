@@ -104,12 +104,6 @@ func (c *ModelServingController) preparePodDeletionPlan(ctx context.Context, ms 
 		return nil, err
 	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
-	// Intentional teardown must stop complete-role facts from turning a later
-	// absence into physical-loss recovery. Pod annotations on surviving members
-	// remain useful observations after a partial deletion and controller restart.
-	if err := c.clearCreatedRoles(ctx, ms, scope, group, instance); err != nil {
-		return nil, err
-	}
 	if err := c.checkRolloutIntent(ctx, ms); err != nil {
 		return nil, err
 	}

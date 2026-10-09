@@ -126,27 +126,23 @@ func TestPodDeletionPlanUsesUIDPrecondition(t *testing.T) {
 	require.False(t, plan.Started.Load(), "a definite rejection does not start the plan")
 }
 
-func TestPodDeletionPlanClearsCreatedFactsBeforeDelete(t *testing.T) {
+func TestPodDeletionPlanNeedsNoMemberConfigMap(t *testing.T) {
 	ctx := context.Background()
 	ms := lifecycleMS("facts", 1, 1, 0)
 	ms.ResourceVersion = "1"
 	c := lifecycleController(t, ms)
 	pod := lifecyclePod(t, c, ms, ms, 0, "entry")
 	require.NoError(t, c.markRoleCreated(ctx, ms, "facts-0", "prefill", "prefill-0"))
-	_, err := c.preparePodDeletionPlan(ctx, ms, labels.SelectorFromSet(pod.Labels), deleteRoleScope)
+	kube := c.kubeClientSet.(*kubefake.Clientset)
+	kube.ClearActions()
+	plan, err := c.preparePodDeletionPlan(ctx, ms, labels.SelectorFromSet(pod.Labels), deleteRoleScope)
 	require.NoError(t, err)
-	cm, err := c.kubeClientSet.CoreV1().ConfigMaps(ms.Namespace).Get(ctx, utils.GroupMembersStateName(ms), metav1.GetOptions{})
-	require.NoError(t, err)
-	facts, err := readCreatedRoles(cm)
-	require.NoError(t, err)
-	require.Empty(t, facts)
-	deletes := 0
-	for _, action := range c.kubeClientSet.(*kubefake.Clientset).Actions() {
-		if action.Matches("delete", "pods") {
-			deletes++
-		}
+	require.Len(t, plan.Pods, 1)
+	require.Equal(t, pod.UID, plan.Pods[0].UID)
+	for _, action := range kube.Actions() {
+		require.NotEqual(t, "configmaps", action.GetResource().Resource)
+		require.False(t, action.Matches("delete", "pods"), "preparing a plan is not destructive")
 	}
-	require.Zero(t, deletes, "preparing facts is not itself destructive")
 }
 
 func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t *testing.T) {
@@ -173,7 +169,6 @@ func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t 
 	require.NoError(t, c.podsInformer.GetIndexer().Add(decodePod))
 	c.store.AddRunningPodToServingGroup(utils.GetNamespaceName(ms), "partial-restart-0", decodePod.Name, utils.ModelServingRevision(old), utils.CalRoleTemplateHash(decodeRole), "decode", "decode-0")
 	require.NoError(t, c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), "partial-restart-0", "decode", "decode-0", datastore.RoleRunning))
-	require.NoError(t, c.setGroupMembers(ctx, ms, "partial-restart-0", utils.ModelServingRevision(old), old.Spec.Template.Roles))
 	require.NoError(t, c.markRoleCreated(ctx, ms, "partial-restart-0", "prefill", "prefill-0"))
 	require.NoError(t, c.markRoleCreated(ctx, ms, "partial-restart-0", "decode", "decode-0"))
 

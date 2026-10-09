@@ -199,8 +199,8 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 }
 
 // Record that all members were created, independently of whether they are
-// Ready. Surviving members retain this evidence across a controller restart;
-// an unfinished initial creation must still be completed without recovery churn.
+// Ready. Only this process's observation grants missing-member recovery scope;
+// a fresh controller completes an unfinished layout without replaying deletions.
 func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *workloadv1alpha1.ModelServing, group, role, instance string) error {
 	if ms.ResourceVersion == "" {
 		return nil
@@ -212,7 +212,14 @@ func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *worklo
 	if len(pods) == 0 {
 		return fmt.Errorf("cannot record creation of absent Role %s/%s", group, instance)
 	}
-	if err := c.persistRoleCreated(ctx, ms, group, role, instance, pods); err != nil {
+	if err := c.validateRoleCreation(ctx, ms, group, role, instance, pods); err != nil {
+		return err
+	}
+	// Creation can finish before the informer has inserted the Role. Register it
+	// before recording completion; later AddRole calls preserve this evidence.
+	key := utils.GetNamespaceName(ms)
+	c.store.AddRole(key, group, role, instance, utils.ObjectRevision(pods[0]), utils.ObjectRoleTemplateHash(pods[0]))
+	if err := c.store.MarkRoleInitialized(key, group, role, instance); err != nil {
 		return err
 	}
 	var failures []error
@@ -238,14 +245,8 @@ func (c *ModelServingController) markRoleCreated(ctx context.Context, ms *worklo
 	return errors.Join(failures...)
 }
 
-func roleCreationObserved(role datastore.Role, pods []*corev1.Pod) bool {
-	if role.Initialized || role.Status == datastore.RoleRunning {
-		return true
-	}
-	for _, pod := range pods {
-		if pod.Annotations[roleCreatedAnnotation] == "true" {
-			return true
-		}
-	}
-	return false
+// Only completion observed in this process can broaden an absence into
+// recovery. Surviving Pod annotations do not replay an offline deletion.
+func roleCreationObserved(role datastore.Role) bool {
+	return role.Initialized || role.Status == datastore.RoleRunning
 }

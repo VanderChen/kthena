@@ -27,6 +27,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -440,41 +441,43 @@ func SetConditionWithRolloutAndProgressState(
 	rolloutActive, progressActive bool,
 ) bool {
 	var newCond metav1.Condition
-	found := false
-	shouldUpdate := false
-
 	if rolloutActive {
-		message := SomeGroupsAreUpdated + ": " + fmt.Sprintf("%v", updatedGroups)
+		message := fmt.Sprintf("%s: %d", SomeGroupsAreUpdated, len(updatedGroups))
 		if len(progressingGroups) > 0 {
-			message = SomeGroupsAreProgressing + ": " + fmt.Sprintf("%v", progressingGroups) + ", " + message
+			message = fmt.Sprintf("%s: %d, %s", SomeGroupsAreProgressing, len(progressingGroups), message)
 		}
 		newCond = newCondition(workloadv1alpha1.ModelServingUpdateInProgress, message)
 	} else if !progressActive {
 		newCond = newCondition(workloadv1alpha1.ModelServingAvailable, AllGroupsIsReady)
 	} else {
-		message := SomeGroupsAreProgressing + ": " + fmt.Sprintf("%v", progressingGroups)
-		newCond = newCondition(workloadv1alpha1.ModelServingProgressing, message)
+		newCond = newCondition(workloadv1alpha1.ModelServingProgressing, fmt.Sprintf("%s: %d", SomeGroupsAreProgressing, len(progressingGroups)))
 	}
-
-	newCond.LastTransitionTime = metav1.Now()
-	for i, curCondition := range ms.Status.Conditions {
-		if newCond.Type == curCondition.Type {
-			if newCond.Status != curCondition.Status {
-				ms.Status.Conditions[i] = newCond
-				shouldUpdate = true
-			}
-			found = true
-		} else {
-			// Available and progressing/updateInprogress are not allowed to be true at the same time.
-			if exclusiveConditionTypes(curCondition, newCond) && curCondition.Status == metav1.ConditionTrue && newCond.Status == metav1.ConditionTrue {
-				ms.Status.Conditions[i].Status = metav1.ConditionFalse
-				shouldUpdate = true
-			}
+	newCond.ObservedGeneration = ms.Generation
+	shouldUpdate := false
+	for i := range ms.Status.Conditions {
+		cur := &ms.Status.Conditions[i]
+		if cur.Type == newCond.Type {
+			continue
+		}
+		if exclusiveConditionTypes(*cur, newCond) && cur.Status == metav1.ConditionTrue {
+			cur.Status = metav1.ConditionFalse
+			cur.LastTransitionTime = metav1.Now()
+			cur.ObservedGeneration = ms.Generation
+			shouldUpdate = true
+		}
+		if cur.Status == metav1.ConditionFalse &&
+			(cur.Type == string(workloadv1alpha1.ModelServingAvailable) ||
+				cur.Type == string(workloadv1alpha1.ModelServingProgressing) ||
+				cur.Type == string(workloadv1alpha1.ModelServingUpdateInProgress)) && cur.Message != "Condition is inactive" {
+			// Retire legacy ordinal lists even on inactive conditions. Keep the
+			// transition time when only the diagnostic text changes.
+			cur.Message = "Condition is inactive"
+			shouldUpdate = true
 		}
 	}
-
-	if newCond.Status == metav1.ConditionTrue && !found {
-		ms.Status.Conditions = append(ms.Status.Conditions, newCond)
+	existing := apiMeta.FindStatusCondition(ms.Status.Conditions, newCond.Type)
+	if existing == nil || existing.Status != newCond.Status || existing.Reason != newCond.Reason || existing.Message != newCond.Message || existing.ObservedGeneration != newCond.ObservedGeneration {
+		apiMeta.SetStatusCondition(&ms.Status.Conditions, newCond)
 		shouldUpdate = true
 	}
 

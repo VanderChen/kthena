@@ -20,6 +20,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -524,4 +526,26 @@ func TestGetMaxSurgeForRole(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func TestRolloutConditionsRemainBoundedAndStable(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{}
+	ms.Generation = 1
+	groups := make([]int, 10001)
+	for i := range groups {
+		groups[i] = i
+	}
+	require.True(t, SetConditionWithRolloutAndProgressState(ms, groups, groups, nil, true, true))
+	cond := ms.Status.Conditions[0]
+	require.Less(t, len(cond.Message), 120)
+	require.Contains(t, cond.Message, "10001")
+	require.NotContains(t, cond.Message, "[")
+	require.False(t, SetConditionWithRolloutAndProgressState(ms, groups, groups, nil, true, true))
+	require.Equal(t, cond.LastTransitionTime, ms.Status.Conditions[0].LastTransitionTime)
+	require.True(t, SetConditionWithRolloutAndProgressState(ms, groups[:1], groups, nil, true, true))
+	require.Equal(t, cond.LastTransitionTime, ms.Status.Conditions[0].LastTransitionTime)
+	require.True(t, SetConditionWithRolloutAndProgressState(ms, nil, groups, nil, false, false))
+	require.Equal(t, metav1.ConditionFalse, ms.Status.Conditions[0].Status)
+	require.Equal(t, "Condition is inactive", ms.Status.Conditions[0].Message)
+	require.False(t, SetConditionWithRolloutAndProgressState(ms, nil, groups, nil, false, false))
 }

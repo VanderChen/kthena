@@ -164,7 +164,7 @@ func TestEvictionUsesLatestMembersDespiteStalePersistedCounts(t *testing.T) {
 			pods := append(old, target...)
 			raw, err := json.Marshal(map[string]map[string]int32{"test-ms-0": {"inference": applied}, "test-ms-1": {"inference": 1}})
 			require.NoError(t, err)
-			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: utils.GroupMembersStateName(ms), Namespace: ms.Namespace, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, api.SchemeGroupVersion.WithKind("ModelServing"))}}, Data: map[string]string{"targets.json": string(raw)}}
+			cm := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "retired-member-state", Namespace: ms.Namespace, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, api.SchemeGroupVersion.WithKind("ModelServing"))}}, Data: map[string]string{"targets.json": string(raw)}}
 			h, _ := newTestEvictionHandlerWithLivePods(ms, pods, pods, cm)
 			allowed, reason := h.checkEvictionWithTracker(ctx, ms, target[0])
 			require.False(t, allowed, reason)

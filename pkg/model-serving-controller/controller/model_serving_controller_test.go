@@ -78,7 +78,6 @@ func TestRootCauseR7TemplateRolloutDoesNotExpandRetiringOldGroup(t *testing.T) {
 			}
 			c := lifecycleController(t, ms, old)
 			oldPod := lifecyclePod(t, c, ms, old, 0, "old-ready")
-			require.NoError(t, c.setGroupMembers(ctx, ms, "member-rollover-0", utils.ModelServingRevision(old), old.Spec.Template.Roles))
 			kube := c.kubeClientSet.(*kubefake.Clientset)
 			kube.ClearActions()
 			require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
@@ -121,8 +120,6 @@ func TestRootCauseR7TemplateRolloutDoesNotExpandRetiringOldGroup(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, c.podsInformer.GetIndexer().Update(unavailable))
 		require.NoError(t, c.store.UpdateServingGroupStatus(utils.GetNamespaceName(target), "member-budget-1", datastore.ServingGroupCreating))
-		require.NoError(t, c.setGroupMembers(ctx, target, "member-budget-0", utils.ModelServingRevision(old), old.Spec.Template.Roles))
-		require.NoError(t, c.setGroupMembers(ctx, target, "member-budget-1", utils.ModelServingRevision(stage), stage.Spec.Template.Roles))
 		kube := c.kubeClientSet.(*kubefake.Clientset)
 		kube.ClearActions()
 
