@@ -378,6 +378,155 @@ func TestResolveRoleRolloutStateRetainsMissingPartitionProtectedOldSlot(t *testi
 	assert.True(t, state.hasOldVersion)
 }
 
+func TestStableRolePopulationIncludesObservedExpansion(t *testing.T) {
+	role := createStandardModelServing("expansion", 1, 10).Spec.Template.Roles[0]
+	role.Name = "a"
+	targetHash := utils.CalRoleTemplateHash(role)
+	tests := []struct {
+		name                  string
+		ordinals              []int
+		targets               []int
+		terminating           map[int]templateComparison
+		missingOld            bool
+		count, started, ready int
+	}{
+		{name: "all expanded old members are eligible", ordinals: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, count: 10},
+		{name: "uncreated expansion does not reserve starts", ordinals: []int{0, 1, 2, 3, 4, 9}, count: 6},
+		{name: "target expansion is counted once", ordinals: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}, targets: []int{5, 6, 7, 8, 9}, count: 10, started: 5, ready: 5},
+		{name: "missing prior replacement remains reserved", ordinals: []int{0, 1, 2, 3, 5}, targets: []int{5}, missingOld: true, count: 6, started: 2, ready: 1},
+		{name: "terminating expanded replacement remains reserved", ordinals: []int{0, 1, 2, 3, 4}, terminating: map[int]templateComparison{9: templateDifferent}, count: 6, started: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			instances := []datastore.Role{}
+			for _, ordinal := range tt.ordinals {
+				hash := "old"
+				for _, target := range tt.targets {
+					if ordinal == target {
+						hash = targetHash
+					}
+				}
+				instances = append(instances, datastore.Role{Name: utils.GenerateRoleID(role.Name, ordinal), RoleTemplateHash: hash, Status: datastore.RoleRunning})
+			}
+			ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}}}}
+			c := &ModelServingController{}
+			population, err := c.stableRolePopulation(ms, "expansion-0", role, 5, instances, tt.terminating)
+			require.NoError(t, err)
+			require.NotNil(t, population)
+			assert.Equal(t, tt.count, population.countFrom(0))
+			for _, ordinal := range tt.ordinals {
+				assert.True(t, population.contains(ordinal))
+			}
+			if tt.missingOld {
+				assert.True(t, population.contains(4), "missing original replacement holds its start")
+			}
+			state := c.resolveRoleRolloutState(context.Background(), ms, datastore.ServingGroup{Name: "expansion-0"}, role, 5, instances, 0, true, tt.terminating, population)
+			assert.Equal(t, tt.started, state.startedCount)
+			assert.Equal(t, tt.ready, state.readyCount)
+			assert.Equal(t, tt.started, state.versionStarted, "formal target capacity must not be counted twice")
+			assert.Equal(t, 10, state.versionTotal)
+		})
+	}
+}
+
+func TestStableRoleExpansionDistinguishesAdoptedAndTemporarySurge(t *testing.T) {
+	ms := createStandardModelServing("surge-expansion", 1, 10)
+	ms.UID = "surge-expansion-owner"
+	c := newRevisionTestController(t, ms)
+	role, group := ms.Spec.Template.Roles[0], "surge-expansion-0"
+	instances := []datastore.Role{}
+	for i := 0; i < 5; i++ {
+		instances = append(instances, datastore.Role{Name: utils.GenerateRoleID(role.Name, i), Status: datastore.RoleRunning})
+	}
+	for _, ordinal := range []int{5, 10} {
+		id := utils.GenerateRoleID(role.Name, ordinal)
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: utils.GeneratePodName(group, id, 0), Namespace: ms.Namespace,
+			Labels: map[string]string{workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey: group, workloadv1alpha1.RoleLabelKey: role.Name, workloadv1alpha1.RoleIDKey: id},
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
+		}}
+		setSurgeScope(pod, surgeRole)
+		require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+		instances = append(instances, datastore.Role{Name: id, Status: datastore.RoleRunning})
+	}
+	population, err := c.stableRolePopulation(ms, group, role, 5, instances, nil)
+	require.NoError(t, err)
+	assert.Equal(t, 6, population.countFrom(0))
+	assert.True(t, population.contains(5), "an adopted formal expansion member participates")
+	assert.False(t, population.contains(10), "temporary surge never joins stable progress")
+	assert.Equal(t, 4, population.countFrom(2), "partition protects absolute original ordinals")
+}
+
+func TestCoordinatedRoleExpansionIgnoresIncompleteUnselectedRole(t *testing.T) {
+	ctx := context.Background()
+	initial := createStandardModelServing("independent-expansion", 1, 5)
+	initial.UID = "expansion-owner"
+	for _, name := range []string{"decode", "fff"} {
+		role := *initial.Spec.Template.Roles[0].DeepCopy()
+		role.Name = name
+		initial.Spec.Template.Roles = append(initial.Spec.Template.Roles, role)
+	}
+	initial.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+		Type: workloadv1alpha1.RoleRollingUpdate,
+		RoleCoordination: &workloadv1alpha1.RoleCoordination{
+			Roles: []string{"prefill", "decode"}, MaxSkew: ptr.To(intstr.FromString("20%")),
+			Dependencies: []workloadv1alpha1.RoleRolloutDependency{{Role: "prefill", DependsOn: []string{"decode"}}},
+		},
+	}
+	c := newRevisionTestController(t, initial)
+	completed := utils.ModelServingRevision(initial)
+	require.NoError(t, c.persistCoordinatedRoleRevision(ctx, initial, completed))
+	expanded := initial.DeepCopy()
+	expanded.Status.CurrentRevision = completed
+	expanded.Spec.Template.Roles[2].EntryTemplate.Spec.Containers[0].Image = "fff:missing"
+	for i := range expanded.Spec.Template.Roles {
+		expanded.Spec.Template.Roles[i].Replicas = ptr.To[int32](10)
+	}
+	require.NoError(t, c.persistCoordinatedRoleRevision(ctx, expanded, utils.ModelServingRevision(expanded)))
+	historical, err := c.roleSpecsFromRevision(expanded, completed)
+	require.NoError(t, err)
+	require.Equal(t, int32(5), *historical["decode"].Replicas, "global completed baseline remains unchanged")
+	key, group := utils.GetNamespaceName(expanded), "independent-expansion-0"
+	c.store.AddServingGroup(key, 0, completed)
+	for _, role := range expanded.Spec.Template.Roles {
+		for i := 0; i < 10; i++ {
+			id := utils.GenerateRoleID(role.Name, i)
+			c.store.AddRole(key, group, role.Name, id, utils.ModelServingRevision(expanded), utils.CalRoleTemplateHash(role))
+			if role.Name != "fff" {
+				require.NoError(t, c.store.UpdateRoleStatus(key, group, role.Name, id, datastore.RoleRunning))
+			}
+		}
+	}
+	for _, image := range []string{"pd:B", "pd:C"} {
+		target := expanded.DeepCopy()
+		for i := 0; i < 2; i++ {
+			target.Spec.Template.Roles[i].EntryTemplate.Spec.Containers[0].Image = image
+		}
+		policy, err := c.resolveRoleRolloutPolicy(ctx, target, utils.ModelServingRevision(target))
+		require.NoError(t, err)
+		_, coordinated := policy.group(group).role("fff")
+		require.False(t, coordinated)
+		for _, role := range expanded.Spec.Template.Roles[:2] {
+			limits, ok := policy.group(group).role(role.Name)
+			require.True(t, ok)
+			require.Equal(t, 10, limits.rolloutEnd)
+			candidates := []datastore.Role{}
+			for i := 9; i >= 0; i-- {
+				candidates = append(candidates, datastore.Role{Name: utils.GenerateRoleID(role.Name, i), Status: datastore.RoleRunning})
+			}
+			selected, budget := policy.group(group).constrainRoleDeletion(role.Name, candidates, 1)
+			if role.Name == "decode" {
+				require.NotEmpty(t, selected)
+				require.Equal(t, "decode-9", selected[0].Name)
+				require.Equal(t, 1, budget)
+			} else {
+				require.Empty(t, selected, "prefill retains its explicit startup dependency")
+			}
+		}
+	}
+}
+
 func TestResolveRoleRolloutPolicyAppliesDependencyAndSkew(t *testing.T) {
 	role := func(name, image string, replicas int32) workloadv1alpha1.Role {
 		return workloadv1alpha1.Role{

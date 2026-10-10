@@ -491,12 +491,10 @@ func (p *roleStablePopulation) boundary(partition, offset int) int {
 }
 
 // Missing replacements reserve low holes. Temporary surge never participates
-// in stable progress. Ordinary expansion keeps its prior population separately.
+// in stable progress. Observed formal expansion members join the population;
+// uncreated expansion slots do not reserve a template replacement start.
 func (c *ModelServingController) stableRolePopulation(ms *workloadv1alpha1.ModelServing, group string, role workloadv1alpha1.Role, previousDesired int, instances []datastore.Role, terminating map[int]templateComparison) (*roleStablePopulation, error) {
 	desired := roleReplicas(role)
-	if desired > previousDesired {
-		return nil, nil
-	}
 	var pods []*corev1.Pod
 	if c.podsInformer != nil {
 		var err error
@@ -523,13 +521,17 @@ func (c *ModelServingController) stableRolePopulation(ms *workloadv1alpha1.Model
 		ordered = ordered[:desired]
 		ordinals = sets.New(ordered...)
 	}
-	population := &roleStablePopulation{end: desired, holes: sets.New[int]()}
+	population := &roleStablePopulation{end: min(previousDesired, desired), holes: sets.New[int]()}
+	retainedOutsideDesired := 0
 	for _, ordinal := range ordered {
-		if ordinal >= desired {
+		if ordinal >= population.end {
 			population.extra = append(population.extra, ordinal)
 		}
+		if ordinal >= desired {
+			retainedOutsideDesired++
+		}
 	}
-	for ordinal := desired - 1; population.holes.Len() < len(population.extra) && ordinal >= 0; ordinal-- {
+	for ordinal := population.end - 1; population.holes.Len() < retainedOutsideDesired && ordinal >= 0; ordinal-- {
 		if !ordinals.Has(ordinal) {
 			population.holes.Insert(ordinal)
 		}
