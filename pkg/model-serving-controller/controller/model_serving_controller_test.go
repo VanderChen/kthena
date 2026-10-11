@@ -6720,7 +6720,16 @@ podName: {{ $data.pod_name | quote }}`,
 		WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{},
 	}
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "production-ms-0-prefill-0-0", Namespace: "default"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "production-ms-0-prefill-0-0", Namespace: "default",
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+				workloadv1alpha1.GroupNameLabelKey:        "production-ms-0",
+				workloadv1alpha1.RoleLabelKey:             role.Name,
+				workloadv1alpha1.RoleIDKey:                "prefill-0",
+			},
+		},
 		Spec: corev1.PodSpec{
 			Containers:     []corev1.Container{{Name: "main"}},
 			InitContainers: []corev1.Container{{Name: "init"}},

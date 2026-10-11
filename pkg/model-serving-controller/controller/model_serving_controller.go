@@ -1476,14 +1476,16 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 		if chain != nil {
 			_, roleIndex := utils.GetParentNameAndOrdinal(roleObj.Name)
 			if err := chain.OnRoleSync(ctx, &plugins.HookRequest{
-				ModelServing:  ms,
-				ServingGroup:  groupName,
-				RoleName:      targetRole.Name,
-				RoleID:        roleObj.Name,
-				RoleIndex:     roleIndex,
-				Role:          roleToApply.DeepCopy(),
-				KubeClient:    c.kubeClientSet,
-				ServiceLister: c.servicesLister,
+				ModelServing:    ms,
+				ServingGroup:    groupName,
+				RoleName:        targetRole.Name,
+				RoleID:          roleObj.Name,
+				RoleIndex:       roleIndex,
+				Role:            roleToApply.DeepCopy(),
+				KubeClient:      c.kubeClientSet,
+				PodLister:       c.podsLister,
+				ConfigMapLister: c.configMapsLister,
+				ServiceLister:   c.servicesLister,
 			}); err != nil {
 				return fmt.Errorf("sync plugins for Role %s/%s in ServingGroup %s: %w", targetRole.Name, roleObj.Name, groupName, err)
 			}

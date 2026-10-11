@@ -32,12 +32,13 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 func TestOnPodRunningGeneratesRanktableBeforePodReady(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "default")
 
-	pod := ranktableTestPod("test-ms-0", "worker", "worker-0", "pod-0")
+	pod := ranktableTestPod("test-ms-0", "worker", "worker-0", "test-ms-0-worker-0-0")
 	pod.Status.Phase = corev1.PodRunning
 	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionFalse}}
 	pod.Annotations = map[string]string{PodRanktableAnnotation: `{}`}
@@ -56,6 +57,7 @@ func TestOnPodDeleteResetsRanktableWhenRoleBecomesIncomplete(t *testing.T) {
 	t.Setenv("POD_NAMESPACE", "default")
 
 	plugin, req, client := newRanktablePluginTest(t, RoleLevelRanktable, nil)
+	seedRanktable(t, plugin, req)
 	require.NoError(t, plugin.OnPodDelete(context.Background(), req))
 
 	cmName := GenerateRanktableConfigMapName(req.ModelServing.Name, req.ServingGroup+"-"+req.RoleID)
@@ -71,6 +73,7 @@ func TestOnRoleDeleteRefreshesGroupRanktable(t *testing.T) {
 	remainingPod.Status.Phase = corev1.PodRunning
 	remainingPod.Annotations = map[string]string{PodRanktableAnnotation: `{}`}
 	plugin, req, client := newRanktablePluginTest(t, GroupLevelRanktable, []*corev1.Pod{remainingPod})
+	seedRanktable(t, plugin, req)
 
 	require.NoError(t, plugin.OnRoleDelete(context.Background(), req))
 
@@ -127,6 +130,12 @@ devices:
 		},
 	}
 	client := fake.NewSimpleClientset()
+	for _, pod := range pods {
+		_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	_, err := utils.CreateControllerRevision(context.Background(), client, ms, "test-revision", ms.Spec.Template.Roles)
+	require.NoError(t, err)
 	return &RanktablePlugin{
 		cfg:             RanktableConfig{Template: templateCM.Name},
 		templateManager: NewTemplateManager(),
@@ -145,11 +154,24 @@ func ranktableTestPod(groupName, roleName, roleID, name string) *corev1.Pod {
 	return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      name,
 		Namespace: "default",
+		UID:       types.UID(name + "-uid"),
+		OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&workloadv1alpha1.ModelServing{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-ms", UID: "test-ms-uid"},
+		}, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 		Labels: map[string]string{
 			workloadv1alpha1.ModelServingNameLabelKey: "test-ms",
 			workloadv1alpha1.GroupNameLabelKey:        groupName,
 			workloadv1alpha1.RoleLabelKey:             roleName,
 			workloadv1alpha1.RoleIDKey:                roleID,
+			workloadv1alpha1.RevisionLabelKey:         "test-revision",
+			workloadv1alpha1.EntryLabelKey:            utils.Entry,
 		},
 	}}
+}
+
+func seedRanktable(t *testing.T, plugin *RanktablePlugin, req *plugins.HookRequest) {
+	t.Helper()
+	req.Pod = ranktableTestPod(req.ServingGroup, req.RoleName, req.RoleID, req.ServingGroup+"-"+req.RoleID+"-0")
+	require.NoError(t, plugin.OnPodCreate(context.Background(), req))
+	req.Pod = nil
 }

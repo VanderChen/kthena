@@ -17,7 +17,6 @@ limitations under the License.
 package ranktable
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"testing"
@@ -25,7 +24,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 )
@@ -441,62 +439,6 @@ podName: {{ $data.pod_name | quote }}`,
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.want, got)
-			}
-		})
-	}
-}
-
-func TestEnsureRanktableConfigMap(t *testing.T) {
-	tests := []struct {
-		name      string
-		namespace string
-		cmName    string
-		filename  string
-		content   string
-		wantErr   bool
-	}{
-		{
-			name:      "create new ConfigMap",
-			namespace: "default",
-			cmName:    "test-ranktable",
-			filename:  "ranktable.json",
-			content:   `{"version": "1.0"}`,
-			wantErr:   false,
-		},
-		{
-			name:      "update existing ConfigMap",
-			namespace: "default",
-			cmName:    "test-ranktable",
-			filename:  "ranktable.json",
-			content:   `{"version": "2.0"}`,
-			wantErr:   false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := fake.NewSimpleClientset()
-			tm := NewTemplateManager()
-
-			err := tm.EnsureRanktableConfigMap(
-				context.TODO(),
-				client,
-				tt.namespace,
-				tt.cmName,
-				nil,
-				map[string]string{"test": "label"},
-				tt.filename,
-				tt.content,
-			)
-
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-				// Verify ConfigMap was created/updated
-				cm, err := client.CoreV1().ConfigMaps(tt.namespace).Get(context.TODO(), tt.cmName, metav1.GetOptions{})
-				assert.NoError(t, err)
-				assert.Equal(t, tt.content, cm.Data[tt.filename])
 			}
 		})
 	}
