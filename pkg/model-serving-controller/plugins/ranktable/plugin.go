@@ -83,6 +83,9 @@ func (p *RanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequ
 	if err != nil {
 		return err
 	}
+	if _, found := req.Pod.Annotations[template.PodAnnotationName]; !found {
+		return nil
+	}
 	scope := ranktableutil.NewScope(req, template.Level == RoleLevelRanktable, template.Filename)
 	if err := p.syncRanktable(ctx, req, template, ranktableutil.Prepare); err != nil {
 		return err
@@ -117,14 +120,10 @@ func (p *RanktablePlugin) updateRanktableFromPods(ctx context.Context, req *plug
 
 func (p *RanktablePlugin) syncRanktable(ctx context.Context, req *plugins.HookRequest, template *RanktableTemplate, mode ranktableutil.Mode) error {
 	scope := ranktableutil.NewScope(req, template.Level == RoleLevelRanktable, template.Filename)
-	return ranktableutil.Sync(ctx, req, scope, mode, func(complete bool, pods []*corev1.Pod, timestamp string) (string, error) {
+	return ranktableutil.Sync(ctx, req, scope, mode, template.PodAnnotationName, func(complete bool, pods []*corev1.Pod, timestamp string) (string, error) {
 		var members []PodRanktableData
 		for _, pod := range pods {
-			annotation, found := pod.Annotations[template.PodAnnotationName]
-			if !found {
-				complete = false
-				continue
-			}
+			annotation := pod.Annotations[template.PodAnnotationName]
 			data, err := p.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation)
 			if err != nil {
 				klog.ErrorS(err, "Cannot parse ranktable member", "pod", pod.Name)

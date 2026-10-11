@@ -85,7 +85,7 @@ type Render func(complete bool, pods []*corev1.Pod, timestamp string) (string, e
 
 // Sync never creates on UpdateExisting. Once a CM has been observed, retries
 // remain bound to that UID even if a same-name replacement appears.
-func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode, render Render) error {
+func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode, annotationName string, render Render) error {
 	if req.ModelServing.DeletionTimestamp != nil {
 		return nil
 	}
@@ -168,7 +168,20 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 		if mode == Prepare && cm != nil && cm.Annotations[identityBound] == "v1" {
 			return nil
 		}
-		complete := mode != Prepare && len(active) > 0
+		// Keep the full snapshot for lifecycle and applied-layout checks. Only
+		// annotated Pods participate in communication and must be Running.
+		participants := make([]*corev1.Pod, 0, len(active))
+		for _, pod := range active {
+			if _, found := pod.Annotations[annotationName]; found {
+				participants = append(participants, pod)
+			}
+		}
+		// Prepare is called for an annotated Pod before it exists in the API.
+		// Other callbacks must not create a table without any participants.
+		if mode != Prepare && len(participants) == 0 && cm == nil {
+			return nil
+		}
+		complete := mode != Prepare && len(participants) > 0
 		var layoutErr error
 		if complete && scope.RoleLevel {
 			complete, err = completeRole(ctx, req, active)
@@ -181,23 +194,23 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 				complete = false
 			}
 		}
-		for _, pod := range active {
+		for _, pod := range participants {
 			complete = complete && pod.Status.Phase == corev1.PodRunning
 		}
 		if mode == Prepare {
-			active = nil
+			participants = nil
 		}
 		timestamp := time.Now().Format(time.RFC3339)
 		if cm != nil && cm.Annotations[generatedAt] != "" {
 			timestamp = cm.Annotations[generatedAt]
 		}
-		content, err := render(complete, active, timestamp)
+		content, err := render(complete, participants, timestamp)
 		if err != nil {
 			return err
 		}
 		if cm != nil && cm.Data[scope.Filename] != content {
 			timestamp = time.Now().Format(time.RFC3339)
-			content, err = render(complete, active, timestamp)
+			content, err = render(complete, participants, timestamp)
 			if err != nil {
 				return err
 			}
@@ -220,7 +233,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 		if maps.Equal(updated.Data, cm.Data) && maps.Equal(updated.Annotations, cm.Annotations) {
 			return layoutErr
 		}
-		klog.V(4).InfoS("Update ranktable", "scope", scope.Name, "cmUID", cm.UID, "mode", mode, "members", len(active), "complete", complete)
+		klog.V(4).InfoS("Update ranktable", "scope", scope.Name, "cmUID", cm.UID, "mode", mode, "members", len(participants), "complete", complete)
 		_, err = req.KubeClient.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil

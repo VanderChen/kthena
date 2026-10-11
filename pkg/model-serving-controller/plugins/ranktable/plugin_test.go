@@ -172,6 +172,7 @@ func ranktableTestPod(groupName, roleName, roleID, name string) *corev1.Pod {
 func seedRanktable(t *testing.T, plugin *RanktablePlugin, req *plugins.HookRequest) {
 	t.Helper()
 	req.Pod = ranktableTestPod(req.ServingGroup, req.RoleName, req.RoleID, req.ServingGroup+"-"+req.RoleID+"-0")
+	req.Pod.Annotations = map[string]string{PodRanktableAnnotation: `{}`}
 	require.NoError(t, plugin.OnPodCreate(context.Background(), req))
 	req.Pod = nil
 }

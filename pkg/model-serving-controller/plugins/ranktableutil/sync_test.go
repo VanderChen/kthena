@@ -65,7 +65,7 @@ func newFixture(t *testing.T, workers int32, indices ...int) *fixture {
 			pod = utils.GenerateWorkerPod(*role.DeepCopy(), ms, "model-0", "worker-0", i, "history", utils.CalRoleTemplateHash(role))
 		}
 		pod.UID = types.UID(fmt.Sprintf("pod-%d", i))
-		pod.Annotations = map[string]string{GroupInstance: "group-a", RoleInstance: "role-a"}
+		pod.Annotations = map[string]string{GroupInstance: "group-a", RoleInstance: "role-a", "test/ranktable": "data"}
 		pod.Status.Phase = corev1.PodRunning
 		pod.Status.PodIP = fmt.Sprintf("192.0.2.%d", i+1)
 		_, err := f.client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
@@ -92,7 +92,7 @@ func renderFixture(complete bool, pods []*corev1.Pod, timestamp string) (string,
 
 func (f *fixture) sync(t *testing.T, mode Mode) {
 	t.Helper()
-	require.NoError(t, Sync(context.Background(), f.req, f.scope, mode, renderFixture))
+	require.NoError(t, Sync(context.Background(), f.req, f.scope, mode, "test/ranktable", renderFixture))
 }
 
 func (f *fixture) cm(t *testing.T) *corev1.ConfigMap {
@@ -209,11 +209,11 @@ func TestMissingHistoryDoesNotGuessLatest(t *testing.T) {
 				err = f.client.AppsV1().ControllerRevisions("test").Delete(context.Background(), cr.Name, metav1.DeleteOptions{})
 			}
 			require.NoError(t, err)
-			require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, renderFixture))
+			require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, "test/ranktable", renderFixture))
 			require.False(t, completeCM(t, f.cm(t)))
 			require.NoError(t, f.client.CoreV1().ConfigMaps("test").Delete(context.Background(), f.scope.Name, metav1.DeleteOptions{}))
 			f.client.ClearActions()
-			require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, renderFixture))
+			require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, "test/ranktable", renderFixture))
 			noWrites(t, f.client)
 		})
 	}
@@ -322,7 +322,7 @@ func TestForeignAndLegacyConfigMaps(t *testing.T) {
 	_, err := f.client.CoreV1().ConfigMaps("test").Update(context.Background(), cm, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	f.client.ClearActions()
-	require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, renderFixture))
+	require.Error(t, Sync(context.Background(), f.req, f.scope, Refresh, "test/ranktable", renderFixture))
 	noWrites(t, f.client)
 	cm.OwnerReferences[0].UID = "owner"
 	cm.Annotations = nil
@@ -335,4 +335,34 @@ func TestForeignAndLegacyConfigMaps(t *testing.T) {
 	f.sync(t, Refresh)
 	require.Equal(t, "v1", f.cm(t).Annotations[identityBound])
 	require.True(t, completeCM(t, f.cm(t)))
+}
+
+func TestUnannotatedMembersStillFenceLifecycleAndHistory(t *testing.T) {
+	for _, mismatch := range []string{"history", "cohort", "retiring"} {
+		t.Run(mismatch, func(t *testing.T) {
+			f := newFixture(t, 1, 0, 1)
+			f.seed(t)
+			pod := f.pods[1].DeepCopy()
+			delete(pod.Annotations, "test/ranktable")
+			switch mismatch {
+			case "history":
+				pod.Labels[workloadv1alpha1.RevisionLabelKey] = "unknown"
+			case "cohort":
+				pod.Annotations[RoleInstance] = "other"
+			case "retiring":
+				f.req.Pod = f.pods[0].DeepCopy()
+				f.req.Pod.Annotations[RoleInstance] = "new"
+			}
+			_, err := f.client.CoreV1().Pods("test").Update(context.Background(), pod, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			mode := Refresh
+			if mismatch == "retiring" {
+				mode = Prepare
+			}
+			require.Error(t, Sync(context.Background(), f.req, f.scope, mode, "test/ranktable", renderFixture))
+			if mismatch == "history" {
+				require.False(t, completeCM(t, f.cm(t)))
+			}
+		})
+	}
 }

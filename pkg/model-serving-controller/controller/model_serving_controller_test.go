@@ -6722,6 +6722,7 @@ podName: {{ $data.pod_name | quote }}`,
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "production-ms-0-prefill-0-0", Namespace: "default",
+			Annotations:     map[string]string{"ascend.com/ranktable": `{"pod_name":"member"}`},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.SchemeGroupVersion.WithKind("ModelServing"))},
 			Labels: map[string]string{
 				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
