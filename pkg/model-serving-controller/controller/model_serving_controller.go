@@ -3628,11 +3628,16 @@ func (c *ModelServingController) createOrUpdatePodGroupByServingGroupWithRoles(
 	servingGroupName string,
 	roles []workloadv1alpha1.Role,
 ) error {
+	podGroupMS := ms.DeepCopy()
+	podGroupMS.Spec.Template.Roles = roles
+	if roleCoordination(ms) != nil {
+		if err := c.stageCoordinatedExpansionGang(ctx, ms, podGroupMS, servingGroupName); err != nil {
+			return err
+		}
+	}
 	if err := c.checkRolloutIntent(ctx, ms); err != nil {
 		return err
 	}
-	podGroupMS := ms.DeepCopy()
-	podGroupMS.Spec.Template.Roles = roles
 	if err, retryAfter := c.podGroupManager.CreateOrUpdatePodGroup(ctx, podGroupMS, servingGroupName); err != nil {
 		if c.recorder != nil {
 			c.recorder.Eventf(
