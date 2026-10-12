@@ -33,10 +33,129 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 )
+
+func TestEmptyGroupWaitsForRoleDeletionCleanup(t *testing.T) {
+	ctx := context.Background()
+	ms := lifecycleMS("empty-plan", 1, 1, 0)
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	c := lifecycleController(t, ms)
+	key := utils.GetNamespaceName(ms)
+	revision := utils.ModelServingRevision(ms)
+	group := "empty-plan-3" // An old sparse identity must eventually be forgotten.
+	c.store.AddServingGroup(key, 3, revision)
+	c.store.AddRole(key, group, "prefill", "prefill-0", revision, "")
+	require.NoError(t, c.store.UpdateRoleStatus(key, group, "prefill", "prefill-0", datastore.RoleDeleting))
+	plan := &podDeletionPlan{Key: deletionPlanKey(ms, deleteRoleScope, group, "prefill", "prefill-0")}
+	plan.Started.Store(true)
+	c.deletionPlans.Store(plan.Key, plan)
+	require.NoError(t, c.forgetEmptyServingGroups(ctx, ms, revision))
+	require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(key, group, "prefill", "prefill-0"))
+	require.NoError(t, c.resumePodDeletionPlans(ctx, ms))
+	require.NoError(t, c.forgetEmptyServingGroups(ctx, ms, revision))
+	require.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group))
+	require.False(t, c.podDeletionPlanActive(ms, group))
+}
+
+func TestOrphanedRoleDeletionAllowsLatestExpansion(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		for _, missingGroup := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/missingGroup=%t", mode, missingGroup), func(t *testing.T) {
+				ctx := context.Background()
+				ms := lifecycleMS("orphan", 6, 1, 0)
+				ms.Spec.RolloutStrategy.Type = mode
+				base := ms.Spec.Template.Roles[0].DeepCopy()
+				ms.Spec.Template.Roles = nil
+				for _, name := range []string{"a", "b", "c"} {
+					role := base.DeepCopy()
+					role.Name = name
+					ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, *role)
+				}
+				c := lifecycleController(t, ms)
+				if !missingGroup {
+					c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, utils.ModelServingRevision(ms))
+				}
+				plan := &podDeletionPlan{Key: deletionPlanKey(ms, deleteRoleScope, "orphan-0", "a", "a-0"),
+					Pods: []corev1.Pod{{ObjectMeta: metav1.ObjectMeta{Name: "orphan-0-a-0-0", UID: "original"}}}}
+				plan.Started.Store(true)
+				c.deletionPlans.Store(plan.Key, plan)
+				c.roleDeleteMap.Store(roleDeletionKey(ms, "orphan-0", "a", "a-0"), 3)
+				require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+				require.False(t, c.podDeletionPlanActive(ms, "orphan-0"))
+				_, progress := c.roleDeleteMap.Load(roleDeletionKey(ms, "orphan-0", "a", "a-0"))
+				require.False(t, progress)
+				pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+				require.NoError(t, err)
+				require.Len(t, pods.Items, 18)
+				for _, pod := range pods.Items {
+					require.Equal(t, utils.ModelServingRevision(ms), utils.ObjectRevision(&pod))
+				}
+			})
+		}
+	}
+}
+
+func TestOrphanedRoleDeletionRetainsUIDAndCleanupBoundaries(t *testing.T) {
+	for _, state := range []string{"terminating", "replacement", "api-failure", "plugin-failure"} {
+		t.Run(state, func(t *testing.T) {
+			ctx := context.Background()
+			ms := lifecycleMS("orphan-boundary", 1, 1, 0)
+			c := lifecycleController(t, ms)
+			pod := lifecyclePod(t, c, ms, ms, 0, "original")
+			group := "orphan-boundary-0"
+			plan, err := c.preparePodDeletionPlan(ctx, ms, labels.SelectorFromSet(pod.Labels), deleteRoleScope)
+			require.NoError(t, err)
+			plan.Started.Store(true)
+			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), group)
+			require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+			kube := c.kubeClientSet.(*kubefake.Clientset)
+			registry := c.pluginsRegistry
+			switch state {
+			case "terminating":
+				pod.DeletionTimestamp = ptr.To(metav1.Now())
+				require.NoError(t, kube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), pod, ms.Namespace))
+			case "replacement":
+				pod.UID = types.UID("replacement")
+				require.NoError(t, kube.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), pod, ms.Namespace))
+			case "api-failure":
+				kube.PrependReactor("get", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewServiceUnavailable("injected API failure")
+				})
+			case "plugin-failure":
+				c.pluginsRegistry = nil
+			}
+			kube.ClearActions()
+			err = c.resumePodDeletionPlans(ctx, ms)
+			if state == "replacement" {
+				require.NoError(t, err)
+				require.False(t, c.podDeletionPlanActive(ms, group))
+				got, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, pod.UID, got.UID)
+				for _, action := range kube.Actions() {
+					require.False(t, action.Matches("delete", "pods"))
+				}
+				return
+			}
+			require.Error(t, err)
+			require.True(t, c.podDeletionPlanActive(ms, group))
+			if state == "api-failure" {
+				kube.ReactionChain = kube.ReactionChain[1:]
+			}
+			c.pluginsRegistry = registry
+			if state == "terminating" {
+				require.NoError(t, kube.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+			}
+			require.NoError(t, c.resumePodDeletionPlans(ctx, ms))
+			require.False(t, c.podDeletionPlanActive(ms, group))
+		})
+	}
+}
 
 func TestPodDeletionPlanIsProcessLocal(t *testing.T) {
 	ctx := context.Background()

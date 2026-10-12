@@ -68,6 +68,12 @@ func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, m
 		if occupied {
 			continue
 		}
+		// Informer storage may lose the last Pod before its deletion callback
+		// completes the Role plan. Keep the identity until that cleanup finishes.
+		if c.podDeletionPlanActive(ms, group.Name) {
+			c.enqueueModelServingAfter(ms, enqueueAfter)
+			continue
+		}
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
 		expected := revision
 		if ordinal < partition && ms.Status.CurrentRevision != "" {

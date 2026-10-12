@@ -243,6 +243,52 @@ func (c *ModelServingController) podDeletionPlanActive(ms *api.ModelServing, gro
 	return active
 }
 
+// A Role record can disappear before its process-local deletion plan, for
+// example when the enclosing empty group is forgotten or replaced. Finish
+// only the original UIDs and cleanup; absence from the store is not proof of
+// physical deletion and must not authorize deleting a same-name replacement.
+func (c *ModelServingController) resumeOrphanedRoleDeletion(ctx context.Context, ms *api.ModelServing, plan *podDeletionPlan) error {
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
+	if err := c.deletePlannedPods(ctx, ms, plan); err != nil {
+		return err
+	}
+	if handled, err := c.finishDeletionWithReplacement(ctx, ms, plan); err != nil {
+		return err
+	} else if handled {
+		if _, pending := c.deletionPlans.Load(plan.Key); pending {
+			return fmt.Errorf("waiting for original Role UIDs %s/%s/%s", plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+		}
+		c.clearRoleDeletionProgress(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+		return nil
+	}
+	selector := labels.Set{api.GroupNameLabelKey: plan.Key.Group, api.RoleLabelKey: plan.Key.Role, api.RoleIDKey: plan.Key.Instance}
+	pods, err := c.ownedDeletionPods(ctx, ms, selector.AsSelector())
+	if err != nil {
+		return err
+	}
+	if len(pods) > 0 {
+		c.enqueueModelServingAfter(ms, roleDeletionRecheckDelay)
+		return fmt.Errorf("waiting for orphaned Role deletion %s/%s/%s", plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	}
+	if err := c.runRoleDeletePlugins(ctx, ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance); err != nil {
+		return err
+	}
+	deleted, err := c.isRoleDeletedLive(ctx, ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		c.enqueueModelServingAfter(ms, roleDeletionRecheckDelay)
+		return fmt.Errorf("waiting for orphaned Role cleanup %s/%s/%s", plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	}
+	c.deletionPlans.Delete(plan.Key)
+	c.clearRoleDeletionProgress(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	c.enqueueModelServing(ms)
+	return nil
+}
+
 // Retry plans only within the process that started them. A new controller has
 // no plans and therefore converges from current Pods, current configuration and
 // the normal rollout/recovery budgets.
@@ -263,6 +309,8 @@ func (c *ModelServingController) resumePodDeletionPlans(ctx context.Context, ms 
 		var err error
 		if plan.Key.Scope == deleteGroupScope {
 			err = c.deleteServingGroup(ctx, ms, plan.Key.Group)
+		} else if c.store.GetRoleStatus(utils.GetNamespaceName(ms), plan.Key.Group, plan.Key.Role, plan.Key.Instance) == datastore.RoleNotFound {
+			err = c.resumeOrphanedRoleDeletion(ctx, ms, plan)
 		} else {
 			err = c.DeleteRole(ctx, ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 		}
