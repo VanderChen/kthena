@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	"k8s.io/apimachinery/pkg/labels"
+
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -41,21 +43,9 @@ func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, m
 	if err != nil {
 		return nil
 	}
-	partition, _, err := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
-	if err != nil {
-		return err
-	}
 	for _, group := range groups {
 		if group.Status == datastore.ServingGroupDeleting {
 			continue
-		}
-		roles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), group.Name)
-		if err != nil {
-			return err
-		}
-		virtual := true
-		for _, instances := range roles {
-			virtual = virtual && len(instances) == 0
 		}
 		pods, err := c.getPodsByIndex(GroupNameKey, fmt.Sprintf("%s/%s", ms.Namespace, group.Name))
 		if err != nil {
@@ -74,20 +64,56 @@ func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, m
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 			continue
 		}
-		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
-		expected := revision
-		if ordinal < partition && ms.Status.CurrentRevision != "" {
-			expected = ms.Status.CurrentRevision
-		}
-		if virtual && ordinal >= 0 && ordinal < modelServingReplicas(ms) && group.Revision == expected {
-			continue
-		}
 		if err := c.runServingGroupDeletePlugins(ctx, ms, group.Name); err != nil {
 			return err
 		}
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), group.Name)
 	}
 	return nil
+}
+
+// Empty capacity exists only as a status projection. Never insert these
+// records into the store: they have no applied template to preserve when
+// membership becomes positive again. Actual/retiring groups still occupy slots.
+func (c *ModelServingController) emptyServingGroupStatus(ms *api.ModelServing, groups []datastore.ServingGroup, revision string, partition int) ([]datastore.ServingGroup, error) {
+	if !allRolesZero(ms) {
+		return nil, nil
+	}
+	occupied := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		occupied[group.Name] = true
+	}
+	var empty []datastore.ServingGroup
+	// A cold-start Terminating Pod may not have a store record yet. Include
+	// its physical identity (also outside the formal range) without Ready credit.
+	pods, err := c.podsLister.Pods(ms.Namespace).List(labels.Set{api.ModelServingNameLabelKey: ms.Name}.AsSelector())
+	if err != nil {
+		return nil, err
+	}
+	for _, pod := range pods {
+		name := pod.Labels[api.GroupNameLabelKey]
+		if name == "" || occupied[name] || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		occupied[name] = true
+		empty = append(empty, datastore.ServingGroup{Name: name, Revision: utils.ObjectRevision(pod), Status: datastore.ServingGroupCreating})
+	}
+	for ordinal := 0; len(groups)+len(empty) < modelServingReplicas(ms); ordinal++ {
+		name := utils.GenerateServingGroupName(ms.Name, ordinal)
+		if occupied[name] {
+			continue
+		}
+		selected := revision
+		if servingGroupRollout(ms) && ordinal < partition && ms.Status.CurrentRevision != "" {
+			selected = ms.Status.CurrentRevision
+		}
+		status := datastore.ServingGroupRunning
+		if c.podDeletionPlanActive(ms, name) {
+			status = datastore.ServingGroupCreating
+		}
+		empty = append(empty, datastore.ServingGroup{Name: name, Revision: selected, Status: status})
+	}
+	return empty, nil
 }
 
 func allRolesZero(ms *api.ModelServing) bool {

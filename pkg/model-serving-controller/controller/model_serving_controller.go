@@ -935,6 +935,9 @@ func (c *ModelServingController) hasUpdateableOutdatedServingGroup(
 // scaleUpServingGroups fills missing ordinals in [0, expectedCount).
 // Missing ordinals below partition use CurrentRevision; the rest use newRevision.
 func (c *ModelServingController) scaleUpServingGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupList []datastore.ServingGroup, expectedCount int, newRevision string) error {
+	if allRolesZero(ms) {
+		return nil
+	}
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
 	klog.V(4).Infof("scaleUpServingGroups: start for modelServing=%s, existingGroups=%d, expectedCount=%d, partition=%d, newRevision=%s",
 		utils.GetNamespaceName(ms), len(servingGroupList), expectedCount, partition, newRevision)
@@ -2914,10 +2917,38 @@ func (c *ModelServingController) updateModelServingStatus(
 			return err
 		}
 		rolloutActive := pendingSurge || c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
+		// Empty logical capacity has no persistent per-group revision. Project
+		// it for counts/conditions only; subsequent nonempty creation uses the
+		// current partition and the normal historical-template resolver.
+		virtualGroups := sets.New[string]()
+		emptyGroups, err := c.emptyServingGroupStatus(latestMS, groups, revision, partition)
+		if err != nil {
+			return err
+		}
+		for _, group := range emptyGroups {
+			virtualGroups.Insert(group.Name)
+			groups = append(groups, group)
+		}
 		memberChangesPending := false
 		for index := range groups {
 			group := groups[index]
 			_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
+			if virtualGroups.Has(group.Name) {
+				if group.Status != datastore.ServingGroupRunning {
+					progressingGroups = append(progressingGroups, ordinal)
+					memberChangesPending = true
+					continue
+				}
+				available++
+				if group.Revision == revision {
+					updated++
+					updatedGroups = append(updatedGroups, ordinal)
+				} else {
+					currentGroups = append(currentGroups, ordinal)
+					revisionCount[group.Revision]++
+				}
+				continue
+			}
 			if group.Revision != "" {
 				referencedRevisions = append(referencedRevisions, group.Revision)
 			}
@@ -3011,7 +3042,8 @@ func (c *ModelServingController) updateModelServingStatus(
 
 		current := 0
 		for _, group := range groups {
-			if (currentRevision == revision && c.compareServingGroupTemplate(ctx, latestMS, group, revision) == templateEquivalent) ||
+			if (virtualGroups.Has(group.Name) && group.Revision == currentRevision) ||
+				(currentRevision == revision && !virtualGroups.Has(group.Name) && c.compareServingGroupTemplate(ctx, latestMS, group, revision) == templateEquivalent) ||
 				(currentRevision != revision && group.Revision == currentRevision) {
 				current++
 			}

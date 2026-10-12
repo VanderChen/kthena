@@ -9318,6 +9318,9 @@ func TestServingGroupUpdateCreatesSurgeWithoutStoredPhase(t *testing.T) {
 			},
 		},
 	}
+	// Surge is physical capacity for a nonempty template. A role-less fixture
+	// describes logical empty capacity, which must not create stored identities.
+	ms.Spec.Template.Roles = createStandardModelServing(ms.Name, 2, 1).Spec.Template.Roles
 	recordDifferentRevision(t, controller, ms, "old")
 	key := utils.GetNamespaceName(ms)
 	for ordinal := 0; ordinal < 2; ordinal++ {

@@ -267,6 +267,125 @@ func TestEmptyGroupsUseCurrentPartitionAfterExpansion(t *testing.T) {
 	}
 }
 
+func TestEmptyLogicalCapacityWaitsForUnrecordedTerminatingPod(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("empty-unrecorded", 2, 1, 0)
+	ms := old.DeepCopy()
+	ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	c := lifecycleController(t, ms, old)
+	pod := lifecyclePod(t, c, ms, old, 0, "retiring")
+	pod.DeletionTimestamp = ptr.To(metav1.Now())
+	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	c.store.DeleteModelServing(utils.GetNamespaceName(ms))
+	require.NoError(t, c.updateModelServingStatus(ctx, ms, utils.ModelServingRevision(ms), nil))
+	live, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, live.Status.Replicas)
+	require.EqualValues(t, 1, live.Status.AvailableReplicas, "physical occupancy cannot grant empty Ready credit")
+	require.True(t, meta.IsStatusConditionTrue(live.Status.Conditions, string(api.ModelServingProgressing)))
+}
+
+func TestCompletedZeroExpansionUsesFirstApplicableLayout(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		for _, partition := range []int{0, 2, 6} {
+			if mode == api.RoleRollingUpdate && partition != 0 {
+				continue
+			}
+			for _, oldWorkers := range []int32{0, 1} {
+				for _, separateUpdate := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/partition=%d/workers=%d/separate=%t", mode, partition, oldWorkers, separateUpdate), func(t *testing.T) {
+						ctx := context.Background()
+						old := lifecycleMS("zero-layout", 6, 1, 1)
+						old.Spec.RolloutStrategy.Type = mode
+						old.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition = intstrPtr(partition)
+						base := old.Spec.Template.Roles[0].DeepCopy()
+						old.Spec.Template.Roles = nil
+						for _, name := range []string{"p", "d", "f"} {
+							role := base.DeepCopy()
+							role.Name, role.Replicas, role.WorkerReplicas = name, ptr.To[int32](0), oldWorkers
+							role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+							if name == "f" {
+								role.WorkerReplicas = 1
+							}
+							old.Spec.Template.Roles = append(old.Spec.Template.Roles, *role)
+						}
+						old.Status.CurrentRevision = utils.ModelServingRevision(old)
+						old.Status.UpdateRevision = old.Status.CurrentRevision
+						c := lifecycleController(t, old)
+						ms := old.DeepCopy()
+						for step := 0; step < 3; step++ {
+							require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+							live, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+							require.NoError(t, err)
+							require.EqualValues(t, 6, live.Status.AvailableReplicas)
+							require.Equal(t, old.Status.CurrentRevision, live.Status.CurrentRevision)
+							groups, _ := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
+							require.Empty(t, groups, "logical zero capacity must not persist applied identities")
+							require.NoError(t, c.modelServingsInformer.GetIndexer().Update(live))
+							ms = live
+						}
+						ms = ms.DeepCopy()
+						ms.Generation++
+						ms.Spec.Template.Roles[0].WorkerReplicas = 1 - oldWorkers
+						ms.Spec.Template.Roles[1].WorkerReplicas = 1 - oldWorkers
+						publish := func() {
+							_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, ms, metav1.UpdateOptions{})
+							require.NoError(t, err)
+							require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+						}
+						if separateUpdate {
+							publish()
+							require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+							live, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+							require.NoError(t, err)
+							require.Equal(t, old.Status.CurrentRevision, live.Status.CurrentRevision)
+							ms = live.DeepCopy()
+							ms.Generation++
+						}
+						for i := range ms.Spec.Template.Roles {
+							ms.Spec.Template.Roles[i].Replicas = ptr.To[int32](1)
+						}
+						publish()
+						require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(ms).String()))
+						pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+						require.NoError(t, err)
+						wantCount := 0
+						for group := 0; group < 6; group++ {
+							for _, name := range []string{"p", "d", "f"} {
+								workers := 1 - oldWorkers
+								if group < partition {
+									workers = oldWorkers
+									for _, pod := range pods.Items {
+										if pod.Labels[api.GroupNameLabelKey] == fmt.Sprintf("zero-layout-%d", group) {
+											require.Equal(t, old.Status.CurrentRevision, utils.ObjectRevision(&pod))
+										}
+									}
+								}
+								if name == "f" {
+									workers = 1
+								}
+								for ordinal := 0; ordinal <= int(workers); ordinal++ {
+									_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, fmt.Sprintf("zero-layout-%d-%s-0-%d", group, name, ordinal), metav1.GetOptions{})
+									require.NoError(t, err)
+									wantCount++
+								}
+							}
+						}
+						require.Len(t, pods.Items, wantCount, "first creation uses the applicable layout, without surge or an old-layout intermediate")
+						for _, pod := range pods.Items {
+							_, ordinal := utils.GetParentNameAndOrdinal(pod.Labels[api.GroupNameLabelKey])
+							require.Less(t, ordinal, 6)
+							if ordinal >= partition {
+								require.Equal(t, utils.ModelServingRevision(ms), utils.ObjectRevision(&pod))
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
 func TestProtectedSingleRoleRecoveryKeepsGroupTemplate(t *testing.T) {
 	ctx := context.Background()
 	old := lifecycleMS("protected-recovery", 2, 1, 0)
