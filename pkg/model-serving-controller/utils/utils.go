@@ -459,7 +459,10 @@ func SetConditionWithRolloutAndProgressState(
 		if cur.Type == newCond.Type {
 			continue
 		}
-		if exclusiveConditionTypes(*cur, newCond) && cur.Status == metav1.ConditionTrue {
+		// A completed partition stop may still be recovering or scaling. Retire
+		// the previous rollout condition even when Progressing remains active.
+		rolloutStopped := !rolloutActive && cur.Type == string(workloadv1alpha1.ModelServingUpdateInProgress)
+		if (exclusiveConditionTypes(*cur, newCond) || rolloutStopped) && cur.Status == metav1.ConditionTrue {
 			cur.Status = metav1.ConditionFalse
 			cur.LastTransitionTime = metav1.Now()
 			cur.ObservedGeneration = ms.Generation

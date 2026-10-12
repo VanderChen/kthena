@@ -2892,6 +2892,59 @@ func (c *ModelServingController) UpdateModelServingStatus(ms *workloadv1alpha1.M
 	return c.updateModelServingStatus(ctx, ms, revision, rolloutPolicy)
 }
 
+// hasTemplateRolloutWork reports remaining updates in the active rollout scope.
+// A protected old Role keeps the group's full-revision accounting unchanged,
+// but does not keep UpdateInProgress active after the partition stop is reached.
+func (c *ModelServingController) hasTemplateRolloutWork(
+	ctx context.Context,
+	ms *workloadv1alpha1.ModelServing,
+	groups []datastore.ServingGroup,
+	revision string,
+	partition int,
+) (bool, error) {
+	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate {
+		return c.hasUpdateableOutdatedServingGroup(ctx, ms, groups, revision, partition), nil
+	}
+	for _, group := range groups {
+		rolesByName, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), group.Name)
+		if err != nil {
+			return false, err
+		}
+		for _, roleSpec := range ms.Spec.Template.Roles {
+			effectivePartition, _, err := c.getPartition(rolePartition(ms, roleSpec), roleReplicas(roleSpec))
+			if err != nil {
+				return false, fmt.Errorf("failed to resolve partition for role %s: %w", roleSpec.Name, err)
+			}
+			for _, role := range rolesByName[roleSpec.Name] {
+				_, ordinal := utils.GetParentNameAndOrdinal(role.Name)
+				if ordinal < effectivePartition {
+					continue
+				}
+				// Deleting old instances still represent unfinished work. Candidate
+				// selection's budget, readiness and coordination filters do not apply.
+				switch c.compareRoleTemplate(ctx, ms, group, roleSpec.Name, *role) {
+				case templateDifferent:
+					return true, nil
+				case templateUnknown:
+					// Unresolved history is not proof of a partition stop. Preserve
+					// the existing group classification until observations resolve.
+					if c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
+						return true, nil
+					}
+				}
+			}
+			delete(rolesByName, roleSpec.Name)
+		}
+		// Older objects may still be retiring a Role removed from the template.
+		for _, roles := range rolesByName {
+			if len(roles) > 0 {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 func (c *ModelServingController) updateModelServingStatus(
 	ctx context.Context,
 	ms *workloadv1alpha1.ModelServing,
@@ -2929,7 +2982,11 @@ func (c *ModelServingController) updateModelServingStatus(
 		if err != nil {
 			return err
 		}
-		rolloutActive := pendingSurge || c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
+		rolloutActive, err := c.hasTemplateRolloutWork(ctx, latestMS, groups, revision, partition)
+		if err != nil {
+			return err
+		}
+		rolloutActive = pendingSurge || rolloutActive
 		// Empty logical capacity has no persistent per-group revision. Project
 		// it for counts/conditions only; subsequent nonempty creation uses the
 		// current partition and the normal historical-template resolver.
