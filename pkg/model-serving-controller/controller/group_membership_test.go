@@ -491,3 +491,246 @@ func TestReconciliationHasNoMemberConfigMapAPIDependency(t *testing.T) {
 		require.NotEqual(t, "configmaps", action.GetResource().Resource)
 	}
 }
+func publishZeroScaleTestModelServing(t *testing.T, c *ModelServingController, ms *api.ModelServing) {
+	t.Helper()
+	_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(context.Background(), ms, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(ms))
+}
+
+func TestZeroScaleExpansionBeforeQueuedEmptyReconcile(t *testing.T) {
+	for _, settleZero := range []bool{false, true} {
+		t.Run(fmt.Sprintf("settleZero=%t", settleZero), func(t *testing.T) {
+			ctx := context.Background()
+			old := lifecycleMS("review-zero", 6, 1, 1)
+			old.ResourceVersion = "1"
+			old.Spec.Template.Roles[0].WorkerTemplate = old.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+			old.Status.CurrentRevision = utils.ModelServingRevision(old)
+			old.Status.UpdateRevision = old.Status.CurrentRevision
+			c := lifecycleController(t, old)
+			var oldPods []*corev1.Pod
+			for i := 0; i < 6; i++ {
+				oldPods = append(oldPods, lifecyclePod(t, c, old, old, i, fmt.Sprintf("uid-%d", i)))
+			}
+			zero := old.DeepCopy()
+			zero.Generation++
+			zero.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+			publishZeroScaleTestModelServing(t, c, zero)
+			require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+			// Deliver all physical deletions and their callbacks while desired membership is zero.
+			// They finish Role deletion plans and enqueue another reconcile, which has not run yet.
+			for _, p := range oldPods {
+				require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
+				c.deletePod(p)
+			}
+			pods, err := c.kubeClientSet.CoreV1().Pods(zero.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			require.Empty(t, pods.Items)
+			for i := 0; i < 6; i++ {
+				require.False(t, c.podDeletionPlanActive(zero, fmt.Sprintf("review-zero-%d", i)))
+			}
+			if settleZero {
+				require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+			}
+			next := zero.DeepCopy()
+			next.Generation++
+			next.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+			next.Spec.Template.Roles[0].WorkerReplicas = 1
+			publishZeroScaleTestModelServing(t, c, next)
+			require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(next).String()))
+			pods, err = c.kubeClientSet.CoreV1().Pods(next.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			oldCount, newCount := 0, 0
+			for _, p := range pods.Items {
+				if utils.ObjectRevision(&p) == utils.ModelServingRevision(old) {
+					oldCount++
+				} else {
+					newCount++
+				}
+			}
+			t.Logf("first creation: old-layout pods=%d, target-layout pods=%d", oldCount, newCount)
+			require.Zero(t, oldCount, "fully deleted zero members must not recreate the old layout")
+			require.Len(t, pods.Items, 12)
+		})
+	}
+}
+
+func TestZeroScaleRetiresPodGroups(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("review-pg", 2, 1, 0)
+	old.ResourceVersion = "1"
+	c := lifecycleController(t, old)
+	pg := map[string]bool{}
+	c.podGroupManager = &fakePodGroupManager{
+		createOrUpdateFunc: func(_ context.Context, _ *api.ModelServing, name string) (error, time.Duration) {
+			pg[name] = true
+			return nil, 0
+		},
+		deleteFunc: func(_ context.Context, _ *api.ModelServing, name string) error { delete(pg, name); return nil },
+	}
+	var pods []*corev1.Pod
+	for i := 0; i < 2; i++ {
+		pods = append(pods, lifecyclePod(t, c, old, old, i, fmt.Sprintf("uid-%d", i)))
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(old).String()))
+	require.Len(t, pg, 2)
+	zero := old.DeepCopy()
+	zero.Generation++
+	zero.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	publishZeroScaleTestModelServing(t, c, zero)
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+	for _, p := range pods {
+		require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
+		c.deletePod(p)
+	}
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+	zero = zero.DeepCopy()
+	zero.Generation++
+	zero.Spec.Replicas = ptr.To[int32](0)
+	publishZeroScaleTestModelServing(t, c, zero)
+	for i := 0; i < 3; i++ {
+		require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+	}
+	t.Logf("remaining PodGroups after SG scale to zero: %v", pg)
+	require.Empty(t, pg, "Scaling all SGs down must delete their PodGroups")
+}
+
+func TestZeroScaleReappliesProtectedBaseline(t *testing.T) {
+	ctx := context.Background()
+	baseline := lifecycleMS("review-protected", 3, 1, 0)
+	baseline.ResourceVersion = "1"
+	intermediate := baseline.DeepCopy()
+	intermediate.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
+	intermediate.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition = intstrPtr(3)
+	intermediate.Status.CurrentRevision = utils.ModelServingRevision(baseline)
+	intermediate.Status.UpdateRevision = utils.ModelServingRevision(intermediate)
+	c := lifecycleController(t, intermediate, baseline)
+	var oldPods []*corev1.Pod
+	for i := 0; i < 3; i++ {
+		template := intermediate
+		if i == 2 {
+			template = baseline
+		}
+		oldPods = append(oldPods, lifecyclePod(t, c, intermediate, template, i, fmt.Sprintf("uid-%d", i)))
+	}
+	zero := intermediate.DeepCopy()
+	zero.Generation++
+	zero.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+	publishZeroScaleTestModelServing(t, c, zero)
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+	for _, p := range oldPods {
+		require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
+		c.deletePod(p)
+	}
+	for i := 0; i < 3; i++ {
+		require.False(t, c.podDeletionPlanActive(zero, fmt.Sprintf("review-protected-%d", i)))
+	}
+	next := zero.DeepCopy()
+	next.Generation++
+	next.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+	next.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v3"
+	publishZeroScaleTestModelServing(t, c, next)
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(next).String()))
+	pods, err := c.kubeClientSet.CoreV1().Pods(next.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for _, p := range pods.Items {
+		t.Logf("%s newly created with %s", p.Name, p.Spec.Containers[0].Image)
+	}
+	require.Len(t, pods.Items, 3)
+	for _, p := range pods.Items {
+		require.Equal(t, "test:v1", p.Spec.Containers[0].Image, "protected slot is a new complete group after fully completed zero")
+	}
+}
+
+func TestZeroScaleSynchronousCompletionForgetsGroup(t *testing.T) {
+	ctx := context.Background()
+	old := lifecycleMS("zero-sync", 2, 1, 0)
+	old.ResourceVersion = "1"
+	second := *old.Spec.Template.Roles[0].DeepCopy()
+	second.Name = "decode"
+	old.Spec.Template.Roles = append(old.Spec.Template.Roles, second)
+	c := lifecycleController(t, old)
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(old).String()))
+	pods, err := c.kubeClientSet.CoreV1().Pods(old.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pods.Items, 4)
+	for i := range pods.Items {
+		require.NoError(t, c.podsInformer.GetIndexer().Add(&pods.Items[i]))
+	}
+	// Cache removal can precede the queued callback. Complete each deletion
+	// synchronously, without allowing cleanup to invalidate the Role loop.
+	c.kubeClientSet.(*kubefake.Clientset).PrependReactor("delete", "pods", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		name := action.(kubetesting.DeleteAction).GetName()
+		pod, err := c.podsLister.Pods(old.Namespace).Get(name)
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+		return false, nil, nil
+	})
+	zero := old.DeepCopy()
+	zero.Generation++
+	for i := range zero.Spec.Template.Roles {
+		zero.Spec.Template.Roles[i].Replicas = ptr.To[int32](0)
+	}
+	publishZeroScaleTestModelServing(t, c, zero)
+	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
+	groups, _ := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(zero))
+	require.Empty(t, groups, "all identities are retired in the same reconcile")
+	for i := 0; i < 2; i++ {
+		require.False(t, c.podDeletionPlanActive(zero, fmt.Sprintf("zero-sync-%d", i)))
+	}
+}
+
+func TestZeroScaleRetirementKeepsOccupiedOrStaleGroups(t *testing.T) {
+	for _, boundary := range []string{"positive", "another-role-positive", "terminating", "stale-intent", "podgroup-error"} {
+		t.Run(boundary, func(t *testing.T) {
+			ctx := context.Background()
+			old := lifecycleMS("zero-boundary", 1, 1, 0)
+			old.ResourceVersion = "1"
+			ms := old.DeepCopy()
+			ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](0)
+			if boundary == "positive" {
+				ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+			} else if boundary == "another-role-positive" {
+				second := *old.Spec.Template.Roles[0].DeepCopy()
+				second.Name = "decode"
+				ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, second)
+			}
+			c := lifecycleController(t, ms, old)
+			key := utils.GetNamespaceName(ms)
+			group := "zero-boundary-0"
+			c.store.AddServingGroup(key, 0, utils.ModelServingRevision(old))
+			deletedPodGroup := false
+			c.podGroupManager = &fakePodGroupManager{deleteFunc: func(context.Context, *api.ModelServing, string) error {
+				if boundary == "podgroup-error" {
+					return fmt.Errorf("injected PodGroup deletion error")
+				}
+				deletedPodGroup = true
+				return nil
+			}}
+			if boundary == "terminating" {
+				pod := lifecyclePod(t, c, ms, old, 0, "retiring")
+				pod.DeletionTimestamp = ptr.To(metav1.Now())
+				require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+			} else if boundary == "stale-intent" {
+				live := ms.DeepCopy()
+				live.Generation++
+				live.Spec.Template.Roles[0].Replicas = ptr.To[int32](1)
+				_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, live, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			}
+			err := c.forgetEmptyServingGroups(ctx, ms, utils.ModelServingRevision(ms))
+			if boundary == "podgroup-error" || boundary == "stale-intent" {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			require.NotEqual(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group))
+			require.False(t, deletedPodGroup)
+			if boundary == "podgroup-error" {
+				c.podGroupManager = &fakePodGroupManager{}
+				require.NoError(t, c.forgetEmptyServingGroups(ctx, ms, utils.ModelServingRevision(ms)))
+				require.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, group))
+			}
+		})
+	}
+}

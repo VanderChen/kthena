@@ -39,6 +39,9 @@ func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, m
 	if !allRolesZero(ms) {
 		return nil
 	}
+	if err := c.checkRolloutIntent(ctx, ms); err != nil {
+		return err
+	}
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
 	if err != nil {
 		return nil
@@ -63,6 +66,9 @@ func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, m
 		if c.podDeletionPlanActive(ms, group.Name) {
 			c.enqueueModelServingAfter(ms, enqueueAfter)
 			continue
+		}
+		if err := c.podGroupManager.DeletePodGroup(ctx, ms, group.Name); err != nil {
+			return err
 		}
 		if err := c.runServingGroupDeletePlugins(ctx, ms, group.Name); err != nil {
 			return err

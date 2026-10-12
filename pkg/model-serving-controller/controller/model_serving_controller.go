@@ -719,6 +719,12 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		}
 	}
 
+	// Member reconciliation may have completed the last zero-scale deletion.
+	// Retire its identity now, before a subsequent positive spec can reuse it.
+	if err := c.forgetEmptyServingGroups(ctx, ms, revision); err != nil {
+		return err
+	}
+
 	// 4. Calculate and update the overall condition and replica status fields of the ModelServing.
 	if err := c.updateModelServingStatus(ctx, ms, revision, rolloutPolicy); err != nil {
 		return fmt.Errorf("failed to update status of ms %s/%s: %v", namespace, name, err)
@@ -2650,7 +2656,14 @@ func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.M
 	if roleName != "" && roleID != "" {
 		// check role status
 		if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
-			c.reconcileDeletingRole(context.TODO(), ms, servingGroupName, roleName, roleID)
+			if c.reconcileDeletingRole(context.TODO(), ms, servingGroupName, roleName, roleID) {
+				// This entry point is used only by deletion callbacks, outside
+				// the main reconcile's group/Role iteration and under its lock.
+				if err := c.forgetEmptyServingGroups(context.TODO(), ms, ""); err != nil {
+					klog.ErrorS(err, "Failed to retire empty ServingGroups after Role deletion", "modelServing", klog.KObj(ms))
+					c.enqueueModelServingAfter(ms, enqueueAfter)
+				}
+			}
 			return true
 		}
 	}
