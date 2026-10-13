@@ -234,14 +234,8 @@ func (f *memberFixture) create(t *testing.T) {
 		f.req.Pod = pod
 		f.client.ClearActions()
 		require.NoError(t, f.plugin.OnPodCreate(context.Background(), f.req))
-		if _, found := pod.Annotations["test/ranktable"]; found {
-			require.Len(t, pod.Spec.Volumes, 1)
-			require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
-		} else {
-			require.Empty(t, pod.Spec.Volumes)
-			require.Empty(t, pod.Spec.Containers[0].VolumeMounts)
-			require.Empty(t, f.client.Actions()) // No CM preparation for a nonparticipant.
-		}
+		require.Len(t, pod.Spec.Volumes, 1)
+		require.Len(t, pod.Spec.Containers[0].VolumeMounts, 1)
 		_, err := f.client.CoreV1().Pods("test").Create(context.Background(), pod, metav1.CreateOptions{})
 		require.NoError(t, err)
 	}
@@ -340,24 +334,56 @@ func TestBothPluginsKeepAnnotatedDataRequirements(t *testing.T) {
 	}
 }
 
-func TestBothPluginsDoNotCreateWithoutParticipants(t *testing.T) {
+func TestBothPluginsPrepareMountBeforeAnnotationAndRefreshParticipants(t *testing.T) {
 	for _, podIP := range []bool{false, true} {
 		for _, group := range []bool{false, true} {
 			t.Run(fmt.Sprintf("podIP=%v/group=%v", podIP, group), func(t *testing.T) {
 				f := newMemberFixture(t, podIP, group, 0, false)
+				f.pods[0].Spec.InitContainers = []corev1.Container{{Name: "init", Image: "a"}}
+				f.req.Role.EntryTemplate.Spec.InitContainers = f.pods[0].Spec.InitContainers
+				f.req.ModelServing.Spec.Template.Roles[0] = *f.req.Role.DeepCopy()
+				f.pods[0].Labels[workloadv1alpha1.RoleTemplateHashLabelKey] = utils.CalRoleTemplateHash(*f.req.Role)
 				f.create(t)
+				require.Len(t, f.pods[0].Spec.InitContainers[0].VolumeMounts, 1)
+				require.Equal(t, f.scope.Name, f.pods[0].Spec.Volumes[0].ConfigMap.Name)
 				require.NoError(t, f.plugin.OnRoleSync(context.Background(), f.req))
-				_, err := f.client.CoreV1().ConfigMaps("test").Get(context.Background(), f.scope.Name, metav1.GetOptions{})
-				require.True(t, apierrors.IsNotFound(err))
-				// An existing valid table becomes empty Initializing if the last
-				// participant disappears; no Completed empty table is published.
+				f.check(t, f.initializing, 0)
+				// The device annotation arrives after Pod creation. The mount is
+				// already present while communication membership begins here.
 				pod := f.pods[0].DeepCopy()
 				pod.Annotations["test/ranktable"] = `{"server":"shared-server"}`
 				pod.Status = corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "192.0.2.1"}
+				_, err := f.client.CoreV1().Pods("test").Update(context.Background(), pod, metav1.UpdateOptions{})
+				require.NoError(t, err)
+				f.req.Pod = pod
+				require.NoError(t, f.plugin.OnPodRunning(context.Background(), f.req))
+				f.req.Pod = nil
+				require.NoError(t, f.plugin.OnRoleSync(context.Background(), f.req))
+				cm := f.check(t, f.completed, 1)
+				// Repeated creation hooks, including an unannotated request, must
+				// not reset the published data or duplicate any mount.
+				f.req.Pod = f.pods[0]
+				require.NoError(t, f.plugin.OnPodCreate(context.Background(), f.req))
+				require.NoError(t, f.plugin.OnPodCreate(context.Background(), f.req))
+				require.Equal(t, cm.Data, f.check(t, f.completed, 1).Data)
+				require.Len(t, f.req.Pod.Spec.Volumes, 1)
+				require.Len(t, f.req.Pod.Spec.Containers[0].VolumeMounts, 1)
+				require.Len(t, f.req.Pod.Spec.InitContainers[0].VolumeMounts, 1)
+				f.req.Pod = nil
+				// Refresh still consumes updated annotation data / Pod IP.
+				pod.Annotations["test/ranktable"] = `{"server":"updated-server"}`
+				pod.Status.PodIP = "192.0.2.2"
 				_, err = f.client.CoreV1().Pods("test").Update(context.Background(), pod, metav1.UpdateOptions{})
 				require.NoError(t, err)
 				require.NoError(t, f.plugin.OnRoleSync(context.Background(), f.req))
-				cm := f.check(t, f.completed, 1)
+				updated := f.check(t, f.completed, 1)
+				server := "updated-server"
+				if podIP {
+					server = "192.0.2.2"
+				}
+				require.Contains(t, updated.Data[f.scope.Filename], server)
+				// Removing the final participant empties the existing table;
+				// Refresh alone still must not create a table with no participants.
 				delete(pod.Annotations, "test/ranktable")
 				_, err = f.client.CoreV1().Pods("test").Update(context.Background(), pod, metav1.UpdateOptions{})
 				require.NoError(t, err)

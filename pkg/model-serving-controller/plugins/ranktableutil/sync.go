@@ -176,7 +176,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 				participants = append(participants, pod)
 			}
 		}
-		// Prepare is called for an annotated Pod before it exists in the API.
+		// Prepare runs before Pod creation, possibly before device annotations.
 		// Other callbacks must not create a table without any participants.
 		if mode != Prepare && len(participants) == 0 && cm == nil {
 			return nil

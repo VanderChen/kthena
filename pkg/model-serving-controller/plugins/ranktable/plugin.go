@@ -83,9 +83,8 @@ func (p *RanktablePlugin) OnPodCreate(ctx context.Context, req *plugins.HookRequ
 	if err != nil {
 		return err
 	}
-	if _, found := req.Pod.Annotations[template.PodAnnotationName]; !found {
-		return nil
-	}
+	// Device annotations may be added after this pre-API hook. Prepare and
+	// mount now; annotation-based membership is resolved when syncing data.
 	scope := ranktableutil.NewScope(req, template.Level == RoleLevelRanktable, template.Filename)
 	if err := p.syncRanktable(ctx, req, template, ranktableutil.Prepare); err != nil {
 		return err
