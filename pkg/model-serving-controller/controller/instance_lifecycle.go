@@ -37,6 +37,7 @@ const (
 	groupInstanceAnnotation = "workload.kthena.io/group-instance"
 	roleInstanceAnnotation  = "workload.kthena.io/role-instance"
 	roleCreatedAnnotation   = "workload.kthena.io/role-created"
+	deletionScopeAnnotation = "workload.kthena.io/deletion-scope"
 )
 
 // Informer callbacks and workqueue reconciles both change lifecycle state. The
@@ -98,6 +99,9 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 }
 
 func (c *ModelServingController) stalePodDeletion(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) bool {
+	if pod.Annotations[deletionScopeAnnotation] == deleteRoleScope || pod.Annotations[deletionScopeAnnotation] == deleteGroupScope {
+		return true
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
@@ -173,7 +177,7 @@ func (c *ModelServingController) instanceAnnotations(ctx context.Context, ms *wo
 		if utils.GetRoleName(pod) != role || utils.GetRoleID(pod) != instance {
 			continue
 		}
-		if pod.DeletionTimestamp != nil {
+		if pod.DeletionTimestamp != nil || pod.Annotations[deletionScopeAnnotation] != "" {
 			return nil, fmt.Errorf("Role %s/%s still has retiring Pod UID %s", group, instance, pod.UID)
 		}
 		if !roleFound {
@@ -194,6 +198,7 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 	// Do not propagate the retired completion marker from templates/plugins.
 	// Completion evidence exists only in this controller process.
 	delete(pod.Annotations, roleCreatedAnnotation)
+	delete(pod.Annotations, deletionScopeAnnotation)
 }
 
 // Record that all members were created, independently of whether they are

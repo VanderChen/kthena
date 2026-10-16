@@ -130,12 +130,13 @@ func TestInstanceLifecycle_RenderingCannotSupplyLifecycleEvidence(t *testing.T) 
 			role.WorkerReplicas = 1
 			role.EntryTemplate.Metadata = &api.Metadata{Annotations: map[string]string{
 				roleCreatedAnnotation:   "true",
+				deletionScopeAnnotation: deleteGroupScope,
 				groupInstanceAnnotation: "template-group", roleInstanceAnnotation: "template-role",
 				surgeAnnotation: surgeServingGroup, "custom.example/config": "preserved",
 			}}
 			role.WorkerTemplate = role.EntryTemplate.DeepCopy()
 			if plugin {
-				ms.Spec.Plugins = []api.PluginSpec{{Name: "demo-pod-tweaks", Type: api.PluginTypeBuiltIn, Config: &extensions.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/role-created":"true","workload.kthena.io/group-instance":"plugin-group","workload.kthena.io/role-instance":"plugin-role","modelserving.volcano.sh/surge":"serving-group","custom.example/plugin":"preserved"}}`)}}}
+				ms.Spec.Plugins = []api.PluginSpec{{Name: "demo-pod-tweaks", Type: api.PluginTypeBuiltIn, Config: &extensions.JSON{Raw: []byte(`{"annotations":{"workload.kthena.io/deletion-scope":"ServingGroup","workload.kthena.io/role-created":"true","workload.kthena.io/group-instance":"plugin-group","workload.kthena.io/role-instance":"plugin-role","modelserving.volcano.sh/surge":"serving-group","custom.example/plugin":"preserved"}}`)}}}
 			}
 			c := lifecycleController(t, ms)
 			require.NoError(t, c.CreatePodsByRole(ctx, *role.DeepCopy(), ms, 0, 0, utils.ModelServingRevision(ms), utils.CalRoleTemplateHash(*role), ""))
@@ -147,6 +148,7 @@ func TestInstanceLifecycle_RenderingCannotSupplyLifecycleEvidence(t *testing.T) 
 				created++
 				pod := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
 				require.Empty(t, pod.Annotations[roleCreatedAnnotation], "completion must follow actual creation")
+				require.Empty(t, pod.Annotations[deletionScopeAnnotation], "templates/plugins cannot authorize deletion")
 				require.Empty(t, pod.Annotations[surgeAnnotation])
 				require.NotEmpty(t, pod.Annotations[groupInstanceAnnotation])
 				require.NotContains(t, []string{"template-group", "plugin-group"}, pod.Annotations[groupInstanceAnnotation])

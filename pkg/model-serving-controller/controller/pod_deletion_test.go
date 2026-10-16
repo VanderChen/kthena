@@ -157,7 +157,7 @@ func TestOrphanedRoleDeletionRetainsUIDAndCleanupBoundaries(t *testing.T) {
 	}
 }
 
-func TestPodDeletionPlanIsProcessLocal(t *testing.T) {
+func TestPodDeletionScopeRestoresOriginalUIDAfterRestart(t *testing.T) {
 	ctx := context.Background()
 	ms := lifecycleMS("restart-fact", 1, 1, 0)
 	ms.ResourceVersion = "1"
@@ -187,18 +187,16 @@ func TestPodDeletionPlanIsProcessLocal(t *testing.T) {
 	_, err = kube.CoreV1().Pods(ms.Namespace).Get(ctx, entry.Name, metav1.GetOptions{})
 	require.True(t, apierrors.IsNotFound(err))
 
-	// A restarted controller has no old batch to resume. The surviving member
-	// is current fact and must not receive another DELETE from the old plan.
+	// The marker on the surviving original UID restores the interrupted scope.
 	c.deletionPlans = sync.Map{}
 	c.store = datastore.New()
+	kube.ReactionChain = kube.ReactionChain[1:]
 	kube.ClearActions()
+	require.NoError(t, c.restoreDeletionIntents(ctx, ms))
 	require.NoError(t, c.resumePodDeletionPlans(ctx, ms))
-	got, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, worker.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, worker.UID, got.UID)
-	for _, action := range kube.Actions() {
-		require.False(t, action.Matches("delete", "pods"))
-	}
+	_, err = kube.CoreV1().Pods(ms.Namespace).Get(ctx, worker.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+	require.True(t, lifecycleDeletionMatches(c, worker))
 }
 
 func TestPodDeletionPlanNeverAbsorbsReplacementUID(t *testing.T) {
@@ -264,7 +262,7 @@ func TestPodDeletionPlanNeedsNoMemberConfigMap(t *testing.T) {
 	}
 }
 
-func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t *testing.T) {
+func TestPartialServingGroupDeletionRestartFinishesMarkedSurvivor(t *testing.T) {
 	ctx := context.Background()
 	old := lifecycleMS("partial-restart", 1, 1, 0)
 	old.ResourceVersion = "1"
@@ -272,6 +270,7 @@ func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t 
 	decode.Name = "decode"
 	old.Spec.Template.Roles = append(old.Spec.Template.Roles, decode)
 	ms := old.DeepCopy()
+	ms.Status.CurrentRevision = utils.ModelServingRevision(old)
 	ms.Spec.RecoveryPolicy = api.ServingGroupRecreate
 	ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "test:v2"
 	ms.Spec.Template.Roles[1].EntryTemplate.Spec.Containers[0].Image = "test:v2"
@@ -307,8 +306,7 @@ func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t 
 	require.Error(t, c.deletePlannedPods(ctx, ms, plan))
 	require.NoError(t, c.podsInformer.GetIndexer().Delete(prefill))
 
-	// Process restart: no deletion plan survives. Rebuild cache from live Pods,
-	// then reconcile the missing protected Role from historical A.
+	// Process restart: restore the marker on the remaining original decode UID.
 	c.deletionPlans = sync.Map{}
 	c.store = datastore.New()
 	liveDecode, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, decodePod.Name, metav1.GetOptions{})
@@ -317,19 +315,21 @@ func TestPartialServingGroupDeletionRestartRefillsMissingRoleAndKeepsSurvivor(t 
 	c.syncAll()
 	kube.ReactionChain = kube.ReactionChain[1:]
 	kube.ClearActions()
+	require.NoError(t, c.restoreDeletionIntents(ctx, ms))
+	require.NoError(t, c.resumePodDeletionPlans(ctx, ms))
+	require.True(t, lifecycleDeletionMatches(c, decodePod), "finish the original whole-group deletion after restart")
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(liveDecode))
+	require.NoError(t, c.resumePodDeletionPlans(ctx, ms))
 	require.NoError(t, c.syncModelServing(ctx, ms.Namespace+"/"+ms.Name))
 
 	gotDecode, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, decodePod.Name, metav1.GetOptions{})
 	require.NoError(t, err)
-	require.Equal(t, decodePod.UID, gotDecode.UID)
+	require.NotEqual(t, decodePod.UID, gotDecode.UID)
+	require.Equal(t, "test:v1", gotDecode.Spec.Containers[0].Image)
+	require.Empty(t, gotDecode.Annotations[deletionScopeAnnotation])
 	restored, err := kube.CoreV1().Pods(ms.Namespace).Get(ctx, prefill.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, "test:v1", restored.Spec.Containers[0].Image, "partition-protected refill uses historical template")
-	for _, action := range kube.Actions() {
-		if action.Matches("delete", "pods") {
-			require.NotEqual(t, decodePod.Name, action.(kubetesting.DeleteAction).GetName(), "restart must not replay the old SG batch")
-		}
-	}
 }
 
 func intstrPtr(value int) *intstr.IntOrString {

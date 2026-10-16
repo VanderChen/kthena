@@ -325,6 +325,15 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 	}
 
 	defer c.lifecycle.lock(ms.Namespace + "/" + ms.Name)()
+	// Release the deleted owner's plans even when its callback arrives after a
+	// same-name replacement. Never remove the replacement's plans or store.
+	c.deletionPlans.Range(func(key, _ interface{}) bool {
+		planKey := key.(podDeletionPlanKey)
+		if planKey.Owner == utils.GetNamespaceName(ms) && planKey.UID == ms.UID {
+			c.deletionPlans.Delete(key)
+		}
+		return true
+	})
 	if latest, err := c.modelServingLister.ModelServings(ms.Namespace).Get(ms.Name); err == nil && latest.UID != ms.UID {
 		return
 	}
@@ -651,6 +660,7 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	ms, err := c.modelServingLister.ModelServings(namespace).Get(name)
 	if apierrors.IsNotFound(err) {
 		klog.V(4).Infof("%v has been deleted", key)
+		c.prunePodDeletionPlans(types.NamespacedName{Namespace: namespace, Name: name}, "")
 		return nil
 	}
 	if err != nil {
@@ -658,6 +668,14 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 
 	ms = ms.DeepCopy()
+	if ms.DeletionTimestamp != nil {
+		c.prunePodDeletionPlans(utils.GetNamespaceName(ms), "")
+		return nil
+	}
+	c.prunePodDeletionPlans(utils.GetNamespaceName(ms), ms.UID)
+	if err := c.restoreDeletionIntents(ctx, ms); err != nil {
+		return err
+	}
 	if err := c.resumePodDeletionPlans(ctx, ms); err != nil {
 		return err
 	}
@@ -2368,7 +2386,7 @@ func (c *ModelServingController) recoverPodAfterGrace(ctx context.Context, ms *w
 	if err := c.checkRolloutIntent(ctx, latestMS); err != nil {
 		return 0, err
 	}
-	if c.podDeletionPlanActive(latestMS, latestPod.Labels[workloadv1alpha1.GroupNameLabelKey]) {
+	if c.podDeletionPlanCoversPod(latestMS, latestPod) {
 		return time.Second, nil
 	}
 	options := metav1.NewPreconditionDeleteOptions(string(pod.UID))
@@ -3525,8 +3543,8 @@ func (c *ModelServingController) createPod(
 }
 
 func (c *ModelServingController) deleteConflictingPod(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) error {
-	if c.podDeletionPlanActive(ms, pod.Labels[workloadv1alpha1.GroupNameLabelKey]) {
-		return fmt.Errorf("ServingGroup %s has an active Pod deletion plan", pod.Labels[workloadv1alpha1.GroupNameLabelKey])
+	if c.podDeletionPlanCoversPod(ms, pod) {
+		return fmt.Errorf("Pod %s is covered by an active Pod deletion plan", pod.Name)
 	}
 	invalidateRolloutPodSnapshot(ctx)
 	deleteOptions := metav1.DeleteOptions{}

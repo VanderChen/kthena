@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"sync/atomic"
@@ -46,10 +47,8 @@ type podDeletionPlanKey struct {
 	Instance string
 }
 
-// podDeletionPlan exists only while this controller process is running. It
-// keeps retries within one Role/ServingGroup recovery bound to the UIDs that
-// were selected before the first DELETE. A controller restart intentionally
-// discards the plan and reconciles from the Pods that still exist.
+// podDeletionPlan keeps retries bound to the UIDs selected before the first
+// DELETE. After a restart, only surviving marked UIDs restore this plan.
 type podDeletionPlan struct {
 	Key     podDeletionPlanKey
 	Pods    []corev1.Pod
@@ -135,6 +134,9 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 			return err
 		}
 	}
+	if err := c.markPodDeletionPlan(ctx, ms, plan); err != nil {
+		return err
+	}
 	for i := range plan.Pods {
 		original := &plan.Pods[i]
 		pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
@@ -164,6 +166,94 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 			plan.Started.Store(true)
 		}
 		return err
+	}
+	return nil
+}
+
+// Mark the entire selected set before sending DELETE. The marker both fences
+// delayed normal-deletion callbacks and allows a new process to finish these
+// same Pod identities without retaining a separate transaction object.
+func (c *ModelServingController) markPodDeletionPlan(ctx context.Context, ms *api.ModelServing, plan *podDeletionPlan) error {
+	for i := range plan.Pods {
+		original := &plan.Pods[i]
+		pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if pod.UID != original.UID || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		if pod.Annotations[deletionScopeAnnotation] == plan.Key.Scope || pod.Annotations[deletionScopeAnnotation] == deleteGroupScope {
+			continue
+		}
+		patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
+			"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
+			"annotations": map[string]string{deletionScopeAnnotation: plan.Key.Scope},
+		}})
+		if err != nil {
+			return err
+		}
+		if _, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// Restore only marked, current-owner Pod UIDs. Unmarked replacements and
+// unrelated members never become part of an old deletion after a restart.
+func (c *ModelServingController) restoreDeletionIntents(ctx context.Context, ms *api.ModelServing) error {
+	pods, err := c.ownedDeletionPods(ctx, ms, labels.Set{api.ModelServingNameLabelKey: ms.Name}.AsSelector())
+	if err != nil {
+		return err
+	}
+	plans := map[podDeletionPlanKey]*podDeletionPlan{}
+	groups := map[string]bool{}
+	for i := range pods {
+		pod := &pods[i]
+		scope := pod.Annotations[deletionScopeAnnotation]
+		if scope != deleteGroupScope && scope != deleteRoleScope {
+			continue
+		}
+		group, role, instance := pod.Labels[api.GroupNameLabelKey], utils.GetRoleName(pod), utils.GetRoleID(pod)
+		if group == "" || role == "" || instance == "" {
+			return fmt.Errorf("marked Pod %s has incomplete deletion identity", pod.Name)
+		}
+		key := deletionPlanKey(ms, scope, group, role, instance)
+		plan := plans[key]
+		if plan == nil {
+			plan = &podDeletionPlan{Key: key}
+			plan.Started.Store(true)
+			plans[key] = plan
+		}
+		plan.Pods = append(plan.Pods, *pod)
+		groups[group] = groups[group] || scope == deleteGroupScope
+	}
+	owner := utils.GetNamespaceName(ms)
+	for key, plan := range plans {
+		// A whole-group marker supersedes any narrower unfinished Role plan.
+		if key.Scope == deleteRoleScope && groups[key.Group] {
+			continue
+		}
+		if _, exists := c.deletionPlans.Load(key); exists {
+			continue
+		}
+		sort.Slice(plan.Pods, func(i, j int) bool { return plan.Pods[i].Name < plan.Pods[j].Name })
+		for i := range plan.Pods {
+			pod := &plan.Pods[i]
+			c.store.AddServingGroupAndRole(owner, key.Group, utils.ObjectRevision(pod), utils.ObjectRoleTemplateHash(pod), utils.GetRoleName(pod), utils.GetRoleID(pod))
+		}
+		if key.Scope == deleteGroupScope {
+			if err := c.store.UpdateServingGroupStatus(owner, key.Group, datastore.ServingGroupDeleting); err != nil {
+				return err
+			}
+		} else if err := c.store.UpdateRoleStatus(owner, key.Group, key.Role, key.Instance, datastore.RoleDeleting); err != nil {
+			return err
+		}
+		c.deletionPlans.Store(key, plan)
 	}
 	return nil
 }
@@ -228,8 +318,17 @@ func (c *ModelServingController) finishDeletionWithReplacement(ctx context.Conte
 	return true, nil
 }
 
-// Single-Pod recovery and conflict cleanup must not expand an active Role/SG
-// plan while this controller is still completing that plan.
+// Single-Pod recovery and conflict cleanup must not expand the UID set of an
+// overlapping plan. A Role plan does not fence other instances in its group.
+func (c *ModelServingController) podDeletionPlanCoversPod(ms *api.ModelServing, pod *corev1.Pod) bool {
+	group := pod.Labels[api.GroupNameLabelKey]
+	if _, active := c.deletionPlans.Load(deletionPlanKey(ms, deleteGroupScope, group, "", "")); active {
+		return true
+	}
+	_, active := c.deletionPlans.Load(deletionPlanKey(ms, deleteRoleScope, group, utils.GetRoleName(pod), utils.GetRoleID(pod)))
+	return active
+}
+
 func (c *ModelServingController) podDeletionPlanActive(ms *api.ModelServing, group string) bool {
 	active := false
 	c.deletionPlans.Range(func(key, _ interface{}) bool {
@@ -241,6 +340,18 @@ func (c *ModelServingController) podDeletionPlanActive(ms *api.ModelServing, gro
 		return true
 	})
 	return active
+}
+
+// Called under the ModelServing lifecycle lock. An absent/terminating owner
+// retains no plans; a recreated owner retains only plans for its current UID.
+func (c *ModelServingController) prunePodDeletionPlans(owner types.NamespacedName, currentUID types.UID) {
+	c.deletionPlans.Range(func(key, _ interface{}) bool {
+		planKey := key.(podDeletionPlanKey)
+		if planKey.Owner == owner && (currentUID == "" || planKey.UID != currentUID) {
+			c.deletionPlans.Delete(key)
+		}
+		return true
+	})
 }
 
 // A Role record can disappear before its process-local deletion plan, for
@@ -289,9 +400,7 @@ func (c *ModelServingController) resumeOrphanedRoleDeletion(ctx context.Context,
 	return nil
 }
 
-// Retry plans only within the process that started them. A new controller has
-// no plans and therefore converges from current Pods, current configuration and
-// the normal rollout/recovery budgets.
+// Retry the original UID set, including plans restored from marked survivors.
 func (c *ModelServingController) resumePodDeletionPlans(ctx context.Context, ms *api.ModelServing) error {
 	plans := []*podDeletionPlan{}
 	c.deletionPlans.Range(func(key, value interface{}) bool {
