@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/klog/v2"
 )
 
 type templateComparison int
@@ -216,8 +215,7 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 	h.snapshots[revision] = snapshot
 	if snapshot.err != nil {
 		h.controller.enqueueModelServingAfter(h.ms, 5*time.Second)
-		klog.Warningf("Cannot resolve revision %q for ModelServing %s/%s; template-driven deletion is paused for affected replicas: %v",
-			revision, h.ms.Namespace, h.ms.Name, snapshot.err)
+		modelServingContextLog(ctx, h.ms).Error(snapshot.err, "Historical revision unresolved; template-driven deletion paused for affected replicas", "appliedRevision", revision, "reason", "HistoryUnresolved", "retryAfter", 5*time.Second)
 		if h.controller.recorder != nil {
 			h.controller.recorder.Eventf(h.ms, corev1.EventTypeWarning, "RevisionUnresolved",
 				"Cannot resolve revision %q; template-driven deletion is paused for affected replicas: %v", revision, snapshot.err)

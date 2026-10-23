@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/go-logr/logr/funcr"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -31,6 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -217,6 +219,46 @@ func TestMissingHistoryDoesNotGuessLatest(t *testing.T) {
 			noWrites(t, f.client)
 		})
 	}
+}
+
+func TestMissingHistoryIsLoggedWhenConfigMapDisappearsDuringUpdate(t *testing.T) {
+	f := newFixture(t, 1, 0, 1)
+	f.seed(t)
+	f.req.ModelServing.Generation = 7
+	require.NoError(t, f.client.AppsV1().ControllerRevisions("test").Delete(context.Background(), "model-history", metav1.DeleteOptions{}))
+	f.client.PrependReactor("update", "configmaps", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		require.NoError(t, f.client.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("configmaps"), "test", f.scope.Name))
+		return true, nil, apierrors.NewNotFound(schema.GroupResource{Resource: "configmaps"}, f.scope.Name)
+	})
+	var lines []string
+	logger := funcr.NewJSON(func(line string) { lines = append(lines, line) }, funcr.Options{})
+	ctx := klog.NewContext(context.Background(), logger)
+	f.client.ClearActions()
+
+	// A disappearing ConfigMap remains benign even when its applied layout
+	// could not be resolved; logging must not change the API calls or result.
+	require.NoError(t, Sync(ctx, f.req, f.scope, Refresh, "test/ranktable", renderFixture))
+	var calls []string
+	for _, action := range f.client.Actions() {
+		calls = append(calls, action.GetVerb()+" "+action.GetResource().Resource)
+	}
+	require.Equal(t, []string{"get configmaps", "list pods", "get pods", "get controllerrevisions", "update configmaps"}, calls)
+	require.Len(t, lines, 1)
+	var entry map[string]any
+	require.NoError(t, json.Unmarshal([]byte(lines[0]), &entry))
+	require.Equal(t, "Ranktable layout validation failed before ConfigMap disappeared", entry["msg"])
+	require.Equal(t, "ControllerRevision or its data is nil", entry["error"])
+	require.Equal(t, map[string]any{"name": "model", "namespace": "test"}, entry["modelServing"])
+	require.Equal(t, "owner", entry["uid"])
+	require.Equal(t, float64(7), entry["generation"])
+	require.Equal(t, "ranktable", entry["component"])
+	require.Equal(t, f.scope.Name, entry["scope"])
+	require.Equal(t, f.req.ServingGroup, entry["servingGroup"])
+	require.Equal(t, f.req.RoleName, entry["role"])
+	require.Equal(t, f.req.RoleID, entry["roleID"])
+	require.Equal(t, "test/ranktable", entry["pluginAnnotation"])
+	require.Equal(t, f.scope.Filename, entry["ranktableFile"])
+	require.Equal(t, float64(Refresh), entry["mode"])
 }
 
 func TestEquivalentRolesAcrossGlobalRevisions(t *testing.T) {

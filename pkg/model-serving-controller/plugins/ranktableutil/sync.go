@@ -187,7 +187,6 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 			complete, err = completeRole(ctx, req, active)
 			if err != nil {
 				layoutErr = err
-				klog.Warningf("Ranktable %s/%s cannot resolve applied layout: %v", req.ModelServing.Namespace, scope.Name, err)
 				if cm == nil {
 					return err
 				}
@@ -236,6 +235,12 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 		klog.V(4).InfoS("Update ranktable", "scope", scope.Name, "cmUID", cm.UID, "mode", mode, "members", len(participants), "complete", complete)
 		_, err = req.KubeClient.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 		if apierrors.IsNotFound(err) {
+			if layoutErr != nil {
+				klog.FromContext(ctx).Error(layoutErr, "Ranktable layout validation failed before ConfigMap disappeared",
+					"modelServing", klog.KObj(req.ModelServing), "uid", req.ModelServing.UID, "generation", req.ModelServing.Generation,
+					"component", "ranktable", "scope", scope.Name, "servingGroup", req.ServingGroup,
+					"role", req.RoleName, "roleID", req.RoleID, "pluginAnnotation", annotationName, "ranktableFile", scope.Filename, "mode", mode)
+			}
 			return nil
 		}
 		if err != nil {

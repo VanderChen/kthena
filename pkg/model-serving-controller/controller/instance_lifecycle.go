@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -93,6 +94,11 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 		latest, err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 	}
 	if err != nil || latest.UID != pod.UID {
+		if err != nil && !apierrors.IsNotFound(err) {
+			klog.ErrorS(err, "Failed to verify current Pod event identity", "entrypoint", "podObservation", "pod", klog.KObj(pod), "podUID", pod.UID, "modelServing", klog.KRef(pod.Namespace, pod.Labels[workloadv1alpha1.ModelServingNameLabelKey]))
+		} else {
+			klog.V(4).InfoS("Pod event no longer matches current identity", "entrypoint", "podObservation", "pod", klog.KObj(pod), "podUID", pod.UID, "modelServing", klog.KRef(pod.Namespace, pod.Labels[workloadv1alpha1.ModelServingNameLabelKey]), "reason", "PodAbsentOrUIDChanged")
+		}
 		c.enqueueModelServingByChildResourceAfter(pod, enqueueAfter)
 		return nil
 	}
@@ -117,6 +123,7 @@ func (c *ModelServingController) stalePodDeletion(ms *workloadv1alpha1.ModelServ
 // a replacement created after that GET must never enter this recovery's plan.
 func (c *ModelServingController) deletionObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) (bool, []*corev1.Pod, error) {
 	if pod.Annotations[deletionScopeAnnotation] == deleteRoleScope || pod.Annotations[deletionScopeAnnotation] == deleteGroupScope {
+		modelServingContextLog(ctx, ms).V(4).Info("Intentional Pod deletion ignored for recovery", "pod", klog.KObj(pod), "podUID", pod.UID, "scope", pod.Annotations[deletionScopeAnnotation], "reason", "DeletionScopeMarked")
 		return true, nil, nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -144,6 +151,7 @@ func (c *ModelServingController) deletionObservation(ctx context.Context, ms *wo
 			continue
 		}
 		if sibling.Annotations[groupInstanceAnnotation] != pod.Annotations[groupInstanceAnnotation] {
+			modelServingContextLog(ctx, ms).V(4).Info("Old Pod deletion ignored", "pod", klog.KObj(pod), "podUID", pod.UID, "reason", "ServingGroupInstanceChanged")
 			return true, nil, nil
 		}
 		// RecoveryPolicy and rollout mode are mutable. The event must still
@@ -151,6 +159,7 @@ func (c *ModelServingController) deletionObservation(ctx context.Context, ms *wo
 		// expanded to a whole-group recovery under the latest policy.
 		if utils.GetRoleName(sibling) == utils.GetRoleName(pod) && utils.GetRoleID(sibling) == utils.GetRoleID(pod) &&
 			sibling.Annotations[roleInstanceAnnotation] != pod.Annotations[roleInstanceAnnotation] {
+			modelServingContextLog(ctx, ms).V(4).Info("Old Pod deletion ignored", "pod", klog.KObj(pod), "podUID", pod.UID, "reason", "RoleInstanceChanged")
 			return true, nil, nil
 		}
 		owned = append(owned, sibling)
@@ -159,10 +168,12 @@ func (c *ModelServingController) deletionObservation(ctx context.Context, ms *wo
 	if ms.ResourceVersion != "" {
 		latest, err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 		if err == nil {
+			modelServingContextLog(ctx, ms).V(4).Info("Pod deletion ignored while Pod exists", "pod", klog.KObj(pod), "podUID", pod.UID, "currentPodUID", latest.UID)
 			return true, nil, nil
 		}
 	}
 	if err == nil && latest.UID != pod.UID {
+		modelServingContextLog(ctx, ms).V(4).Info("Old Pod deletion ignored", "pod", klog.KObj(pod), "podUID", pod.UID, "currentPodUID", latest.UID, "reason", "PodUIDChanged")
 		return true, nil, nil
 	}
 	if err != nil && !apierrors.IsNotFound(err) {

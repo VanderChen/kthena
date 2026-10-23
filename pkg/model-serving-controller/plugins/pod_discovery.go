@@ -129,22 +129,22 @@ func addVolumeMountToContainer(container *corev1.Container, mount corev1.VolumeM
 
 func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) error {
 	if p.config.AutoMountPath == "" {
-		klog.Infof("PodDiscoveryPlugin: autoMountPath not configured, skipping mount for pod %s", req.Pod.Name)
+		klog.V(4).Infof("PodDiscoveryPlugin: autoMountPath not configured, skipping mount for pod %s", req.Pod.Name)
 		return nil
 	}
 	podRevision := utils.ObjectRevision(req.Pod)
 	targetRevision := req.ModelServing.Status.UpdateRevision
 	if targetRevision == "" {
 		targetRevision = podRevision
-		klog.Infof("PodDiscoveryPlugin: UpdateRevision is empty, using pod revision %s as target", podRevision)
+		klog.V(4).Infof("PodDiscoveryPlugin: UpdateRevision is empty, using pod revision %s as target", podRevision)
 	}
 	if podRevision != targetRevision {
-		klog.Infof("PodDiscoveryPlugin: Skipping mount for pod %s - pod revision %s does not match target revision %s",
+		klog.V(4).Infof("PodDiscoveryPlugin: Skipping mount for pod %s - pod revision %s does not match target revision %s",
 			req.Pod.Name, podRevision, targetRevision)
 		return nil
 	}
 	cmName := req.ServingGroup + ConfigMapNameSuffix
-	klog.Infof("PodDiscoveryPlugin: Starting mount configuration for pod %s in namespace %s, ServingGroup %s",
+	klog.V(4).Infof("PodDiscoveryPlugin: Starting mount configuration for pod %s in namespace %s, ServingGroup %s",
 		req.Pod.Name, req.Pod.Namespace, req.ServingGroup)
 	if !hasVolume(req.Pod.Spec, DiscoveryVolumeName) {
 		volume := corev1.Volume{
@@ -159,7 +159,7 @@ func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) 
 			},
 		}
 		req.Pod.Spec.Volumes = append(req.Pod.Spec.Volumes, volume)
-		klog.Infof("PodDiscoveryPlugin: Added volume %s referencing ConfigMap %s to pod %s",
+		klog.V(4).Infof("PodDiscoveryPlugin: Added volume %s referencing ConfigMap %s to pod %s",
 			DiscoveryVolumeName, cmName, req.Pod.Name)
 	}
 	mount := corev1.VolumeMount{
@@ -170,26 +170,26 @@ func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) 
 	containerCount := 0
 	for i := range req.Pod.Spec.Containers {
 		if addVolumeMountToContainer(&req.Pod.Spec.Containers[i], mount) {
-			klog.Infof("PodDiscoveryPlugin: Added volume mount to container %s in pod %s (path: %s, readonly: %v)",
+			klog.V(4).Infof("PodDiscoveryPlugin: Added volume mount to container %s in pod %s (path: %s, readonly: %v)",
 				req.Pod.Spec.Containers[i].Name, req.Pod.Name, mount.MountPath, mount.ReadOnly)
 			containerCount++
 		} else {
-			klog.Infof("PodDiscoveryPlugin: Volume mount already exists in container %s in pod %s, skipping",
+			klog.V(4).Infof("PodDiscoveryPlugin: Volume mount already exists in container %s in pod %s, skipping",
 				req.Pod.Spec.Containers[i].Name, req.Pod.Name)
 		}
 	}
 	initContainerCount := 0
 	for i := range req.Pod.Spec.InitContainers {
 		if addVolumeMountToContainer(&req.Pod.Spec.InitContainers[i], mount) {
-			klog.Infof("PodDiscoveryPlugin: Added volume mount to init container %s in pod %s (path: %s, readonly: %v)",
+			klog.V(4).Infof("PodDiscoveryPlugin: Added volume mount to init container %s in pod %s (path: %s, readonly: %v)",
 				req.Pod.Spec.InitContainers[i].Name, req.Pod.Name, mount.MountPath, mount.ReadOnly)
 			initContainerCount++
 		} else {
-			klog.Infof("PodDiscoveryPlugin: Volume mount already exists in init container %s in pod %s, skipping",
+			klog.V(4).Infof("PodDiscoveryPlugin: Volume mount already exists in init container %s in pod %s, skipping",
 				req.Pod.Spec.InitContainers[i].Name, req.Pod.Name)
 		}
 	}
-	klog.Infof("PodDiscoveryPlugin: Completed mount configuration for pod %s - %d containers and %d init containers mounted",
+	klog.V(4).Infof("PodDiscoveryPlugin: Completed mount configuration for pod %s - %d containers and %d init containers mounted",
 		req.Pod.Name, containerCount, initContainerCount)
 	return nil
 }
@@ -211,20 +211,20 @@ func (p *PodDiscoveryPlugin) syncConfigMap(ctx context.Context, req *HookRequest
 	// Only apply to new groups (where pod revision equals UpdateRevision)
 	if req.ModelServing.Status.UpdateRevision == "" {
 		// No update revision yet, skip
-		klog.Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - UpdateRevision is empty", req.Pod.Name)
+		klog.V(4).Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - UpdateRevision is empty", req.Pod.Name)
 		return nil
 	}
 	podRevision := utils.ObjectRevision(req.Pod)
 	if podRevision != req.ModelServing.Status.UpdateRevision {
 		// This is an old group, skip
-		klog.Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - pod revision %s does not match UpdateRevision %s",
+		klog.V(4).Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - pod revision %s does not match UpdateRevision %s",
 			req.Pod.Name, podRevision, req.ModelServing.Status.UpdateRevision)
 		return nil
 	}
 	namespace := req.ModelServing.Namespace
 	servingGroupName := req.ServingGroup
 	cmName := servingGroupName + ConfigMapNameSuffix
-	klog.Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod %s in ServingGroup %s", req.Pod.Name, servingGroupName)
+	klog.V(4).Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod %s in ServingGroup %s", req.Pod.Name, servingGroupName)
 	// 使用 PollUntilContextTimeout 替换 PollImmediate
 	// 100ms: interval, 5s: timeout, true: immediate (立即执行第一次检测)
 	return wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -233,7 +233,6 @@ func (p *PodDiscoveryPlugin) syncConfigMap(ctx context.Context, req *HookRequest
 			LabelSelector: fmt.Sprintf("%s=%s", workloadv1alpha1.GroupNameLabelKey, servingGroupName),
 		})
 		if err != nil {
-			klog.Errorf("Failed to list pods for ServingGroup %s: %v", servingGroupName, err)
 			return false, err
 		}
 		// 2. Build GroupInfo structure
@@ -335,7 +334,7 @@ func (p *PodDiscoveryPlugin) syncConfigMap(ctx context.Context, req *HookRequest
 					}
 					return false, err
 				}
-				klog.Infof("Created groupinfo ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+				klog.V(4).InfoS("Created groupinfo ConfigMap", "modelServing", klog.KObj(req.ModelServing), "servingGroup", servingGroupName, "configMap", cmName)
 				return true, nil
 			}
 			return false, err
@@ -365,7 +364,7 @@ func (p *PodDiscoveryPlugin) syncConfigMap(ctx context.Context, req *HookRequest
 			}
 			return false, err
 		}
-		klog.Infof("Updated groupinfo ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+		klog.V(4).InfoS("Updated groupinfo ConfigMap", "modelServing", klog.KObj(req.ModelServing), "servingGroup", servingGroupName, "configMap", cmName)
 		return true, nil
 	})
 }
@@ -382,21 +381,21 @@ func (p *PodDiscoveryPlugin) OnPodDelete(ctx context.Context, req *HookRequest) 
 	namespace := req.ModelServing.Namespace
 	servingGroupName := req.ServingGroup
 	cmName := servingGroupName + ConfigMapNameSuffix
-	klog.Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod deletion %s in ServingGroup %s", req.Pod.Name, servingGroupName)
+	klog.V(4).Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod deletion %s in ServingGroup %s", req.Pod.Name, servingGroupName)
 	// 使用 PollUntilContextTimeout 替换 PollImmediate
 	// 100ms: interval, 5s: timeout, true: immediate (立即执行第一次检测)
 	return wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		cm, err := req.KubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, cmName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
-				klog.Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to remove", cmName)
+				klog.V(4).Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to remove", cmName)
 				return true, nil
 			}
 			return false, err
 		}
 		jsonStr := cm.Data[DiscoveryFileName]
 		if jsonStr == "" {
-			klog.Infof("PodDiscoveryPlugin: ConfigMap %s has no data, nothing to remove", cmName)
+			klog.V(4).Infof("PodDiscoveryPlugin: ConfigMap %s has no data, nothing to remove", cmName)
 			return true, nil
 		}
 		var groupInfo GroupInfo
@@ -419,7 +418,7 @@ func (p *PodDiscoveryPlugin) OnPodDelete(ctx context.Context, req *HookRequest) 
 			}
 		}
 		if !found {
-			klog.Infof("PodDiscoveryPlugin: Pod %s not found in ConfigMap %s, nothing to remove", deletedPodName, cmName)
+			klog.V(4).Infof("PodDiscoveryPlugin: Pod %s not found in ConfigMap %s, nothing to remove", deletedPodName, cmName)
 			return true, nil
 		}
 		newData, err := json.Marshal(groupInfo)
@@ -435,7 +434,7 @@ func (p *PodDiscoveryPlugin) OnPodDelete(ctx context.Context, req *HookRequest) 
 			}
 			return false, err
 		}
-		klog.Infof("PodDiscoveryPlugin: Removed pod %s from ConfigMap %s", deletedPodName, cmName)
+		klog.V(4).Infof("PodDiscoveryPlugin: Removed pod %s from ConfigMap %s", deletedPodName, cmName)
 		return true, nil
 	})
 }
@@ -454,11 +453,11 @@ func (p *PodDiscoveryPlugin) OnServingGroupDelete(ctx context.Context, req *Hook
 	err := req.KubeClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
 	if err != nil {
 		if errors.IsNotFound(err) {
-			klog.Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to delete", cmName)
+			klog.V(4).Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to delete", cmName)
 			return nil
 		}
 		return fmt.Errorf("failed to delete ConfigMap %s: %w", cmName, err)
 	}
-	klog.Infof("PodDiscoveryPlugin: Deleted ConfigMap %s for ServingGroup %s", cmName, req.ServingGroup)
+	klog.V(4).Infof("PodDiscoveryPlugin: Deleted ConfigMap %s for ServingGroup %s", cmName, req.ServingGroup)
 	return nil
 }

@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -163,6 +164,7 @@ func (c *ModelServingController) preparePodDeletionPlan(ctx context.Context, ms 
 	if loaded {
 		return actual.(*podDeletionPlan), nil
 	}
+	modelServingContextLog(ctx, ms).V(4).Info("Pod deletion scope selected", "scope", key.Scope, "servingGroup", key.Group, "role", key.Role, "roleID", key.Instance, "selectedPods", len(pods), "outcome", "selected")
 	return plan, nil
 }
 
@@ -180,6 +182,13 @@ func definiteDeleteRejection(err error) bool {
 }
 
 func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.ModelServing, plan *podDeletionPlan) error {
+	logger := modelServingContextLog(ctx, ms).WithValues("scope", plan.Key.Scope, "servingGroup", plan.Key.Group, "role", plan.Key.Role, "roleID", plan.Key.Instance)
+	accepted := 0
+	defer func() {
+		if accepted > 0 {
+			logger.Info("Pod deletion requests accepted", "acceptedPods", accepted, "selectedPods", len(plan.Pods), "outcome", "requestAccepted")
+		}
+	}()
 	if !plan.Started.Load() {
 		if err := c.checkRolloutIntent(ctx, ms); err != nil {
 			c.deletionPlans.Delete(plan.Key)
@@ -193,6 +202,7 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 		original := &plan.Pods[i]
 		pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
+			logger.V(4).Info("Selected Pod is absent", "pod", klog.KObj(original), "podUID", original.UID, "outcome", "observedAbsent")
 			plan.Started.Store(true)
 			continue
 		}
@@ -200,15 +210,23 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 			return err
 		}
 		if pod.UID != original.UID || !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			logger.V(4).Info("Selected Pod deletion skipped", "pod", klog.KObj(pod), "podUID", original.UID, "currentPodUID", pod.UID, "reason", "IdentityChanged")
 			continue
 		}
 		if pod.DeletionTimestamp != nil {
+			logger.V(4).Info("Selected Pod is still terminating", "pod", klog.KObj(pod), "podUID", pod.UID, "outcome", "waiting")
 			plan.Started.Store(true)
 			continue
 		}
 		invalidateRolloutPodSnapshot(ctx)
 		err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(original.UID)))
 		if err == nil || apierrors.IsNotFound(err) {
+			if err == nil {
+				accepted++
+				logger.V(4).Info("Pod deletion accepted", "pod", klog.KObj(pod), "podUID", pod.UID, "outcome", "requestAccepted")
+			} else {
+				logger.V(4).Info("Selected Pod is absent", "pod", klog.KObj(pod), "podUID", pod.UID, "outcome", "observedAbsent")
+			}
 			plan.Started.Store(true)
 			continue
 		}
@@ -217,7 +235,7 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 		if !definiteDeleteRejection(err) {
 			plan.Started.Store(true)
 		}
-		return err
+		return fmt.Errorf("delete selected Pod %s/%s uid=%s scope=%s: %w", pod.Namespace, pod.Name, original.UID, plan.Key.Scope, err)
 	}
 	return nil
 }
@@ -226,6 +244,12 @@ func (c *ModelServingController) deletePlannedPods(ctx context.Context, ms *api.
 // delayed normal-deletion callbacks and allows a new process to finish these
 // same Pod identities without retaining a separate transaction object.
 func (c *ModelServingController) markPodDeletionPlan(ctx context.Context, ms *api.ModelServing, plan *podDeletionPlan) error {
+	marked := 0
+	defer func() {
+		if marked > 0 {
+			modelServingContextLog(ctx, ms).Info("Pod deletion scope marked", "scope", plan.Key.Scope, "servingGroup", plan.Key.Group, "role", plan.Key.Role, "roleID", plan.Key.Instance, "markedPods", marked, "selectedPods", len(plan.Pods), "outcome", "markersUpdated")
+		}
+	}()
 	for i := range plan.Pods {
 		original := &plan.Pods[i]
 		pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, original.Name, metav1.GetOptions{})
@@ -248,8 +272,12 @@ func (c *ModelServingController) markPodDeletionPlan(ctx context.Context, ms *ap
 		if err != nil {
 			return err
 		}
-		if _, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil && !apierrors.IsNotFound(err) {
-			return err
+		_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("mark selected Pod %s/%s uid=%s scope=%s: %w", pod.Namespace, pod.Name, pod.UID, plan.Key.Scope, err)
+		}
+		if err == nil {
+			marked++
 		}
 	}
 	return nil
@@ -306,6 +334,7 @@ func (c *ModelServingController) restoreDeletionIntents(ctx context.Context, ms 
 			return err
 		}
 		c.deletionPlans.Store(key, plan)
+		modelServingContextLog(ctx, ms).Info("Marked Pod deletion scope restored", "scope", key.Scope, "servingGroup", key.Group, "role", key.Role, "roleID", key.Instance, "markedPods", len(plan.Pods), "reason", "ExistingDeletionMarkers", "outcome", "restored")
 	}
 	return nil
 }
@@ -357,6 +386,7 @@ func (c *ModelServingController) finishDeletionWithReplacement(ctx context.Conte
 	}
 	c.enqueueModelServingAfter(ms, enqueueAfter)
 	if original {
+		modelServingContextLog(ctx, ms).V(4).Info("Waiting for original Pods while preserving replacements", "scope", plan.Key.Scope, "servingGroup", plan.Key.Group, "role", plan.Key.Role, "roleID", plan.Key.Instance)
 		return true, nil
 	}
 	c.deletionPlans.Delete(plan.Key)
@@ -373,6 +403,7 @@ func (c *ModelServingController) finishDeletionWithReplacement(ctx context.Conte
 		c.store.AddServingGroupAndRole(key, plan.Key.Group, utils.ObjectRevision(pod), utils.ObjectRoleTemplateHash(pod), utils.GetRoleName(pod), utils.GetRoleID(pod))
 	}
 	c.resetDeletionStatus(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	modelServingContextLog(ctx, ms).Info("Original Pod deletion observed with replacements retained", "scope", plan.Key.Scope, "servingGroup", plan.Key.Group, "role", plan.Key.Role, "roleID", plan.Key.Instance, "retainedPods", len(pods), "outcome", "observedAbsent")
 	return true, nil
 }
 
@@ -456,6 +487,7 @@ func (c *ModelServingController) resumeOrphanedRoleDeletion(ctx context.Context,
 	c.deletionPlans.Delete(plan.Key)
 	c.forgetKnownMemberScope(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 	c.clearRoleDeletionProgress(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
+	modelServingContextLog(ctx, ms).Info("Orphaned Role deletion observed", "scope", plan.Key.Scope, "servingGroup", plan.Key.Group, "role", plan.Key.Role, "roleID", plan.Key.Instance, "outcome", "observedAbsent")
 	c.enqueueModelServing(ms)
 	return nil
 }

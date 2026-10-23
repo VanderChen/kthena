@@ -336,7 +336,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return err
 	}
 
-	klog.V(2).Infof("Created PodGroup %s for group-level gang scheduling", podGroupName)
+	klog.V(4).InfoS("Created PodGroup", "modelServing", klog.KObj(ms), "podGroup", podGroupName)
 	return nil
 }
 
@@ -486,7 +486,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 			if err != nil {
 				return err
 			}
-			klog.V(2).Infof("Updated PodGroup %s for group-level gang scheduling", currentPodGroup.Name)
+			klog.V(4).InfoS("Updated PodGroup", "modelServing", klog.KObj(ms), "podGroup", klog.KObj(currentPodGroup))
 		}
 
 		return nil
@@ -528,7 +528,7 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.Mod
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}
-		klog.V(2).Infof("Deleted PodGroup %s (gang scheduling disabled)", podGroup.Name)
+		klog.V(4).InfoS("Deleted PodGroup", "modelServing", klog.KObj(ms), "podGroup", klog.KObj(podGroup), "reason", "GangSchedulingDisabled")
 	}
 
 	return nil

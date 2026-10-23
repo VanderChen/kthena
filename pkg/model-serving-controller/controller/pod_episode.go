@@ -51,20 +51,28 @@ type podEpisode struct {
 // old Ready frame must not clear a newer fault already visible in the cache.
 func (c *ModelServingController) observePodEpisode(pod *corev1.Pod) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
+	var canceled *podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		canceled.log()
+	}()
 	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			c.cancelPodEpisodeLocked(pod)
+			if c.cancelPodEpisodeLocked(pod) {
+				canceled = recoveryCancellation(pod, "PodAbsent")
+			}
 		}
 		return
 	}
 	ms, _, err := c.getModelServingByChildResource(latest)
 	if err != nil || !utils.IsOwnedByModelServingWithUID(latest, ms.UID) {
-		c.cancelPodEpisodeLocked(pod)
+		if c.cancelPodEpisodeLocked(pod) {
+			canceled = recoveryCancellation(pod, "OwnerObservationInvalid")
+		}
 		return
 	}
-	c.observePodEpisodeLocked(ms, latest)
+	canceled = c.observePodEpisodeLocked(ms, latest)
 }
 
 // A live read may update observations only if no callback accepted a newer
@@ -81,24 +89,32 @@ func (c *ModelServingController) capturePodObservation(pod *corev1.Pod) uint64 {
 
 func (c *ModelServingController) observeLivePodEpisode(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod, observed uint64) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
+	var canceled *podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		canceled.log()
+	}()
 	current := uint64(0)
 	if episode := c.episodes.byName[utils.GetNamespaceName(pod)]; episode != nil {
 		current = episode.observation
 	}
 	if current == observed && utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
-		c.observePodEpisodeLocked(ms, pod)
+		canceled = c.observePodEpisodeLocked(ms, pod)
 	}
 }
 
-func (c *ModelServingController) observePodEpisodeLocked(ms *workloadv1alpha1.ModelServing, latest *corev1.Pod) {
+func (c *ModelServingController) observePodEpisodeLocked(ms *workloadv1alpha1.ModelServing, latest *corev1.Pod) *podRecoveryCancellation {
 	name := utils.GetNamespaceName(latest)
+	var canceled *podRecoveryCancellation
 	if c.episodes.byName == nil {
 		c.episodes.byName = make(map[types.NamespacedName]*podEpisode)
 	}
 	episode := c.episodes.byName[name]
 	if episode == nil || episode.owner != ms.UID || episode.pod != latest.UID {
 		if episode != nil {
+			if episode.active {
+				canceled = &podRecoveryCancellation{owner: ownerInputKey{NamespacedName: utils.GetNamespaceName(ms), UID: episode.owner}, pod: name, podUID: episode.pod, reason: "PodIdentityChanged"}
+			}
 			c.graceMap.Delete(podGracePeriodKey{NamespacedName: name, UID: episode.pod})
 		}
 		c.episodes.next++
@@ -108,11 +124,22 @@ func (c *ModelServingController) observePodEpisodeLocked(ms *workloadv1alpha1.Mo
 	c.episodes.next++
 	episode.observation = c.episodes.next
 	if latest.DeletionTimestamp != nil || ms.DeletionTimestamp != nil || podRecoveryDisabled(ms) || utils.IsPodRunningAndReady(latest) {
-		c.cancelPodEpisodeLocked(latest)
-		return
+		if c.cancelPodEpisodeLocked(latest) {
+			reason := "PodReady"
+			switch {
+			case latest.DeletionTimestamp != nil:
+				reason = "PodTerminating"
+			case ms.DeletionTimestamp != nil:
+				reason = "ModelServingDeleting"
+			case podRecoveryDisabled(ms):
+				reason = "RecoveryDisabled"
+			}
+			canceled = recoveryCancellation(latest, reason)
+		}
+		return canceled
 	}
 	if !utils.IsPodFailed(latest) && !utils.ContainerRestarted(latest) {
-		return
+		return canceled
 	}
 	if !episode.active {
 		c.episodes.next++
@@ -129,23 +156,33 @@ func (c *ModelServingController) observePodEpisodeLocked(ms *workloadv1alpha1.Mo
 		episode.armed = false
 	}
 	c.graceMap.Store(getPodGracePeriodKey(latest), episode.started)
+	return canceled
 }
 
-func (c *ModelServingController) cancelPodEpisodeLocked(pod *corev1.Pod) {
+func (c *ModelServingController) cancelPodEpisodeLocked(pod *corev1.Pod) bool {
+	_, pending := c.graceMap.Load(getPodGracePeriodKey(pod))
 	c.graceMap.Delete(getPodGracePeriodKey(pod))
 	if episode := c.episodes.byName[utils.GetNamespaceName(pod)]; episode != nil && episode.pod == pod.UID {
+		pending = pending || episode.active
 		c.episodes.next++
 		episode.version = c.episodes.next
 		episode.observation = c.episodes.next
 		episode.active = false
 		episode.armed = false
 	}
+	return pending
 }
 
 func (c *ModelServingController) forgetPodEpisode(pod *corev1.Pod) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
-	c.cancelPodEpisodeLocked(pod)
+	var canceled *podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		canceled.log()
+	}()
+	if c.cancelPodEpisodeLocked(pod) {
+		canceled = recoveryCancellation(pod, "PodDeleted")
+	}
 	if episode := c.episodes.byName[utils.GetNamespaceName(pod)]; episode != nil && episode.pod == pod.UID {
 		delete(c.episodes.byName, utils.GetNamespaceName(pod))
 	}
@@ -156,10 +193,19 @@ func (c *ModelServingController) forgetPodEpisode(pod *corev1.Pod) {
 // snapshot from arming the just-cancelled episode.
 func (c *ModelServingController) forgetModelServingEpisodes(ms *workloadv1alpha1.ModelServing) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
+	var canceled []podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		for i := range canceled {
+			canceled[i].log()
+		}
+	}()
 	for name, episode := range c.episodes.byName {
 		if episode.owner != ms.UID {
 			continue
+		}
+		if episode.active {
+			canceled = append(canceled, podRecoveryCancellation{owner: ownerKey(ms), pod: name, podUID: episode.pod, reason: "RecoveryDisabled"})
 		}
 		c.graceMap.Delete(podGracePeriodKey{NamespacedName: name, UID: episode.pod})
 		c.episodes.next++
@@ -174,9 +220,18 @@ func (c *ModelServingController) forgetModelServingEpisodes(ms *workloadv1alpha1
 // replacement owner's observations.
 func (c *ModelServingController) retireModelServingEpisodes(ms *workloadv1alpha1.ModelServing) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
+	var canceled []podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		for i := range canceled {
+			canceled[i].log()
+		}
+	}()
 	for name, episode := range c.episodes.byName {
 		if episode.owner == ms.UID {
+			if episode.active {
+				canceled = append(canceled, podRecoveryCancellation{owner: ownerKey(ms), pod: name, podUID: episode.pod, reason: "ModelServingDeleted"})
+			}
 			c.graceMap.Delete(podGracePeriodKey{NamespacedName: name, UID: episode.pod})
 			delete(c.episodes.byName, name)
 		}
@@ -187,9 +242,15 @@ func (c *ModelServingController) retireModelServingEpisodes(ms *workloadv1alpha1
 // and arming are separate so a callback's timestamp never suppresses its timer.
 func (c *ModelServingController) armPodEpisode(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) (time.Time, bool) {
 	c.episodes.mu.Lock()
-	defer c.episodes.mu.Unlock()
+	var canceled *podRecoveryCancellation
+	defer func() {
+		c.episodes.mu.Unlock()
+		canceled.log()
+	}()
 	if podRecoveryDisabled(ms) {
-		c.cancelPodEpisodeLocked(pod)
+		if c.cancelPodEpisodeLocked(pod) {
+			canceled = recoveryCancellation(pod, "RecoveryDisabled")
+		}
 		return time.Time{}, false
 	}
 	name := utils.GetNamespaceName(pod)

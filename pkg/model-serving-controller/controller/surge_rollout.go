@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -112,6 +113,18 @@ func surgeIdentity(pod *corev1.Pod, scope string) (string, int) {
 // Remove its marker without replacing it, including on every worker Pod, so a
 // later binpack scale-down does not mistake the survivor for temporary capacity.
 func (c *ModelServingController) adoptSurgeReplicas(ctx context.Context, ms *workloadv1alpha1.ModelServing, scope, groupName, roleName string, replicas int) error {
+	accepted := make(map[string]int)
+	defer func() {
+		for _, instance := range sets.List(sets.KeySet(accepted)) {
+			group, roleID := groupName, ""
+			if scope == surgeServingGroup {
+				group = instance
+			} else {
+				roleID = instance
+			}
+			modelServingContextLog(ctx, ms).Info("Surge adoption requests accepted", "action", "surgeAdoption", "reason", "OrdinalEnteredDesiredRange", "surgeScope", scope, "servingGroup", group, "role", roleName, "roleID", roleID, "desired", replicas, "acceptedPods", accepted[instance], "outcome", "requestAccepted")
+		}
+	}()
 	pods, err := c.surgePods(ms, scope, groupName, roleName)
 	if err != nil {
 		return err
@@ -131,6 +144,9 @@ func (c *ModelServingController) adoptSurgeReplicas(ctx context.Context, ms *wor
 		if _, err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 			return fmt.Errorf("adopt surge pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
+		identity, _ := surgeIdentity(pod, scope)
+		accepted[identity]++
+		modelServingContextLog(ctx, ms).V(4).Info("Surge Pod adoption accepted", "surgeScope", scope, "pod", klog.KObj(pod), "podUID", pod.UID, "instance", identity, "outcome", "requestAccepted")
 	}
 	return nil
 }
@@ -248,6 +264,7 @@ func (c *ModelServingController) finishServingGroupSurge(ctx context.Context, ms
 		})
 	}
 	expected, toDelete := planSurgeCompletion(replicas, maxSurge, maxUnavailable, instances)
+	modelServingContextLog(ctx, ms).V(4).Info("ServingGroup surge completion evaluated", "desired", replicas, "observed", len(groups), "targetCapacity", expected, "temporary", temporary.Len(), "selectedDeletions", len(toDelete), "partition", partition)
 	if expected > len(groups) {
 		return true, c.scaleUpServingGroups(ctx, ms, groups, expected, revision)
 	}
@@ -268,15 +285,19 @@ func (c *ModelServingController) finishServingGroupSurge(ctx context.Context, ms
 		group := byName[name]
 		comparison := c.compareServingGroupTemplate(ctx, ms, group, revision)
 		if comparison == templateUnknown || c.rolloutDeletionPending(ms, name, "", "") {
+			modelServingContextLog(ctx, ms).V(4).Info("ServingGroup surge cleanup deferred", "servingGroup", name, "reason", "HistoryUnknownOrDeletionPending")
 			continue
 		}
 		// Removing an unavailable target reduces active and target-unavailable
 		// together. Old instances and Ready capacity consume the shared credit.
 		if (comparison == templateDifferent || group.Status == datastore.ServingGroupRunning) && !budget.take(group.Status == datastore.ServingGroupRunning) {
+			modelServingContextLog(ctx, ms).V(4).Info("ServingGroup surge cleanup deferred", "servingGroup", name, "reason", "AvailabilityBudgetExhausted", "maxScaleDown", budget.total, "maxHealthyScaleDown", budget.healthy)
 			continue
 		}
 
-		if err := c.deleteServingGroup(ctx, ms, name); err != nil {
+		deleteCtx := withModelServingAction(ctx, "surgeCleanup", "TemporaryCapacityNoLongerNeeded")
+		deleteCtx = klog.NewContext(deleteCtx, klog.FromContext(deleteCtx).WithValues("currentRevision", group.Revision, "targetRevision", revision))
+		if err := c.deleteServingGroup(deleteCtx, ms, name); err != nil {
 			return true, err
 		}
 	}
@@ -336,6 +357,7 @@ func (c *ModelServingController) finishRoleSurge(ctx context.Context, ms *worklo
 		})
 	}
 	expected, toDelete := planSurgeCompletion(replicas, maxSurge, maxUnavailable, instances)
+	modelServingContextLog(ctx, ms).V(4).Info("Role surge completion evaluated", "servingGroup", groupName, "role", role.Name, "desired", replicas, "observed", len(roles), "targetCapacity", expected, "temporary", temporary.Len(), "selectedDeletions", len(toDelete), "partition", partition)
 	if expected > len(roles) {
 		return true, c.scaleUpRoles(ctx, ms, groupName, role, roles, expected, groupOrdinal, revision, allowTargetStart)
 	}
@@ -350,16 +372,21 @@ func (c *ModelServingController) finishRoleSurge(ctx context.Context, ms *worklo
 		instance := byName[name]
 		comparison := c.compareRoleTemplate(ctx, ms, group, role.Name, instance)
 		if comparison == templateUnknown || instance.Status == datastore.RoleDeleting {
+			modelServingContextLog(ctx, ms).V(4).Info("Role surge cleanup deferred", "servingGroup", groupName, "role", role.Name, "roleID", name, "reason", "HistoryUnknownOrDeletionPending")
 			continue
 		}
 		if comparison == templateDifferent && retainOld && remainingOld <= 1 {
+			modelServingContextLog(ctx, ms).V(4).Info("Role surge cleanup deferred", "servingGroup", groupName, "role", role.Name, "roleID", name, "reason", "OldVersionDependencyPresent")
 			continue
 		}
 		if (comparison == templateDifferent || instance.Status == datastore.RoleRunning) && !budget.take(instance.Status == datastore.RoleRunning) {
+			modelServingContextLog(ctx, ms).V(4).Info("Role surge cleanup deferred", "servingGroup", groupName, "role", role.Name, "roleID", name, "reason", "AvailabilityBudgetExhausted", "maxScaleDown", budget.total, "maxHealthyScaleDown", budget.healthy)
 			continue
 		}
 
-		if err := c.DeleteRole(ctx, ms, groupName, role.Name, name); err != nil {
+		deleteCtx := withModelServingAction(ctx, "surgeCleanup", "TemporaryCapacityNoLongerNeeded")
+		deleteCtx = klog.NewContext(deleteCtx, klog.FromContext(deleteCtx).WithValues("currentRevision", instance.Revision, "targetRevision", revision))
+		if err := c.DeleteRole(deleteCtx, ms, groupName, role.Name, name); err != nil {
 			return true, err
 		}
 		if comparison == templateDifferent {

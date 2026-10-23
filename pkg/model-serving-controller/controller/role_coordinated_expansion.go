@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 
-	"k8s.io/klog/v2"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -89,6 +88,7 @@ func (c *ModelServingController) stageCoordinatedExpansionGang(
 	}
 	for roleName, minimum := range deferred {
 		if policy.allowTargetStart(groupName, roleName) {
+			modelServingContextLog(ctx, ms).V(4).Info("Coordinated expansion Gang minimum can advance", "servingGroup", groupName, "role", roleName, "previousMinimum", minimum, "targetRevision", revision)
 			continue
 		}
 		if podGroupMS.Spec.Template.GangPolicy == nil {
@@ -98,8 +98,7 @@ func (c *ModelServingController) stageCoordinatedExpansionGang(
 			podGroupMS.Spec.Template.GangPolicy.MinRoleReplicas = make(map[string]int32)
 		}
 		podGroupMS.Spec.Template.GangPolicy.MinRoleReplicas[roleName] = minimum
-		klog.V(4).InfoS("Deferring coordinated expansion Gang minimum until dependencies are ready",
-			"modelServing", klog.KObj(ms), "servingGroup", groupName, "role", roleName, "minimum", minimum)
+		modelServingContextLog(ctx, ms).V(4).Info("Coordinated expansion Gang minimum deferred", "servingGroup", groupName, "role", roleName, "minimum", minimum, "targetRevision", revision, "reason", "DependencyNotReady")
 	}
 	return nil
 }

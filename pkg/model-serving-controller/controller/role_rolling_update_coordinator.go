@@ -31,7 +31,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -85,6 +84,8 @@ type roleRolloutLimits struct {
 	remainingDeletions int
 	allowTargetStart   bool
 	retainOldReplica   bool
+	// Diagnostic only; records why the existing one-step allowance was chosen.
+	terminalRoundingStep bool
 }
 
 func (l roleRolloutLimits) containsStable(ordinal int) bool {
@@ -804,6 +805,16 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 			groupPolicy.blocker = &coordinatedRoleBlocker{reason: coordinatedRoleIncompatiblePartitions, message: conflict.Error()}
 		}
 		policy.addGroup(servingGroup.Name, groupPolicy)
+		if groupPolicy.blocker != nil {
+			modelServingContextLog(ctx, ms).V(4).Info("Coordinated Role rollout constrained", "servingGroup", servingGroup.Name, "targetRevision", newRevision, "reason", groupPolicy.blocker.reason, "detail", groupPolicy.blocker.message)
+		}
+		for _, state := range states {
+			limits := groupPolicy.roles[state.roleName]
+			modelServingContextLog(ctx, ms).V(4).Info("Coordinated Role allowance evaluated", "servingGroup", servingGroup.Name, "role", state.roleName, "targetRevision", newRevision, "targetReady", state.versionReady, "targetStarted", state.versionStarted, "desired", state.versionTotal, "remainingDeletions", limits.remainingDeletions, "allowTargetStart", limits.allowTargetStart, "retainOldReplica", limits.retainOldReplica, "effectivePartition", limits.effectivePartition)
+			if limits.terminalRoundingStep && limits.remainingDeletions > 0 {
+				modelServingContextLog(ctx, ms).V(4).Info("Full-rollout terminal rounding step allowed", "servingGroup", servingGroup.Name, "role", state.roleName, "targetRevision", newRevision, "targetReady", state.versionReady, "desired", state.versionTotal, "remainingDeletions", limits.remainingDeletions, "reason", "TerminalRounding")
+			}
+		}
 	}
 	return policy, nil
 }
@@ -894,8 +905,7 @@ func calculateRoleRolloutLimits(
 				for _, name := range dependencies[state.roleName] {
 					if dependency := stateByName[name]; dependency != nil && dependency.hasOldVersion {
 						limits.remainingDeletions = 1
-						klog.V(2).InfoS("Allowing one full-rollout terminal rounding step", "role", state.roleName,
-							"targetReady", state.versionReady, "total", state.versionTotal, "maxSkew", maxSkewPercent)
+						limits.terminalRoundingStep = true
 						break
 					}
 				}

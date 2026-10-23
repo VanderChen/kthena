@@ -209,7 +209,7 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 	lws, err := c.lwsLister.LeaderWorkerSets(namespace).Get(name)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			utilruntime.HandleError(fmt.Errorf("lws '%s' in work queue no longer exists", key))
+			klog.V(4).InfoS("LeaderWorkerSet no longer exists", "leaderWorkerSet", key)
 			return nil
 		}
 		return err
@@ -219,10 +219,11 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 	ms, err := c.modelServingLister.ModelServings(namespace).Get(msName)
 	if errors.IsNotFound(err) {
 		ms = c.constructModelServing(lws)
-		_, err = c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Create(ctx, ms, metav1.CreateOptions{})
-		if err != nil {
-			return err
+		created, createErr := c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Create(ctx, ms, metav1.CreateOptions{})
+		if createErr != nil {
+			return createErr
 		}
+		modelServingLog(created).Info("LeaderWorkerSet ModelServing creation accepted", "entrypoint", "leaderWorkerSet", "leaderWorkerSet", klog.KObj(lws), "outcome", "requestAccepted")
 	} else if err != nil {
 		return err
 	} else {
@@ -230,10 +231,11 @@ func (c *LWSController) syncHandler(ctx context.Context, key string) error {
 		if !reflect.DeepEqual(ms.Spec, desiredMs.Spec) {
 			msCopy := ms.DeepCopy()
 			msCopy.Spec = desiredMs.Spec
-			_, err = c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msCopy, metav1.UpdateOptions{})
-			if err != nil {
-				return err
+			updated, updateErr := c.kthenaClient.WorkloadV1alpha1().ModelServings(namespace).Update(ctx, msCopy, metav1.UpdateOptions{})
+			if updateErr != nil {
+				return updateErr
 			}
+			modelServingLog(updated).Info("LeaderWorkerSet ModelServing update accepted", "entrypoint", "leaderWorkerSet", "leaderWorkerSet", klog.KObj(lws), "outcome", "requestAccepted")
 		}
 	}
 
