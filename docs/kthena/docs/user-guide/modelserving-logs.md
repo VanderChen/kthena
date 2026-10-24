@@ -26,9 +26,10 @@ template revision. At the default verbosity, follow these records for the same o
    dependencies; lowering partition does not guarantee an immediate deletion.
 3. `Role Pod creation requests accepted` identifies the applied revision and accepted
    Pod count. Existing Pods do not count as newly created Pods.
-4. Availability transitions and `ModelServing condition changed` report observed
-   progress. A partition stop can be available without having every instance at the
-   target version; consult the counts and current/target revision in status logs.
+4. `Role became available` and `ServingGroup became available` report readiness
+   observed by the normal processing flow. A partition stop can be available without
+   having every instance at the target version; use the applied revisions in action
+   logs and inspect the ModelServing status when checking the overall result.
 
 Raising partition reports the new protection boundary; it does not claim that existing
 instances were rolled back. Ordinary replica changes, recovery and surge cleanup use
@@ -38,9 +39,8 @@ their own action/reason fields rather than being reported as template rollout.
 
 | Level | Content |
 | --- | --- |
-| Info (`--v=0` and above) | Accepted business actions, recovery scheduling/cancellation, real availability and Condition transitions, configuration changes |
-| `--v=2` | Successful API status changes summarized by counts and revision |
-| `--v=4` | Reconcile start/end with stage and duration, Pod callbacks, per-Pod identities, budget/partition/dependency decisions, repeated waits, mechanical PodGroup/plugin writes, Kubernetes Event mirrors |
+| Info (`--v=0` and above, including the default `--v=2`) | Accepted business actions, recovery scheduling/cancellation, real availability transitions, configuration changes, coordination progress/blocking changes |
+| `--v=4` | Reconcile start/end with stage and duration, Pod callbacks, per-Pod identities, budget/partition/dependency decisions, repeated waits, successful status writes, mechanical PodGroup/plugin writes, Kubernetes Event mirrors |
 | Error | Actual API/plugin/history failures with the responsible object and operation; worker failures also identify the stage and retry count |
 
 `requestAccepted` means an API request succeeded; it does not mean the Pod has disappeared
@@ -52,9 +52,13 @@ with an unknown outcome remains an error, even if a later observation finds the 
 `/status` API write. Repeated observations of the same state do not generate another
 availability transition. Kubernetes Events remain available independently of their log mirror.
 
+Status persistence emits a short diagnostic only after a successful API write. Logs do
+not separately compare status fields or mirror every Condition. Coordination logs reuse
+the existing coordination-change branch and its reason, alongside the existing Event.
+
 ## Diagnosing a wait or recovery
 
-Use `--v=4` when an object is waiting without a new Condition transition. Filter by owner
+Use `--v=4` when an object is waiting without a new action or coordination change. Filter by owner
 and then SG/Role to inspect partition protection, healthy/total deletion budgets,
 Terminating occupancy, dependency/maxSkew limits, or missing revision history. This is a
 diagnostic setting and can produce many per-member records.

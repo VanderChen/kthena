@@ -20,7 +20,6 @@ import (
 	"context"
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/klog/v2"
 )
@@ -92,44 +91,5 @@ func logModelServingConfigurationChange(before, after *api.ModelServing) {
 			}
 			break
 		}
-	}
-}
-
-// Called only after UpdateStatus succeeds. Internal datastore readiness checks
-// are separate from an API status write and must not masquerade as one.
-func logModelServingStatusChange(before, after *api.ModelServing) {
-	old, current := before.Status, after.Status
-	logger := modelServingLog(after).WithValues("entrypoint", "workqueue", "stateStore", "api")
-	if old.Replicas != current.Replicas || old.AvailableReplicas != current.AvailableReplicas ||
-		old.UpdatedReplicas != current.UpdatedReplicas || old.CurrentReplicas != current.CurrentReplicas ||
-		old.CurrentRevision != current.CurrentRevision || old.UpdateRevision != current.UpdateRevision ||
-		old.ObservedGeneration != current.ObservedGeneration {
-		logger.V(2).Info("ModelServing status changed",
-			"previousReplicas", old.Replicas, "replicas", current.Replicas,
-			"previousAvailable", old.AvailableReplicas, "available", current.AvailableReplicas,
-			"previousUpdated", old.UpdatedReplicas, "updated", current.UpdatedReplicas,
-			"previousCurrent", old.CurrentReplicas, "current", current.CurrentReplicas,
-			"previousCurrentRevision", old.CurrentRevision, "currentRevision", current.CurrentRevision,
-			"previousTargetRevision", old.UpdateRevision, "targetRevision", current.UpdateRevision,
-			"observedGeneration", current.ObservedGeneration)
-	}
-	for _, condition := range current.Conditions {
-		previous := apiMeta.FindStatusCondition(old.Conditions, condition.Type)
-		// Messages may contain changing progress lists. Only a semantic condition
-		// transition is a normal-level event, not each recalculation of that list.
-		if previous != nil && previous.Status == condition.Status && previous.Reason == condition.Reason {
-			continue
-		}
-		previousStatus, previousReason := "", ""
-		if previous != nil {
-			previousStatus, previousReason = string(previous.Status), previous.Reason
-		}
-		detail := []rune(condition.Message)
-		if len(detail) > 512 {
-			detail = append(detail[:512], []rune("...")...)
-		}
-		logger.Info("ModelServing condition changed", "condition", condition.Type,
-			"previousStatus", previousStatus, "status", condition.Status,
-			"previousReason", previousReason, "reason", condition.Reason, "detail", string(detail))
 	}
 }

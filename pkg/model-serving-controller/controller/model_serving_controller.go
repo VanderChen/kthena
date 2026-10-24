@@ -3319,8 +3319,14 @@ func (c *ModelServingController) updateModelServingStatus(
 			if err != nil {
 				return err
 			}
-			logModelServingStatusChange(latestMS, copy)
+			modelServingContextLog(ctx, copy).V(4).Info("ModelServing status updated",
+				"replicas", copy.Status.Replicas, "available", copy.Status.AvailableReplicas, "updated", copy.Status.UpdatedReplicas,
+				"currentRevision", copy.Status.CurrentRevision, "targetRevision", copy.Status.UpdateRevision,
+				"observedGeneration", copy.Status.ObservedGeneration)
 			if coordinationConditionChanged && coordinationCondition != nil {
+				modelServingContextLog(ctx, copy).Info("Coordinated role rollout state changed",
+					"blocked", coordinationCondition.Status == metav1.ConditionTrue,
+					"reason", coordinationCondition.Reason, "detail", coordinationCondition.Message)
 				eventType := corev1.EventTypeNormal
 				if coordinationCondition.Status == metav1.ConditionTrue {
 					eventType = corev1.EventTypeWarning
