@@ -24,6 +24,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -36,6 +37,7 @@ func servingGroupRollout(ms *api.ModelServing) bool {
 // Positive desired membership retains the SG's applied template during local
 // Role recovery, even when no Role or Pod currently remains in the group.
 func (c *ModelServingController) forgetEmptyServingGroups(ctx context.Context, ms *api.ModelServing, revision string) error {
+	defer diagnostics.ModelServing("forgetEmptyServingGroups", ms).End()
 	if !allRolesZero(ms) {
 		return nil
 	}

@@ -125,7 +125,7 @@ func (p *RanktablePlugin) syncRanktable(ctx context.Context, req *plugins.HookRe
 			annotation := pod.Annotations[template.PodAnnotationName]
 			data, err := p.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation)
 			if err != nil {
-				klog.ErrorS(err, "Cannot parse ranktable member", "pod", pod.Name)
+				klog.ErrorS(err, "[MS-PENDING-DEBUG] Cannot parse ranktable member", "pod", pod.Name)
 				complete = false
 				continue
 			}
@@ -175,7 +175,7 @@ func (p *RanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.HookReq
 				return fmt.Errorf("failed to delete ranktable configmap %s: %w", cmName, err)
 			}
 		}
-		klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
+		klog.V(2).Infof("[MS-PENDING-DEBUG] Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
 	} else if template.Level == GroupLevelRanktable {
 		return p.updateRanktableFromPods(ctx, req, ranktableutil.UpdateExisting)
 	}
@@ -212,7 +212,7 @@ func (p *RanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("failed to delete ranktable configmap %s/%s: %w", ms.Namespace, cm.Name, err))
 			}
 		} else {
-			klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)
+			klog.V(2).Infof("[MS-PENDING-DEBUG] Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)
 		}
 	}
 
@@ -220,7 +220,7 @@ func (p *RanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plugins
 }
 
 func (p *RanktablePlugin) injectRanktableMount(pod *corev1.Pod, template *RanktableTemplate, cmName string) {
-	klog.V(4).Infof("Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
+	klog.V(4).Infof("[MS-PENDING-DEBUG] Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
 	// Check if volume already exists
 	volumeExists := false
 	for _, vol := range pod.Spec.Volumes {

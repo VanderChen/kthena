@@ -392,7 +392,7 @@ func (s *store) AddRole(modelServingName types.NamespacedName, groupName, roleNa
 
 	if existing, exists := group.roles[roleName][roleID]; exists {
 		if existing.Revision != revision {
-			klog.Warningf("AddRole: role %s/%s already exists with revision %s, but got revision %s; skipping",
+			klog.Warningf("[MS-PENDING-DEBUG] AddRole: role %s/%s already exists with revision %s, but got revision %s; skipping",
 				roleName, roleID, existing.Revision, revision)
 		}
 	} else {

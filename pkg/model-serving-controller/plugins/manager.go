@@ -26,6 +26,7 @@ import (
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 )
 
 // Factory constructs a Plugin from a PluginSpec.
@@ -151,7 +152,12 @@ func (c *Chain) OnPodCreate(ctx context.Context, req *HookRequest) error {
 		if !shouldRun(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnPodCreate(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnPodCreate", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnPodCreate(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnPodCreate: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -167,7 +173,12 @@ func (c *Chain) OnPodRunning(ctx context.Context, req *HookRequest) error {
 		if !shouldRun(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnPodRunning(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnPodRunning", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnPodRunning(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnPodRunning: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -183,7 +194,12 @@ func (c *Chain) OnPodReady(ctx context.Context, req *HookRequest) error {
 		if !shouldRun(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnPodReady(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnPodReady", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnPodReady(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnPodReady: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -199,7 +215,12 @@ func (c *Chain) OnPodDelete(ctx context.Context, req *HookRequest) error {
 		if !shouldRun(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnPodDelete(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnPodDelete", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnPodDelete(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnPodDelete: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -215,7 +236,12 @@ func (c *Chain) OnRoleSync(ctx context.Context, req *HookRequest) error {
 		if !shouldRunRole(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnRoleSync(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnRoleSync", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnRoleSync(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnRoleSync: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -231,7 +257,12 @@ func (c *Chain) OnRoleDelete(ctx context.Context, req *HookRequest) error {
 		if !shouldRunRole(entry.spec, req) {
 			continue
 		}
-		if err := entry.plugin.OnRoleDelete(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnRoleDelete", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnRoleDelete(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnRoleDelete: %w", entry.plugin.Name(), err)
 		}
 	}
@@ -247,7 +278,12 @@ func (c *Chain) OnServingGroupDelete(ctx context.Context, req *HookRequest) erro
 		if !shouldRunServingGroup(req) {
 			continue
 		}
-		if err := entry.plugin.OnServingGroupDelete(ctx, req); err != nil {
+		trace := diagnostics.ModelServing("plugin.OnServingGroupDelete", req.ModelServing)
+		trace.Event("invoke", "plugin", entry.spec.Name, "group", req.ServingGroup, "role", req.RoleName, "roleID", req.RoleID)
+		err := entry.plugin.OnServingGroupDelete(ctx, req)
+		trace.Event("result", "plugin", entry.spec.Name, "error", err)
+		trace.End()
+		if err != nil {
 			return fmt.Errorf("plugin %s OnServingGroupDelete: %w", entry.plugin.Name(), err)
 		}
 	}

@@ -23,6 +23,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -32,6 +33,7 @@ var errStaleRolloutIntent = errors.New("ModelServing changed before applying rol
 // API reads are intentional here: informer delivery can lag a completed user
 // update. Status-only resourceVersion changes do not invalidate an operation.
 func (c *ModelServingController) checkRolloutIntent(ctx context.Context, ms *api.ModelServing) error {
+	defer diagnostics.ModelServing("checkRolloutIntent", ms).End()
 	if ms.ResourceVersion == "" {
 		return nil
 	} // Not an API-observed object (unit fixtures).

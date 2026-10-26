@@ -98,7 +98,7 @@ func (c *ModelServingController) stageCoordinatedExpansionGang(
 			podGroupMS.Spec.Template.GangPolicy.MinRoleReplicas = make(map[string]int32)
 		}
 		podGroupMS.Spec.Template.GangPolicy.MinRoleReplicas[roleName] = minimum
-		klog.V(4).InfoS("Deferring coordinated expansion Gang minimum until dependencies are ready",
+		klog.V(4).InfoS("[MS-PENDING-DEBUG] Deferring coordinated expansion Gang minimum until dependencies are ready",
 			"modelServing", klog.KObj(ms), "servingGroup", groupName, "role", roleName, "minimum", minimum)
 	}
 	return nil

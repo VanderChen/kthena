@@ -112,7 +112,7 @@ func GenerateEntryPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServ
 
 func GenerateWorkerPod(role workloadv1alpha1.Role, ms *workloadv1alpha1.ModelServing, groupName, roleID string, podIndex int, revision, roleTemplateHash string) *corev1.Pod {
 	if role.WorkerTemplate == nil {
-		klog.Errorf("WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
+		klog.Errorf("[MS-PENDING-DEBUG] WorkerTemplate is required when workerReplicas > 0 for role %s", role.Name)
 		return nil
 	}
 
@@ -262,7 +262,7 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 		},
 	}
 	// create the service in the cluster
-	klog.V(4).Infof("Creating headless service %s", headlessService.Name)
+	klog.V(4).Infof("[MS-PENDING-DEBUG] Creating headless service %s", headlessService.Name)
 	_, err := k8sClient.CoreV1().Services(ms.Namespace).Create(ctx, &headlessService, metav1.CreateOptions{})
 	return err
 }
@@ -288,7 +288,7 @@ func IsOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
 			return true
 		}
 	}
-	klog.Warningf("object %s/%s is not owned by ModelServing with UID %s", obj.GetNamespace(), obj.GetName(), uid)
+	klog.Warningf("[MS-PENDING-DEBUG] object %s/%s is not owned by ModelServing with UID %s", obj.GetNamespace(), obj.GetName(), uid)
 	return false
 }
 

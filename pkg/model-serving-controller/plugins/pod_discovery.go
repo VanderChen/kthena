@@ -110,7 +110,7 @@ func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) 
 
 func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) error {
 	if req.KubeClient == nil {
-		klog.Warningf("KubeClient is nil in HookRequest for plugin %s, skipping OnPodReady", p.Name())
+		klog.Warningf("[MS-PENDING-DEBUG] KubeClient is nil in HookRequest for plugin %s, skipping OnPodReady", p.Name())
 		return nil
 	}
 
@@ -125,7 +125,7 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 			LabelSelector: fmt.Sprintf("%s=%s", workloadv1alpha1.GroupNameLabelKey, servingGroupName),
 		})
 		if err != nil {
-			klog.Errorf("Failed to list pods for ServingGroup %s: %v", servingGroupName, err)
+			klog.Errorf("[MS-PENDING-DEBUG] Failed to list pods for ServingGroup %s: %v", servingGroupName, err)
 			return false, err
 		}
 
@@ -194,7 +194,7 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 					}
 					return false, err
 				}
-				klog.Infof("Created discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+				klog.Infof("[MS-PENDING-DEBUG] Created discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
 				return true, nil
 			}
 			return false, err
@@ -218,7 +218,7 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 			}
 			return false, err
 		}
-		klog.Infof("Updated discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+		klog.Infof("[MS-PENDING-DEBUG] Updated discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
 		return true, nil
 	})
 }

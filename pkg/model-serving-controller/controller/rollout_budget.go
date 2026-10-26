@@ -25,9 +25,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -115,6 +117,7 @@ func invalidateRolloutPodSnapshot(ctx context.Context) {
 }
 
 func (c *ModelServingController) withRolloutPodSnapshot(ctx context.Context, ms *workloadv1alpha1.ModelServing) (context.Context, error) {
+	defer diagnostics.ModelServing("withRolloutPodSnapshot", ms).End()
 	if ms.ResourceVersion == "" {
 		return ctx, nil
 	}
@@ -125,6 +128,30 @@ func (c *ModelServingController) withRolloutPodSnapshot(ctx context.Context, ms 
 	live, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}.String()})
 	if err != nil {
 		return ctx, err
+	}
+	if klog.V(4).Enabled() {
+		owned, pending, running, ready, terminating := 0, 0, 0, 0, 0
+		for i := range live.Items {
+			pod := &live.Items[i]
+			if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+				continue
+			}
+			owned++
+			if pod.Status.Phase == corev1.PodPending {
+				pending++
+			}
+			if pod.Status.Phase == corev1.PodRunning {
+				running++
+			}
+			if utils.IsPodRunningAndReady(pod) {
+				ready++
+			}
+			if pod.DeletionTimestamp != nil {
+				terminating++
+			}
+		}
+		klog.V(4).InfoS("[MS-PENDING-DEBUG] Pod snapshot", "modelServing", klog.KObj(ms),
+			"listed", len(live.Items), "owned", owned, "pending", pending, "running", running, "ready", ready, "terminating", terminating)
 	}
 	if !ok || snapshot.ownerUID != ms.UID {
 		snapshot = &rolloutPodSnapshot{ownerUID: ms.UID}
@@ -173,6 +200,7 @@ func (c *ModelServingController) podsForRoleObservation(ctx context.Context, ms 
 // Creating placeholder is not an old-unavailable candidate. Keep uncertainty
 // distinct from observed unavailability so lookup errors cannot grant credit.
 func (c *ModelServingController) refreshRolloutAvailability(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	defer diagnostics.ModelServing("refreshRolloutAvailability", ms).End()
 	key := utils.GetNamespaceName(ms)
 	groups, err := c.store.GetServingGroupByModelServing(key)
 	if errors.Is(err, datastore.ErrServingGroupNotFound) {

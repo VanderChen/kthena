@@ -35,6 +35,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -318,6 +319,7 @@ func (c *ModelServingController) persistCoordinatedRoleRevision(
 	ms *workloadv1alpha1.ModelServing,
 	revision string,
 ) error {
+	defer diagnostics.ModelServing("persistCoordinatedRoleRevision", ms).End()
 	if roleCoordination(ms) == nil {
 		return nil
 	}
@@ -707,6 +709,7 @@ func (c *ModelServingController) resolveRoleRolloutPolicy(
 	ms *workloadv1alpha1.ModelServing,
 	newRevision string,
 ) (*roleRolloutPolicy, error) {
+	defer diagnostics.ModelServing("resolveRoleRolloutPolicy", ms).End()
 	coordination := roleCoordination(ms)
 	if coordination == nil {
 		return &roleRolloutPolicy{}, nil
@@ -894,7 +897,7 @@ func calculateRoleRolloutLimits(
 				for _, name := range dependencies[state.roleName] {
 					if dependency := stateByName[name]; dependency != nil && dependency.hasOldVersion {
 						limits.remainingDeletions = 1
-						klog.V(2).InfoS("Allowing one full-rollout terminal rounding step", "role", state.roleName,
+						klog.V(2).InfoS("[MS-PENDING-DEBUG] Allowing one full-rollout terminal rounding step", "role", state.roleName,
 							"targetReady", state.versionReady, "total", state.versionTotal, "maxSkew", maxSkewPercent)
 						break
 					}

@@ -24,6 +24,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -196,6 +197,7 @@ func (h *revisionHistory) decode(cr *appsv1.ControllerRevision) revisionSnapshot
 }
 
 func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloadv1alpha1.Role, error) {
+	defer diagnostics.ModelServing("roles", h.ms).End()
 	if snapshot, ok := h.snapshots[revision]; ok {
 		return snapshot.roles, snapshot.err
 	}
@@ -216,7 +218,7 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 	h.snapshots[revision] = snapshot
 	if snapshot.err != nil {
 		h.controller.enqueueModelServingAfter(h.ms, 5*time.Second)
-		klog.Warningf("Cannot resolve revision %q for ModelServing %s/%s; template-driven deletion is paused for affected replicas: %v",
+		klog.Warningf("[MS-PENDING-DEBUG] Cannot resolve revision %q for ModelServing %s/%s; template-driven deletion is paused for affected replicas: %v",
 			revision, h.ms.Namespace, h.ms.Name, snapshot.err)
 		if h.controller.recorder != nil {
 			h.controller.recorder.Eventf(h.ms, corev1.EventTypeWarning, "RevisionUnresolved",
@@ -247,6 +249,7 @@ func (h *revisionHistory) role(ctx context.Context, revision, name string) (work
 // Scheduler/plugins are immutable owner configuration, so only Role templates
 // participate in semantic history comparisons.
 func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
+	defer diagnostics.ModelServing("desiredRevision", h.ms).End()
 	list, err := h.controller.kubeClientSet.AppsV1().ControllerRevisions(h.ms.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: labels.SelectorFromSet(map[string]string{utils.ControllerRevisionLabelKey: h.ms.Name}).String(),
 	})

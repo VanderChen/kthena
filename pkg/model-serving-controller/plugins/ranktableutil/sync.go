@@ -91,7 +91,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 	}
 	var observed bool
 	var uid types.UID
-	klog.V(4).InfoS("Sync ranktable", "namespace", req.ModelServing.Namespace, "scope", scope.Name, "ownerUID", req.ModelServing.UID, "mode", mode)
+	klog.V(4).InfoS("[MS-PENDING-DEBUG] Sync ranktable", "namespace", req.ModelServing.Namespace, "scope", scope.Name, "ownerUID", req.ModelServing.UID, "mode", mode)
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		cm, err := req.KubeClient.CoreV1().ConfigMaps(req.ModelServing.Namespace).Get(ctx, scope.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
@@ -108,7 +108,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 				uid = cm.UID
 			}
 		} else if cm != nil && cm.UID != uid {
-			klog.V(4).InfoS("Skip replaced ranktable", "scope", scope.Name, "observedUID", uid, "currentUID", cm.UID)
+			klog.V(4).InfoS("[MS-PENDING-DEBUG] Skip replaced ranktable", "scope", scope.Name, "observedUID", uid, "currentUID", cm.UID)
 			return nil
 		}
 		if cm != nil && (!metav1.IsControlledBy(cm, req.ModelServing) || !matchesScope(cm, scope)) {
@@ -187,7 +187,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 			complete, err = completeRole(ctx, req, active)
 			if err != nil {
 				layoutErr = err
-				klog.Warningf("Ranktable %s/%s cannot resolve applied layout: %v", req.ModelServing.Namespace, scope.Name, err)
+				klog.Warningf("[MS-PENDING-DEBUG] Ranktable %s/%s cannot resolve applied layout: %v", req.ModelServing.Namespace, scope.Name, err)
 				if cm == nil {
 					return err
 				}
@@ -223,7 +223,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 			}}
 			bind(cm, anchor, scope.RoleLevel, timestamp)
 			cm.Data = map[string]string{scope.Filename: content}
-			klog.V(4).InfoS("Create active ranktable", "scope", scope.Name, "groupInstance", anchor[GroupInstance], "roleInstance", anchor[RoleInstance], "mode", mode)
+			klog.V(4).InfoS("[MS-PENDING-DEBUG] Create active ranktable", "scope", scope.Name, "groupInstance", anchor[GroupInstance], "roleInstance", anchor[RoleInstance], "mode", mode)
 			_, err = req.KubeClient.CoreV1().ConfigMaps(cm.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 			return err
 		}
@@ -233,7 +233,7 @@ func Sync(ctx context.Context, req *plugins.HookRequest, scope Scope, mode Mode,
 		if maps.Equal(updated.Data, cm.Data) && maps.Equal(updated.Annotations, cm.Annotations) {
 			return layoutErr
 		}
-		klog.V(4).InfoS("Update ranktable", "scope", scope.Name, "cmUID", cm.UID, "mode", mode, "members", len(participants), "complete", complete)
+		klog.V(4).InfoS("[MS-PENDING-DEBUG] Update ranktable", "scope", scope.Name, "cmUID", cm.UID, "mode", mode, "members", len(participants), "complete", complete)
 		_, err = req.KubeClient.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil

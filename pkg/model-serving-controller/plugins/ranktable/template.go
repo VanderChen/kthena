@@ -209,7 +209,7 @@ func (tm *TemplateManager) RenderRanktable(ranktableTemplate string, data Rankta
 	// Validate JSON output
 	var jsonCheck interface{}
 	if err := json.Unmarshal(buf.Bytes(), &jsonCheck); err != nil {
-		klog.Errorf("Generated ranktable is not valid JSON: %s", buf.String())
+		klog.Errorf("[MS-PENDING-DEBUG] Generated ranktable is not valid JSON: %s", buf.String())
 		return "", fmt.Errorf("generated ranktable is not valid JSON: %w", err)
 	}
 

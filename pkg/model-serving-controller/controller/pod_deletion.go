@@ -25,6 +25,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -206,6 +207,7 @@ func (c *ModelServingController) markPodDeletionPlan(ctx context.Context, ms *ap
 // Restore only marked, current-owner Pod UIDs. Unmarked replacements and
 // unrelated members never become part of an old deletion after a restart.
 func (c *ModelServingController) restoreDeletionIntents(ctx context.Context, ms *api.ModelServing) error {
+	defer diagnostics.ModelServing("restoreDeletionIntents", ms).End()
 	pods, err := c.ownedDeletionPods(ctx, ms, labels.Set{api.ModelServingNameLabelKey: ms.Name}.AsSelector())
 	if err != nil {
 		return err
@@ -402,6 +404,7 @@ func (c *ModelServingController) resumeOrphanedRoleDeletion(ctx context.Context,
 
 // Retry the original UID set, including plans restored from marked survivors.
 func (c *ModelServingController) resumePodDeletionPlans(ctx context.Context, ms *api.ModelServing) error {
+	defer diagnostics.ModelServing("resumePodDeletionPlans", ms).End()
 	plans := []*podDeletionPlan{}
 	c.deletionPlans.Range(func(key, value interface{}) bool {
 		planKey := key.(podDeletionPlanKey)

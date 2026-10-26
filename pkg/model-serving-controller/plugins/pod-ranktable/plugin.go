@@ -130,7 +130,7 @@ func (p *PodRanktablePlugin) syncRanktable(ctx context.Context, req *plugins.Hoo
 			annotation := pod.Annotations[template.PodAnnotationName]
 			data, err := p.templateManager.ParsePodRanktable(template.PodParserTemplate, annotation, pod.Status.PodIP, pod.Name)
 			if err != nil {
-				klog.ErrorS(err, "Cannot parse ranktable member", "pod", pod.Name)
+				klog.ErrorS(err, "[MS-PENDING-DEBUG] Cannot parse ranktable member", "pod", pod.Name)
 				complete = false
 				continue
 			}
@@ -180,11 +180,11 @@ func (p *PodRanktablePlugin) OnRoleDelete(ctx context.Context, req *plugins.Hook
 				return fmt.Errorf("failed to delete ranktable configmap %s: %w", cmName, err)
 			}
 		}
-		klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
+		klog.V(2).Infof("[MS-PENDING-DEBUG] Deleted ranktable ConfigMap %s/%s", ms.Namespace, cmName)
 	} else if template.Level == GroupLevelRanktable {
 		// When level is group and a role is deleted, update the group-level ranktable
 		// to reflect the removal of pods from that role
-		klog.V(4).Infof("OnRoleDelete: Updating group-level ranktable after role %s/%s deletion", req.RoleName, req.RoleID)
+		klog.V(4).Infof("[MS-PENDING-DEBUG] OnRoleDelete: Updating group-level ranktable after role %s/%s deletion", req.RoleName, req.RoleID)
 		return p.updateRanktableFromPods(ctx, req, ranktableutil.UpdateExisting)
 	}
 
@@ -220,7 +220,7 @@ func (p *PodRanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plug
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("failed to delete ranktable configmap %s/%s: %w", ms.Namespace, cm.Name, err))
 			}
 		} else {
-			klog.V(2).Infof("Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)
+			klog.V(2).Infof("[MS-PENDING-DEBUG] Deleted ranktable ConfigMap %s/%s", ms.Namespace, cm.Name)
 		}
 	}
 
@@ -228,7 +228,7 @@ func (p *PodRanktablePlugin) OnServingGroupDelete(ctx context.Context, req *plug
 }
 
 func (p *PodRanktablePlugin) injectRanktableMount(pod *corev1.Pod, template *RanktableTemplate, cmName string) {
-	klog.V(4).Infof("Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
+	klog.V(4).Infof("[MS-PENDING-DEBUG] Injecting ranktable template %s/%s, comfigmap %s with mountpath %s", pod.Namespace, pod.Name, cmName, template.MountPath)
 	// Check if volume already exists
 	volumeExists := false
 	for _, vol := range pod.Spec.Volumes {

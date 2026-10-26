@@ -121,7 +121,7 @@ func CreateControllerRevision(ctx context.Context, client kubernetes.Interface, 
 		return nil, fmt.Errorf("failed to create ControllerRevision: %w", err)
 	}
 
-	klog.V(4).Infof("Created ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
+	klog.V(4).Infof("[MS-PENDING-DEBUG] Created ControllerRevision %s/%s with revision %s", ms.Namespace, controllerRevisionName, revision)
 	return created, nil
 }
 
@@ -277,12 +277,12 @@ func CleanupOldControllerRevisions(
 			deletionErrors = append(deletionErrors, fmt.Errorf("delete ControllerRevision %s/%s: %w", ms.Namespace, revision.Name, err))
 		} else {
 			deletedCount++
-			klog.V(4).Infof("Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
+			klog.V(4).Infof("[MS-PENDING-DEBUG] Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
 		}
 	}
 
 	if deletedCount > 0 {
-		klog.V(4).Infof("Cleaned up %d old ControllerRevisions for ModelServing %s/%s (preserved CurrentRevision=%s, UpdateRevision=%s)",
+		klog.V(4).Infof("[MS-PENDING-DEBUG] Cleaned up %d old ControllerRevisions for ModelServing %s/%s (preserved CurrentRevision=%s, UpdateRevision=%s)",
 			deletedCount, ms.Namespace, ms.Name, ms.Status.CurrentRevision, ms.Status.UpdateRevision)
 	}
 

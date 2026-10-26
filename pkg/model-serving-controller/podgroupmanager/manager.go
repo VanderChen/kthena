@@ -44,6 +44,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -98,7 +99,7 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 			newManager.hasSubGroupPolicy.Store(false)
 			newManager.hasTopologyAffinity.Store(false)
 		} else {
-			klog.Errorf("failed to get PodGroup CRD: %v", err)
+			klog.Errorf("[MS-PENDING-DEBUG] failed to get PodGroup CRD: %v", err)
 		}
 	} else {
 		newManager.handlePodGroupCRDChange(crd, false)
@@ -122,12 +123,12 @@ func NewManager(kubeClient kubernetes.Interface, volcanoClient volcanoclient.Int
 		UpdateFunc: func(oldObj, newObj interface{}) {
 			newCrd, ok := newObj.(*apiextv1.CustomResourceDefinition)
 			if !ok {
-				klog.Error("failed to parse newCrd type when update CustomResourceDefinition")
+				klog.Error("[MS-PENDING-DEBUG] failed to parse newCrd type when update CustomResourceDefinition")
 				return
 			}
 			_, ok = oldObj.(*apiextv1.CustomResourceDefinition)
 			if !ok {
-				klog.Error("failed to parse curCrd type when update CustomResourceDefinition")
+				klog.Error("[MS-PENDING-DEBUG] failed to parse curCrd type when update CustomResourceDefinition")
 				return
 			}
 
@@ -146,13 +147,13 @@ func (m *Manager) handlePodGroupCRDDelete(obj interface{}) {
 	if !ok {
 		tombstone, tombstoneOK := obj.(cache.DeletedFinalStateUnknown)
 		if !tombstoneOK {
-			klog.Errorf("failed to parse CustomResourceDefinition type when deleting: %#v", obj)
+			klog.Errorf("[MS-PENDING-DEBUG] failed to parse CustomResourceDefinition type when deleting: %#v", obj)
 			return
 		}
 
 		crd, ok = tombstone.Obj.(*apiextv1.CustomResourceDefinition)
 		if !ok {
-			klog.Errorf("failed to parse CustomResourceDefinition from tombstone: %#v", tombstone.Obj)
+			klog.Errorf("[MS-PENDING-DEBUG] failed to parse CustomResourceDefinition from tombstone: %#v", tombstone.Obj)
 			return
 		}
 	}
@@ -185,7 +186,7 @@ func (m *Manager) Run(parentCtx context.Context) error {
 		return fmt.Errorf("failed to sync PodGroup CRD informer cache")
 	}
 	if !m.hasPodGroupCRD.Load() {
-		klog.Info("PodGroup CRD is not found, skipping PodGroup informer initialization")
+		klog.Info("[MS-PENDING-DEBUG] PodGroup CRD is not found, skipping PodGroup informer initialization")
 		return nil
 	}
 
@@ -244,6 +245,7 @@ func (m *Manager) stopPodGroupInformer() {
 // or updates it if it does.
 // Returns an error and a requeue duration if there is an error.
 func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
+	defer diagnostics.ModelServing("CreateOrUpdatePodGroup", ms).End()
 	if err := m.validateTopologyAffinityCapabilities(ms); err != nil {
 		return err, 0
 	}
@@ -294,6 +296,7 @@ func extractQueueName(ms *workloadv1alpha1.ModelServing) string {
 
 // createPodGroup creates a PodGroup for group-level gang scheduling
 func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, podGroupName string) error {
+	defer diagnostics.ModelServing("createPodGroup", ms).End()
 	// Calculate total pods and resources for this ServingGroup
 	// minMember: total pods across all roles
 	// minRoleMember: map of roleName to number of pods in that role
@@ -336,7 +339,7 @@ func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.Model
 		return err
 	}
 
-	klog.V(2).Infof("Created PodGroup %s for group-level gang scheduling", podGroupName)
+	klog.V(2).Infof("[MS-PENDING-DEBUG] Created PodGroup %s for group-level gang scheduling", podGroupName)
 	return nil
 }
 
@@ -455,6 +458,7 @@ func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1
 
 // updatePodGroupIfNeeded updates a PodGroup if needed for group-level scheduling
 func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
+	defer diagnostics.ModelServing("updatePodGroupIfNeeded", ms).End()
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		// Get latest podgroup from informer store
 		currentPodGroup, getErr := m.PodGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
@@ -481,12 +485,25 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 			updated = appendSubGroupPolicy(ms, updated, minRoleMember)
 		}
 
+		if klog.V(4).Enabled() {
+			klog.V(4).InfoS("[MS-PENDING-DEBUG] PodGroup comparison", "modelServing", klog.KObj(ms), "podGroup", currentPodGroup.Name,
+				"minMemberChanged", currentPodGroup.Spec.MinMember != updated.Spec.MinMember,
+				"resourcesChanged", !reflect.DeepEqual(currentPodGroup.Spec.MinResources, updated.Spec.MinResources),
+				"networkTopologyChanged", !reflect.DeepEqual(currentPodGroup.Spec.NetworkTopology, updated.Spec.NetworkTopology),
+				"topologyAffinityChanged", !reflect.DeepEqual(currentPodGroup.Spec.TopologyAffinity, updated.Spec.TopologyAffinity),
+				"subGroupPolicyChanged", !reflect.DeepEqual(currentPodGroup.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy),
+				"queueChanged", currentPodGroup.Spec.Queue != updated.Spec.Queue)
+		}
 		if hasPodGroupChanged(currentPodGroup, updated) {
+			apiTrace := diagnostics.ModelServing("api.PodGroup.UPDATE", ms)
+			apiTrace.Event("request", "podGroup", currentPodGroup.Name, "resourceVersion", currentPodGroup.ResourceVersion, "oldMinMember", currentPodGroup.Spec.MinMember, "newMinMember", updated.Spec.MinMember, "oldQueue", currentPodGroup.Spec.Queue, "newQueue", updated.Spec.Queue)
 			_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
+			apiTrace.Event("result", "error", err)
+			apiTrace.End()
 			if err != nil {
 				return err
 			}
-			klog.V(2).Infof("Updated PodGroup %s for group-level gang scheduling", currentPodGroup.Name)
+			klog.V(2).Infof("[MS-PENDING-DEBUG] Updated PodGroup %s for group-level gang scheduling", currentPodGroup.Name)
 		}
 
 		return nil
@@ -494,6 +511,7 @@ func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *scheduli
 }
 
 func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
+	defer diagnostics.ModelServing("DeletePodGroup", ms).End()
 	if !m.hasPodGroupCRD.Load() {
 		return nil
 	}
@@ -528,7 +546,7 @@ func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.Mod
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
 		}
-		klog.V(2).Infof("Deleted PodGroup %s (gang scheduling disabled)", podGroup.Name)
+		klog.V(2).Infof("[MS-PENDING-DEBUG] Deleted PodGroup %s (gang scheduling disabled)", podGroup.Name)
 	}
 
 	return nil
@@ -577,7 +595,7 @@ func (m *Manager) AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.
 // Helper function to handle PodGroup CRD changes
 func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition, isDeleted bool) {
 	if isDeleted {
-		klog.Info("[CRD Deleted] PodGroup CRD removed")
+		klog.Info("[MS-PENDING-DEBUG] [CRD Deleted] PodGroup CRD removed")
 		m.hasPodGroupCRD.Store(false)
 		m.hasSubGroupPolicy.Store(false)
 		m.hasTopologyAffinity.Store(false)
@@ -586,32 +604,32 @@ func (m *Manager) handlePodGroupCRDChange(crd *apiextv1.CustomResourceDefinition
 	}
 
 	if m.volcanoClient == nil {
-		klog.Warning("PodGroup CRD detected but volcano client is not initialized; disabling PodGroup support")
+		klog.Warning("[MS-PENDING-DEBUG] PodGroup CRD detected but volcano client is not initialized; disabling PodGroup support")
 		m.hasPodGroupCRD.Store(false)
 		m.hasSubGroupPolicy.Store(false)
 		m.hasTopologyAffinity.Store(false)
 		return
 	}
 
-	klog.Info("PodGroup CRD detected")
+	klog.Info("[MS-PENDING-DEBUG] PodGroup CRD detected")
 	m.hasPodGroupCRD.Store(true)
 	if podGroupCRDHasSubGroup(crd) {
-		klog.Info("PodGroup CRD has subGroupPolicy feature")
+		klog.Info("[MS-PENDING-DEBUG] PodGroup CRD has subGroupPolicy feature")
 		m.hasSubGroupPolicy.Store(true)
 	} else {
-		klog.Info("PodGroup CRD does not have subGroupPolicy feature")
+		klog.Info("[MS-PENDING-DEBUG] PodGroup CRD does not have subGroupPolicy feature")
 		m.hasSubGroupPolicy.Store(false)
 	}
 	if podGroupCRDHasTopologyAffinity(crd) {
-		klog.Info("PodGroup CRD has topologyAffinity feature")
+		klog.Info("[MS-PENDING-DEBUG] PodGroup CRD has topologyAffinity feature")
 		m.hasTopologyAffinity.Store(true)
 	} else {
-		klog.Info("PodGroup CRD does not have topologyAffinity feature")
+		klog.Info("[MS-PENDING-DEBUG] PodGroup CRD does not have topologyAffinity feature")
 		m.hasTopologyAffinity.Store(false)
 	}
 
 	if initErr := m.initPodGroupInformer(); initErr != nil {
-		klog.Errorf("failed to initialize PodGroup informer: %v", initErr)
+		klog.Errorf("[MS-PENDING-DEBUG] failed to initialize PodGroup informer: %v", initErr)
 		m.stopPodGroupInformer()
 	}
 }

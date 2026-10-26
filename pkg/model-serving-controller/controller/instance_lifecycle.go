@@ -30,6 +30,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/diagnostics"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -54,6 +55,7 @@ type lifecycleLock struct {
 }
 
 func (l *lifecycleLocks) lock(key string) func() {
+	trace := diagnostics.Lock(key)
 	l.mu.Lock()
 	if l.entries == nil {
 		l.entries = make(map[string]*lifecycleLock)
@@ -66,7 +68,9 @@ func (l *lifecycleLocks) lock(key string) func() {
 	e.users++
 	l.mu.Unlock()
 	e.mu.Lock()
+	trace.Event("acquired")
 	return func() {
+		defer trace.End()
 		e.mu.Unlock()
 		l.mu.Lock()
 		defer l.mu.Unlock()
@@ -80,6 +84,7 @@ func (l *lifecycleLocks) lock(key string) func() {
 // currentPodEvent discards a queued event for a previous UID and uses the latest
 // observation for the same UID (in particular, Ready must not revive Deleting).
 func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
+	defer diagnostics.Pod("currentPodEvent", pod).End()
 	if pod.UID == "" {
 		return pod
 	} // Synthetic objects without an API identity.
@@ -89,7 +94,10 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 	if pod.ResourceVersion != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		apiTrace := diagnostics.Pod("api.currentPodEvent.GET", pod)
 		latest, err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		apiTrace.Event("result", "error", err)
+		apiTrace.End()
 	}
 	if err != nil || latest.UID != pod.UID {
 		c.enqueueModelServingByChildResourceAfter(pod, enqueueAfter)
