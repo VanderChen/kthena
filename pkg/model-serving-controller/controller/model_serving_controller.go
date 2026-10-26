@@ -349,10 +349,13 @@ func (c *ModelServingController) addPod(obj interface{}) {
 	c.updatePod(nil, obj)
 }
 
-func (c *ModelServingController) updatePod(_, newObj interface{}) {
+func (c *ModelServingController) updatePod(oldObj, newObj interface{}) {
 	newPod, ok := newObj.(*corev1.Pod)
 	if !ok {
 		klog.Error("failed to parse newPod type when updatePod")
+		return
+	}
+	if oldPod, ok := oldObj.(*corev1.Pod); ok && c.enqueuePendingPodUpdate(oldPod, newPod) {
 		return
 	}
 	if key, ok := modelServingKeyFromChildResource(newPod); ok {

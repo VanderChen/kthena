@@ -38,6 +38,7 @@ type Store interface {
 	GetRoleList(modelServingName types.NamespacedName, groupName, roleName string) ([]Role, error)
 	GetRolesByGroup(modelServingName types.NamespacedName, groupName string) (map[string]map[string]*Role, error)
 	GetRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string) RoleStatus
+	IsPodUnavailable(modelServingName types.NamespacedName, groupName, roleName, roleID, podName string) bool
 	UpdateRoleStatus(modelServingName types.NamespacedName, groupName, roleName, roleID string, status RoleStatus) error
 	MarkRoleInitialized(modelServingName types.NamespacedName, groupName, roleName, roleID string) error
 	DeleteRole(modelServingName types.NamespacedName, groupName, roleName, roleID string)
@@ -259,6 +260,25 @@ func (s *store) GetRoleStatus(modelServingName types.NamespacedName, groupName, 
 		}
 	}
 	return RoleNotFound
+}
+
+// IsPodUnavailable reports whether marking this Pod unavailable is already a
+// no-op. It observes all bookkeeping under one read lock, without verifying UID
+// ownership or authorizing any lifecycle action. Missing or uncertain state
+// must use the normal lifecycle path.
+func (s *store) IsPodUnavailable(modelServingName types.NamespacedName, groupName, roleName, roleID, podName string) bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	group := s.servingGroup[modelServingName][groupName]
+	if group == nil || group.Status != ServingGroupCreating {
+		return false
+	}
+	role := group.roles[roleName][roleID]
+	if role == nil || role.Status != RoleCreating {
+		return false
+	}
+	_, running := group.runningPods[podName]
+	return !running
 }
 
 // GetRunningPodNumByServingGroup returns the number of running pods and errors
