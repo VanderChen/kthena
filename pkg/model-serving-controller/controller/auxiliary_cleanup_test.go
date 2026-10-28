@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"k8s.io/client-go/tools/record"
 	"strings"
 	"testing"
 
@@ -37,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	kt "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 	volcanofake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 )
@@ -68,7 +68,7 @@ func TestCleanupRetrySurvivesImmediatePodCallback(t *testing.T) {
 				require.True(t, c.handleDeletionInProgress(ms, "cleanup-0", "infer", "infer-0"))
 				// Even with all Pods already absent the callback must retain the identity.
 				require.NotEqual(t, datastore.RoleNotFound, c.store.GetRoleStatus(nsn, "cleanup-0", "infer", "infer-0"))
-				return true, nil, nil
+				return false, nil, nil
 			})
 			denied := true
 			client.PrependReactor("delete", "services", func(a kt.Action) (bool, runtime.Object, error) {
@@ -216,37 +216,81 @@ func TestMigrationErrorDoesNotBlockAnotherRoleShrink(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry(t *testing.T) {
-	c, client, ms, svc := auxiliaryFixture(t)
-	events := record.NewFakeRecorder(10)
-	c.recorder = events
-	c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", "infer", "infer-0", "v1", "hash")
-	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "member", Namespace: ms.Namespace, UID: "original", Labels: svc.Labels, OwnerReferences: svc.OwnerReferences}}
-	_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
-	require.NoError(t, err)
-	denied := true
-	client.PrependReactor("delete", "services", func(kt.Action) (bool, runtime.Object, error) {
-		if denied {
-			return true, nil, fmt.Errorf("injected")
-		}
-		return false, nil, nil
-	})
-	require.ErrorContains(t, c.DeleteRole(context.Background(), ms, "cleanup-0", "infer", "infer-0"), "injected")
-	pod.UID = "replacement"
-	_, err = client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
-	require.NoError(t, err)
-	require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
-	denied = false
-	require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
-	actual, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
-	require.NoError(t, err)
-	require.Equal(t, types.UID("replacement"), actual.UID)
-	require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(utils.GetNamespaceName(ms), "cleanup-0", "infer", "infer-0"))
-	diagnosed := false
-	for len(events.Events) > 0 {
-		if strings.Contains(<-events.Events, "DeletionIdentityChanged") {
-			diagnosed = true
-		}
+func TestMigrationErrorDoesNotBlockRestartOrphanCleanup(t *testing.T) {
+	c, client, ms, orphan := auxiliaryFixture(t)
+	ms.Spec.Replicas = ptr.To[int32](1)
+	ms.Spec.Template.Roles = []workload.Role{{Name: "blocked", Replicas: ptr.To[int32](1), WorkerReplicas: 1, WorkerTemplate: &workload.PodTemplateSpec{}}}
+	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+	c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", "blocked", "blocked-0", "v1", "hash")
+	// Restart recovered the surviving Role from Pods; no store record remains for
+	// this old auxiliary Service, which is outside the desired Role identities.
+	for n := 0; n < 2; n++ {
+		name := utils.GeneratePodName("cleanup-0", "blocked-0", n)
+		pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name), Labels: map[string]string{
+			workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: "cleanup-0", workload.RoleLabelKey: "blocked", workload.RoleIDKey: "blocked-0", workload.EntryLabelKey: fmt.Sprint(n == 0),
+		}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Spec: corev1.PodSpec{Subdomain: "cleanup-0-blocked-0-0"}}
+		_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
 	}
-	require.True(t, diagnosed, "safe waiting must be diagnosed instead of silently stuck or deleting the replacement")
+	require.ErrorContains(t, c.syncModelServing(context.Background(), "default/cleanup"), "MigrationRequired")
+	_, err := client.CoreV1().Services(ms.Namespace).Get(context.Background(), orphan.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "migration errors must not starve independent orphan cleanup")
+	for n := 0; n < 2; n++ {
+		name := utils.GeneratePodName("cleanup-0", "blocked-0", n)
+		pod, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Equal(t, types.UID(name), pod.UID)
+	}
+}
+
+func TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry(t *testing.T) {
+	for _, sg := range []bool{false, true} {
+		t.Run(fmt.Sprint(sg), func(t *testing.T) {
+			c, client, ms, svc := auxiliaryFixture(t)
+			events := record.NewFakeRecorder(10)
+			c.recorder = events
+			c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", "infer", "infer-0", "v1", "hash")
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "member", Namespace: ms.Namespace, UID: "original", Labels: svc.Labels, OwnerReferences: svc.OwnerReferences}}
+			_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+			require.NoError(t, err)
+			denied := true
+			client.PrependReactor("delete", "services", func(kt.Action) (bool, runtime.Object, error) {
+				if denied {
+					return true, nil, fmt.Errorf("injected")
+				}
+				return false, nil, nil
+			})
+			if sg {
+				require.ErrorContains(t, c.deleteServingGroup(context.Background(), ms, "cleanup-0"), "injected")
+			} else {
+				require.ErrorContains(t, c.DeleteRole(context.Background(), ms, "cleanup-0", "infer", "infer-0"), "injected")
+			}
+			pod.UID = "replacement"
+			_, err = client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+			require.NoError(t, err)
+			require.NoError(t, c.podsInformer.GetIndexer().Add(pod))
+			denied = false
+			require.NoError(t, c.finishPendingDeletions(context.Background(), ms))
+			actual, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, types.UID("replacement"), actual.UID)
+			service, err := client.CoreV1().Services(ms.Namespace).Get(context.Background(), svc.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			require.Equal(t, svc.UID, service.UID)
+			if sg {
+				require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "cleanup-0"))
+			} else {
+				require.Equal(t, datastore.RoleDeleting, c.store.GetRoleStatus(utils.GetNamespaceName(ms), "cleanup-0", "infer", "infer-0"))
+			}
+			diagnosed := false
+			for len(events.Events) > 0 {
+				if strings.Contains(<-events.Events, "DeletionIdentityChanged") {
+					diagnosed = true
+				}
+			}
+			require.True(t, diagnosed, "safe waiting must be diagnosed instead of silently stuck or deleting the replacement")
+		})
+	}
 }

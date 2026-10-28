@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
-	"sync"
 
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -67,9 +69,9 @@ func (c *ModelServingController) finishPendingDeletions(ctx context.Context, ms 
 	return nil
 }
 
-// cleanupOrphanServices runs only after successful count/rollout reconciliation,
-// when this key has no in-flight creates. Restart does not resurrect Role
-// identities from Services. Current Pods and store creation/deletion facts win.
+// cleanupOrphanServices runs before new requests for this workqueue key, even
+// when a surviving Role will fail reconciliation. Restart does not resurrect
+// Role identities from Services. Desired slots, current Pods and store facts win.
 func (c *ModelServingController) cleanupOrphanServices(ctx context.Context, ms *workload.ModelServing) error {
 	services, err := c.kubeClientSet.CoreV1().Services(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: labels.Set{workload.ModelServingNameLabelKey: ms.Name}.String()})
 	if err != nil {
@@ -114,7 +116,7 @@ func (c *ModelServingController) cleanupOrphanServices(ctx context.Context, ms *
 		}
 		uid := service.UID
 		err = c.kubeClientSet.CoreV1().Services(ms.Namespace).Delete(ctx, service.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
-		if err != nil {
+		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("cleanup orphan Headless Service %s/%s: %w", ms.Namespace, service.Name, err)
 		}
 	}

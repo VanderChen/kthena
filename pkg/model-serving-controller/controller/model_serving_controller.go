@@ -557,7 +557,7 @@ func (c *ModelServingController) processNextWorkItem(ctx context.Context) bool {
 	return true
 }
 
-func (c *ModelServingController) syncModelServing(ctx context.Context, key string) error {
+func (c *ModelServingController) syncModelServing(ctx context.Context, key string) (syncErr error) {
 	klog.V(4).InfoS("Started syncing ModelServing", "key", key)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
@@ -573,6 +573,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 		return err
 	}
 
+	// Recover orphan cleanup independently of migration errors in surviving Roles.
+	orphanErr := c.cleanupOrphanServices(ctx, ms)
+	defer func() { syncErr = errors.Join(syncErr, orphanErr) }()
 	revision := utils.ModelServingRevision(ms)
 	if err := c.finishPendingDeletions(ctx, ms); err != nil {
 		return err
@@ -591,11 +594,6 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
 	if err := c.manageRollingUpdate(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
-	}
-
-	// No creates are in flight in this key's workqueue reconciliation here.
-	if err := c.cleanupOrphanServices(ctx, ms); err != nil {
-		return err
 	}
 
 	// 4. Calculate and update the overall condition and replica status fields of the ModelServing.
@@ -1383,6 +1381,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 		return err
 	} else if len(names) > 0 {
 		c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "DeletionIdentityChanged", fmt.Sprintf("Preserving replacement Pods %v; waiting for Role identity reconciliation", names))
+		return nil
 	}
 	if deleteErr = c.runRoleDeletePlugins(ctx, ms, groupName, roleName, roleID); deleteErr != nil {
 		return deleteErr
@@ -2829,6 +2828,7 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		return getErr
 	} else if len(names) > 0 {
 		c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "DeletionIdentityChanged", fmt.Sprintf("Preserving replacement Pods %v; waiting for ServingGroup identity reconciliation", names))
+		return nil
 	}
 
 	for roleName, roles := range rolesByName {
