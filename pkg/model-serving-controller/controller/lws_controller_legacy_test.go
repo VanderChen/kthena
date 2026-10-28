@@ -46,6 +46,12 @@ func TestLWSLegacyChildUpdates(t *testing.T) {
 		{"SG shrink", func(l *lwsv1.LeaderWorkerSet) { l.Spec.Replicas = ptr.To[int32](1) }, true, true},
 		{"SG zero", func(l *lwsv1.LeaderWorkerSet) { l.Spec.Replicas = ptr.To[int32](0) }, true, true},
 		{"SG expand", func(l *lwsv1.LeaderWorkerSet) { l.Spec.Replicas = ptr.To[int32](4) }, false, false},
+		{"explicit TCP is equivalent", func(l *lwsv1.LeaderWorkerSet) {
+			l.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolTCP
+		}, true, false},
+		{"TCP to UDP requires migration", func(l *lwsv1.LeaderWorkerSet) {
+			l.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolUDP
+		}, false, false},
 		{"worker shrink", func(l *lwsv1.LeaderWorkerSet) { l.Spec.LeaderWorkerTemplate.Size = ptr.To[int32](1) }, false, false},
 		{"image plus shrink", func(l *lwsv1.LeaderWorkerSet) {
 			l.Spec.Replicas = ptr.To[int32](1)
@@ -55,6 +61,7 @@ func TestLWSLegacyChildUpdates(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			lws := &lwsv1.LeaderWorkerSet{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "default", UID: "parent"}, Spec: lwsv1.LeaderWorkerSetSpec{Replicas: ptr.To[int32](3), LeaderWorkerTemplate: lwsv1.LeaderWorkerTemplate{Size: ptr.To[int32](2), WorkerTemplate: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "old"}}}}}}}
 			c := &LWSController{}
+			lws.Spec.LeaderWorkerTemplate.WorkerTemplate.Spec.Containers[0].Ports = []corev1.ContainerPort{{ContainerPort: 8100}}
 			old := c.constructModelServing(lws).DeepCopy()
 			old.Spec.Plugins = []workload.PluginSpec{{Name: msplugins.LWSLabelsPluginName, Type: workload.PluginTypeBuiltIn}}
 			old.UID = "legacy-child"
@@ -64,6 +71,8 @@ func TestLWSLegacyChildUpdates(t *testing.T) {
 			old.Spec.RecoveryPolicy = workload.RoleRecreate
 			old.Spec.RevisionHistoryLimit = ptr.To[int32](10)
 			old.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](0)
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolTCP
+			old.Spec.Template.Roles[0].WorkerTemplate.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolTCP
 			original := old.DeepCopy()
 			c.kthenaClient = kthenafake.NewSimpleClientset(old)
 			lwsIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})

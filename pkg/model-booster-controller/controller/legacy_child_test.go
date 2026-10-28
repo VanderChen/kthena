@@ -26,6 +26,7 @@ import (
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
@@ -58,6 +59,10 @@ func TestModelBoosterLegacyChildUpdates(t *testing.T) {
 			old, err := convert.BuildModelServing(model)
 			require.NoError(t, err)
 			old.Spec.Plugins = nil
+			// The real ModelServing CRD defaults the generated runtime port.
+			// The converter omits protocol, including during unchanged sync.
+			require.NotEmpty(t, old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Ports)
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Ports[0].Protocol = corev1.ProtocolTCP
 			old.UID = "legacy-child"
 			old.ResourceVersion = "1"
 			original := old.DeepCopy()

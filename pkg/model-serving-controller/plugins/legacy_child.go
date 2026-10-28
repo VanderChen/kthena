@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -101,8 +102,8 @@ func PreserveChildPluginConfiguration(old, desired *workload.ModelServing) error
 	return nil
 }
 
-// These are ModelServing schema defaults, not Pod defaults: a real Pod template
-// edit (including worker layout) must not be mistaken for safe count reduction.
+// Normalize only defaults in the ModelServing CRD, including its embedded Pod
+// schema. Do not apply built-in Pod admission defaults or erase template edits.
 func normalizeChildDefaults(ms *workload.ModelServing) {
 	if ms.Spec.Replicas == nil {
 		ms.Spec.Replicas = ptr.To[int32](1)
@@ -133,6 +134,75 @@ func normalizeChildDefaults(ms *workload.ModelServing) {
 		if role.Partition == nil {
 			role.Partition = ptr.To(intstr.FromInt32(0))
 		}
+		normalizeChildPodSchemaDefaults(&role.EntryTemplate.Spec)
+		if role.WorkerTemplate != nil {
+			normalizeChildPodSchemaDefaults(&role.WorkerTemplate.Spec)
+		}
 	}
 	slices.SortFunc(ms.Spec.Template.Roles, func(a, b workload.Role) int { return strings.Compare(a.Name, b.Name) })
+}
+
+func normalizeChildPodSchemaDefaults(spec *corev1.PodSpec) {
+	normalizeContainer := func(ports []corev1.ContainerPort, env []corev1.EnvVar, probes ...*corev1.Probe) {
+		for i := range ports {
+			if ports[i].Protocol == "" {
+				ports[i].Protocol = corev1.ProtocolTCP
+			}
+		}
+		for i := range env {
+			if source := env[i].ValueFrom; source != nil && source.FileKeyRef != nil && source.FileKeyRef.Optional == nil {
+				source.FileKeyRef.Optional = ptr.To(false)
+			}
+		}
+		for _, probe := range probes {
+			if probe != nil && probe.GRPC != nil && probe.GRPC.Service == nil {
+				probe.GRPC.Service = ptr.To("")
+			}
+		}
+	}
+	for i := range spec.Containers {
+		c := &spec.Containers[i]
+		normalizeContainer(c.Ports, c.Env, c.LivenessProbe, c.ReadinessProbe, c.StartupProbe)
+	}
+	for i := range spec.InitContainers {
+		c := &spec.InitContainers[i]
+		normalizeContainer(c.Ports, c.Env, c.LivenessProbe, c.ReadinessProbe, c.StartupProbe)
+	}
+	for i := range spec.EphemeralContainers {
+		c := &spec.EphemeralContainers[i]
+		normalizeContainer(c.Ports, c.Env, c.LivenessProbe, c.ReadinessProbe, c.StartupProbe)
+	}
+	for i := range spec.Volumes {
+		v := &spec.Volumes[i]
+		if v.AzureDisk != nil {
+			if v.AzureDisk.FSType == nil {
+				v.AzureDisk.FSType = ptr.To("ext4")
+			}
+			if v.AzureDisk.ReadOnly == nil {
+				v.AzureDisk.ReadOnly = ptr.To(false)
+			}
+		}
+		if v.ISCSI != nil && v.ISCSI.ISCSIInterface == "" {
+			v.ISCSI.ISCSIInterface = "default"
+		}
+		if v.RBD != nil {
+			if v.RBD.RBDPool == "" {
+				v.RBD.RBDPool = "rbd"
+			}
+			if v.RBD.RadosUser == "" {
+				v.RBD.RadosUser = "admin"
+			}
+			if v.RBD.Keyring == "" {
+				v.RBD.Keyring = "/etc/ceph/keyring"
+			}
+		}
+		if v.ScaleIO != nil {
+			if v.ScaleIO.FSType == "" {
+				v.ScaleIO.FSType = "xfs"
+			}
+			if v.ScaleIO.StorageMode == "" {
+				v.ScaleIO.StorageMode = "ThinProvisioned"
+			}
+		}
+	}
 }
