@@ -253,7 +253,7 @@ Below are examples of ModelServing configurations for different deployment scena
 
 ModelServing does not create per-Role-replica Headless Services by default. If
 entry and worker Pods rely on the generated `ENTRY_ADDRESS` or per-Pod DNS,
-enable the built-in plugin explicitly:
+enable the built-in plugin when creating the ModelServing:
 
 ```yaml
 spec:
@@ -262,13 +262,20 @@ spec:
       type: BuiltIn
 ```
 
-Without the plugin, no new Headless Services are created or recovered. Removing
-the plugin does not immediately delete existing Services; they are deleted when
-their corresponding Roles are deleted. `ENTRY_ADDRESS` is injected into new
-Entry and Worker Pods only when this plugin runs. The plugin also sets each
-Pod's hostname to its generated Pod name and its subdomain to the Entry Service
-name. Because that Service selects both Entry and Worker Pods, every Pod in the
-Role replica receives a DNS record under the Headless Service domain.
+The plugin maintains two Services for each matching Role instance with a
+`workerTemplate`. The Entry Service retains its existing name, selects only the
+Entry Pod, and supplies `ENTRY_ADDRESS=<entry-service>.<namespace>`. A separate
+discovery Service selects Entry and Worker Pods. Newly created Pods use their
+generated Pod name as hostname and the discovery Service as subdomain, allowing
+individual member DNS queries before the Pods become Ready.
+
+Without the plugin, these Services and DNS settings are not created or recovered.
+The plugin chain is immutable after creation, including adding the first plugin
+to an older object. Existing workloads without the plugin require a new
+ModelServing and traffic migration. Workloads using an older all-member Service
+as their Pod subdomain report `MigrationRequired` instead of silently losing
+Worker DNS records. See [plugin configuration and migration](modelserving-plugin-framework.md#upgrade-and-migration)
+for the compatibility boundaries and converter behavior.
 
 ### GPU PD Disaggregation
 

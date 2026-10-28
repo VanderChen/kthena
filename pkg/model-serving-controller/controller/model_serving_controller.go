@@ -114,6 +114,8 @@ type ModelServingController struct {
 	initialSync     atomic.Bool // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
+	podDeletions    sync.Map // key: auxiliaryCleanupKey; value: *podDeletionTargets
+	roleCleanups    sync.Map // key: auxiliaryCleanupKey; value: *plugins.RoleCleanup
 }
 
 func NewModelServingController(kubeClientSet kubernetes.Interface, modelServingClient clientset.Interface, volcanoClient volcano.Interface, apiextClient apiextClientSet.Interface) (*ModelServingController, error) {
@@ -318,6 +320,18 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		}
 	}
 
+	c.roleCleanups.Range(func(key, _ any) bool {
+		if key.(auxiliaryCleanupKey).uid == ms.UID {
+			c.roleCleanups.Delete(key)
+		}
+		return true
+	})
+	c.podDeletions.Range(func(key, _ any) bool {
+		if key.(auxiliaryCleanupKey).uid == ms.UID {
+			c.podDeletions.Delete(key)
+		}
+		return true
+	})
 	c.store.DeleteModelServing(types.NamespacedName{
 		Namespace: ms.Namespace,
 		Name:      ms.Name,
@@ -560,6 +574,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	}
 
 	revision := utils.ModelServingRevision(ms)
+	if err := c.finishPendingDeletions(ctx, ms); err != nil {
+		return err
+	}
 
 	// 1. Sync the number of ServingGroups to match the expected replicas defined in spec.
 	if err := c.syncServingGroupReplicas(ctx, ms, revision); err != nil {
@@ -574,6 +591,11 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	// 3. Handle the rolling update process, deleting outdated ServingGroups/Roles to trigger updates.
 	if err := c.manageRollingUpdate(ctx, ms, revision); err != nil {
 		return fmt.Errorf("failed to handle rollingUpdate: %v", err)
+	}
+
+	// No creates are in flight in this key's workqueue reconciliation here.
+	if err := c.cleanupOrphanServices(ctx, ms); err != nil {
+		return err
 	}
 
 	// 4. Calculate and update the overall condition and replica status fields of the ModelServing.
@@ -854,6 +876,7 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 		return fmt.Errorf("cannot get ServingGroup of modelServing: %s from map: %v", ms.GetName(), err)
 	}
 	partition, _, _ := c.getPartition(modelServingPartition(ms), modelServingReplicas(ms))
+	var syncErrors []error
 	for index, servingGroup := range servingGroupList {
 		if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroup.Name) == datastore.ServingGroupDeleting {
 			// Deleting ServingGroup will be recreated after the deletion is complete, so there is no need to scale the roles
@@ -889,11 +912,11 @@ func (c *ModelServingController) syncRoleReplicas(ctx context.Context, ms *workl
 
 		for _, targetRole := range rolesToManage {
 			if err := c.manageRoleReplicasPerGroup(ctx, ms, servingGroup.Name, targetRole, servingGroupOrdinal, revisionToUse, chain); err != nil {
-				return err
+				syncErrors = append(syncErrors, err)
 			}
 		}
 	}
-	return nil
+	return errors.Join(syncErrors...)
 }
 
 // scaleDownRoles handles Role scaling down with two-level priority-based selection:
@@ -1139,6 +1162,16 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(ctx context.Context,
 			expectedCount += maxSurge
 		}
 	}
+	// Scale-down must remain possible for a legacy DNS layout that cannot create new Pods.
+	if len(roleList) > expectedCount {
+		if err := c.scaleDownRoles(ctx, ms, groupName, targetRole, roleList, expectedCount); err != nil {
+			return err
+		}
+		roleList, err = c.store.GetRoleList(utils.GetNamespaceName(ms), groupName, targetRole.Name)
+		if err != nil {
+			return err
+		}
+	}
 	expectedPods := 1 + int(targetRole.WorkerReplicas)
 	partition, partitionConfigured, partitionErr := c.getPartition(rolePartition(ms, targetRole), roleReplicas(targetRole))
 	if partitionErr != nil {
@@ -1320,10 +1353,7 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	})
 
 	// If the role is already in the deletion process, no further processing will be done.
-	roleStatus := c.store.GetRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID)
-	if roleStatus == datastore.RoleDeleting {
-		return nil
-	}
+
 	err := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, datastore.RoleDeleting)
 	klog.V(4).Infof("Setting role %s/%s status to Deleting", ms.GetName(), roleID)
 	if err != nil {
@@ -1335,26 +1365,24 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	message := fmt.Sprintf("Role %s/%s in ServingGroup %s is now Deleting", roleName, roleID, groupName)
 	c.emitRoleStatusEvent(ms, corev1.EventTypeNormal, "RoleDeleting", message)
 	defer func() {
-		if deleteErr == nil {
-			return
+		if deleteErr != nil {
+			c.enqueueModelServing(ms)
 		}
-		rollbackErr := c.store.UpdateRoleStatus(utils.GetNamespaceName(ms), groupName, roleName, roleID, roleStatus)
-		if rollbackErr != nil {
-			klog.ErrorS(rollbackErr, "Failed to rollback role status", "role", roleID, "group", groupName)
-		}
-		c.enqueueModelServing(ms)
 	}()
 
-	deleteErr = c.kubeClientSet.CoreV1().Pods(ms.Namespace).DeleteCollection(
-		ctx,
-		metav1.DeleteOptions{},
-		metav1.ListOptions{
-			LabelSelector: selector.String(),
-		},
-	)
+	if deleteErr = c.prepareRoleCleanup(ctx, ms, groupName, roleName, roleID); deleteErr != nil {
+		return deleteErr
+	}
+	podTargets, _ := c.podDeletions.LoadOrStore(auxiliaryCleanupKey{ms.UID, groupName, roleName, roleID}, &podDeletionTargets{})
+	deleteErr = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector)
 	if deleteErr != nil {
 		klog.Errorf("failed to delete pods of role %s/%s: %v", groupName, roleID, deleteErr)
 		return deleteErr
+	}
+	if names, err := podTargets.(*podDeletionTargets).replacements(ctx, c.kubeClientSet, ms.Namespace, selector); err != nil {
+		return err
+	} else if len(names) > 0 {
+		c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "DeletionIdentityChanged", fmt.Sprintf("Preserving replacement Pods %v; waiting for Role identity reconciliation", names))
 	}
 	if deleteErr = c.runRoleDeletePlugins(ctx, ms, groupName, roleName, roleID); deleteErr != nil {
 		return deleteErr
@@ -1366,6 +1394,8 @@ func (c *ModelServingController) DeleteRole(ctx context.Context, ms *workloadv1a
 	if c.isRoleDeleted(ms, groupName, roleName, roleID) {
 		klog.V(2).Infof("Role %s of ServingGroup %s has been deleted", roleID, groupName)
 		c.store.DeleteRole(utils.GetNamespaceName(ms), groupName, roleName, roleID)
+		c.roleCleanups.Delete(auxiliaryCleanupKey{ms.UID, groupName, roleName, roleID})
+		c.podDeletions.Delete(auxiliaryCleanupKey{ms.UID, groupName, roleName, roleID})
 		// Re-enqueue the ModelServing for reconciliation after the role has been deleted
 		// so the controller can recreate any missing resources if needed.
 		c.enqueueModelServing(ms)
@@ -2101,32 +2131,13 @@ func isOwnedByModelServing(metaObj metav1.Object) bool {
 // handleDeletionInProgress checks and handles deletion states for ServingGroup or Role.
 // Returns true if the resource deletion is already in progress and the caller should stop further handling.
 func (c *ModelServingController) handleDeletionInProgress(ms *workloadv1alpha1.ModelServing, servingGroupName, roleName, roleID string) bool {
-	// check ServingGroup status
-	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting {
-		// ServingGroup is already in the deletion process, only checking whether the deletion is completed
-		if c.isServingGroupDeleted(ms, servingGroupName) {
-			// ServingGroup has been deleted, so the storage needs to be updated and need to reconcile.
-			klog.V(2).Infof("servingGroup %s has been deleted", servingGroupName)
-			c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
-			c.enqueueModelServing(ms)
-		}
+	// Informer callbacks must not discard the identities needed by cleanup. Only
+	// the workqueue finalizes deletion after all cleanup requests were accepted.
+	if c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName) == datastore.ServingGroupDeleting ||
+		(roleName != "" && roleID != "" && c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting) {
+		c.enqueueModelServing(ms)
 		return true
 	}
-
-	if roleName != "" && roleID != "" {
-		// check role status
-		if c.store.GetRoleStatus(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID) == datastore.RoleDeleting {
-			// role is already in the deletion process, only checking whether the deletion is completed
-			if c.isRoleDeleted(ms, servingGroupName, roleName, roleID) {
-				// role has been deleted, so the storage needs to be updated and need to reconcile.
-				klog.V(2).Infof("role %s of servingGroup %s has been deleted", roleID, servingGroupName)
-				c.store.DeleteRole(utils.GetNamespaceName(ms), servingGroupName, roleName, roleID)
-				c.enqueueModelServing(ms)
-			}
-			return true
-		}
-	}
-
 	return false
 }
 
@@ -2638,7 +2649,9 @@ func (c *ModelServingController) runRoleDeletePlugins(ctx context.Context, ms *w
 			break
 		}
 	}
+	cleanup, _ := c.roleCleanups.LoadOrStore(auxiliaryCleanupKey{ms.UID, groupName, roleName, roleID}, &plugins.RoleCleanup{})
 	return chain.OnRoleDelete(ctx, &plugins.HookRequest{
+		Cleanup:       cleanup.(*plugins.RoleCleanup),
 		ModelServing:  ms,
 		ServingGroup:  groupName,
 		RoleName:      roleName,
@@ -2725,6 +2738,7 @@ func (c *ModelServingController) createPod(
 			ServiceLister: c.servicesLister,
 		}
 		if err := chain.OnPodCreate(ctx, req); err != nil {
+			c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "PluginError", err.Error())
 			return fmt.Errorf("execute OnPodCreate failed for %s pod %s: %v", roleKind, pod.Name, err)
 		}
 	}
@@ -2773,25 +2787,30 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 		return nil
 	}
 
+	rolesByName, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), servingGroupName)
+	if err != nil {
+		return fmt.Errorf("get Roles for ServingGroup %s during deletion: %w", servingGroupName, err)
+	}
 	// Mark the ServingGroup deleting before deleting its Role resources so
 	// active-role reconciliation cannot recreate them during teardown.
-	err := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupDeleting)
+	err = c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, datastore.ServingGroupDeleting)
 	if err != nil {
 		klog.ErrorS(err, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
 		return err
 	}
 	defer func() {
 		if err != nil {
-			// Due to the failure to delete the role.
-			// It is necessary to roll back the roleStatus to enable subsequent deletion of the role.
-			rollbackErr := c.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), servingGroupName, status)
-			if rollbackErr != nil {
-				klog.ErrorS(rollbackErr, "Failed to update ServingGroup status", "namespace", ms.Namespace, "servingGroup", servingGroupName)
-			}
 			c.enqueueModelServing(ms)
 		}
 	}()
 
+	for roleName, roles := range rolesByName {
+		for roleID := range roles {
+			if err = c.prepareRoleCleanup(ctx, ms, servingGroupName, roleName, roleID); err != nil {
+				return err
+			}
+		}
+	}
 	err = c.podGroupManager.DeletePodGroup(ctx, ms, servingGroupName)
 	if err != nil {
 		return fmt.Errorf("failed to delete PodGroup for ServingGroup %s: %v", servingGroupName, err)
@@ -2800,17 +2819,18 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 	selector := labels.SelectorFromSet(map[string]string{
 		workloadv1alpha1.GroupNameLabelKey: servingGroupName,
 	})
-	err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).DeleteCollection(ctx, metav1.DeleteOptions{}, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
+	podTargets, _ := c.podDeletions.LoadOrStore(auxiliaryCleanupKey{uid: ms.UID, group: servingGroupName}, &podDeletionTargets{})
+	err = podTargets.(*podDeletionTargets).Delete(ctx, c.kubeClientSet, ms, selector)
 	if err != nil {
 		return fmt.Errorf("failed to delete pods of ServingGroup %s: %v", servingGroupName, err)
 	}
 
-	rolesByName, err := c.store.GetRolesByGroup(utils.GetNamespaceName(ms), servingGroupName)
-	if err != nil {
-		return fmt.Errorf("get Roles for ServingGroup %s during deletion: %w", servingGroupName, err)
+	if names, getErr := podTargets.(*podDeletionTargets).replacements(ctx, c.kubeClientSet, ms.Namespace, selector); getErr != nil {
+		return getErr
+	} else if len(names) > 0 {
+		c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "DeletionIdentityChanged", fmt.Sprintf("Preserving replacement Pods %v; waiting for ServingGroup identity reconciliation", names))
 	}
+
 	for roleName, roles := range rolesByName {
 		for roleID := range roles {
 			if err = c.runRoleDeletePlugins(ctx, ms, servingGroupName, roleName, roleID); err != nil {
@@ -2821,7 +2841,9 @@ func (c *ModelServingController) deleteServingGroup(ctx context.Context, ms *wor
 
 	if c.isServingGroupDeleted(ms, servingGroupName) {
 		klog.V(2).Infof("ServingGroup %s has been deleted", servingGroupName)
+		c.forgetGroupCleanup(ms.UID, servingGroupName)
 		c.store.DeleteServingGroup(utils.GetNamespaceName(ms), servingGroupName)
+		c.podDeletions.Delete(auxiliaryCleanupKey{uid: ms.UID, group: servingGroupName})
 		// this is needed when a pod is deleted accidentally, and the ServingGroup is deleted completely
 		// and the controller has no chance to supplement it.
 		c.enqueueModelServing(ms)

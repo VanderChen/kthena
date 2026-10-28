@@ -38,6 +38,8 @@ type HookRequest struct {
 	Pod           *corev1.Pod
 	KubeClient    kubernetes.Interface
 	ServiceLister listerv1.ServiceLister
+	// Cleanup retains auxiliary UID targets across retries of one Role deletion.
+	Cleanup *RoleCleanup
 }
 
 // Plugin defines the lifecycle hooks implemented by a plugin.

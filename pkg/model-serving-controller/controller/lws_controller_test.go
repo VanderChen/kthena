@@ -362,7 +362,7 @@ func TestConstructModelServing(t *testing.T) {
 					break
 				}
 			}
-			assert.Equal(t, expectedRole.WorkerReplicas > 0, hasHeadlessServicePlugin)
+			assert.True(t, hasHeadlessServicePlugin)
 
 			// Verify Templates
 			assert.Equal(t, expectedRole.EntryTemplate.Spec.Containers[0].Name, role.EntryTemplate.Spec.Containers[0].Name)

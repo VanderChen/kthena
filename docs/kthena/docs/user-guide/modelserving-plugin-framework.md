@@ -6,7 +6,7 @@ The ModelServing plugin framework lets you customize Pods and opt in to auxiliar
 
 The plugin framework provides an extensible way to customize Pods before creation without modifying the core ModelServing API. Key features include:
 
-- **Opt-in**: When `plugins` is not configured, ModelServing behavior remains unchanged
+- **Opt-in at creation**: Configure the plugin chain when creating the ModelServing; omitted or empty `plugins` means no plugin chain
 - **Multi-plugin composition**: Support multiple plugins per ModelServing, executed in list order
 - **Unified lifecycle hooks**: Pod and Role lifecycle hooks share one `Plugin` interface and `HookRequest`
 - **Observability**: Track plugin execution status via Kubernetes Events and Status conditions
@@ -63,6 +63,8 @@ An optional `plugins` field is added to `ModelServingSpec`:
 | `config` | object | Plugin-specific configuration, parsed by each plugin |
 | `scope` | object (optional) | Restricts where the plugin runs: `roles` (role names), `target` (Entry/Worker/All) |
 
+The substantive plugin chain is immutable after creation. Adding the first plugin, removing a plugin, changing its configuration or scope, or changing execution order requires a new ModelServing and a traffic migration. Scaling to zero or completing a rollout does not permit these changes, and parent controllers follow the same rule. Equivalent representations such as an omitted `type` and `BuiltIn` do not change the plugin's meaning.
+
 ### Developing a Custom Plugin
 
 Built-in plugins live in `pkg/model-serving-controller/plugins/`. To add a custom plugin:
@@ -79,7 +81,7 @@ type Plugin interface {
 }
 ```
 
-All hooks receive the same request type. Fields that do not apply to a hook may be nil or zero-valued; for example, `Pod` is nil for Role hooks. Runtime resources such as `KubeClient` and cache-backed listers are carried by `HookRequest`, following the same pattern as lifecycle context. `OnRoleSync` must be idempotent, and `OnRoleDelete` must issue cleanup without making core Role deletion wait for an auxiliary object to disappear. Implement unused hooks as no-ops.
+All hooks receive the same request type. Fields that do not apply to a hook may be nil or zero-valued; for example, `Pod` is nil for Role hooks. Runtime resources such as `KubeClient` and cache-backed listers are carried by `HookRequest`, following the same pattern as lifecycle context. `OnRoleSync` must be idempotent. `OnRoleDelete` must retain a retry path for failed cleanup requests, but a successfully requested auxiliary-resource deletion does not make core Role deletion wait for that resource's finalizers. Cleanup must check ownership and protect replacement UIDs. Implement unused hooks as no-ops.
 
 2. **Define a config struct** for your plugin and decode it from `spec.Config` using `DecodeJSON()`:
 
@@ -119,7 +121,7 @@ See `pkg/model-serving-controller/plugins/demo_plugin.go` for a reference implem
 
 Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtimeClassName`, add annotations, and inject environment variables. Use it to validate the plugin flow before developing your own.
 
-Kthena also ships with `headless-service`. It injects `ENTRY_ADDRESS`, sets each in-scope Entry and Worker Pod's hostname and Service subdomain, and creates one Headless Service for each Role replica that has a `workerTemplate`. The Service selects every Pod in the Role replica so `<pod-hostname>.<service-name>` resolves for both Entry and Worker Pods. Without the plugin, none of these generated DNS settings or the Service is added:
+Kthena also ships with `headless-service`. Configure it when creating a ModelServing whose Entry and Worker Pods need generated DNS settings:
 
 ```yaml
 plugins:
@@ -127,7 +129,24 @@ plugins:
     type: BuiltIn
 ```
 
-The plugin recreates an accidentally deleted desired Service while it remains configured. Removing the plugin stops creation and recovery; an existing Service remains until its corresponding Role is deleted. Services are auxiliary and do not determine whether a Role or ServingGroup still exists.
+For each in-scope Role instance with a `workerTemplate`, the plugin maintains two Headless Services:
+
+| Service | Selected Pods | Purpose |
+| --- | --- | --- |
+| Entry Service | Only the Entry Pod | Preserves the existing Service name and `ENTRY_ADDRESS=<entry-service>.<namespace>`; workers resolve the Entry address rather than the whole member set |
+| Discovery Service | Entry and all Worker Pods in the same Role instance | Provides individual Pod records under a separate, stable Service name |
+
+The plugin sets each newly created Pod's hostname to its generated Pod name and its subdomain to the discovery Service. A member's address is `<pod-hostname>.<discovery-service>.<namespace>`. Services publish addresses before readiness so members can initialize together. Inspect the Pod's `spec.subdomain` for the generated discovery name rather than deriving it from `ENTRY_ADDRESS`.
+
+The plugin accepts `scope.roles`; `scope.target` must be omitted or `All`. A Role without `workerTemplate` gets neither these Services nor the generated DNS settings. A non-nil `workerTemplate` still qualifies when `workerReplicas` is zero. Desired Services are recovered after accidental deletion. They are auxiliary resources: their presence, absence, or terminating state does not establish whether a Role or ServingGroup exists.
+
+### Upgrade and migration
+
+Older controller versions created Entry Services and injected `ENTRY_ADDRESS` without an explicit plugin. With the opt-in model, an existing ModelServing without `headless-service` does not receive these settings when Pods are later recreated. Adding the plugin to that existing object is an immutable-field change: create a new object with the required chain and migrate traffic after verifying readiness.
+
+An existing managed entry-only Service can retain its name and UID. A different migration is required for workloads that already used an all-member Service as their Pod subdomain. Changing that Service to entry-only would remove the old Worker DNS records, while a new discovery Service cannot change running Pods' immutable subdomains or environment. The controller reports `MigrationRequired` and preserves the existing layout instead of silently changing its selector or creating Pods that depend on the new layout. Use a new ModelServing and controlled traffic migration; this plugin does not automatically rebuild those Pods to migrate DNS.
+
+ModelBooster and LWS converters declare `headless-service` when creating new ModelServings and keep the declaration stable as worker counts change. ModelBooster omits `workerTemplate` when there are no workers, so those Roles receive no plugin DNS resources. LWS keeps its worker template at size 1, so its single-Pod Role still receives the two Services and generated DNS settings. Existing converted ModelServings without this plugin also require migration; the converter cannot bypass plugin immutability. This behavior supplies Kthena Role DNS and does not by itself implement native LWS hostname, shared-subdomain, or `LWS_LEADER_ADDRESS` conventions.
 
 **Example: Using the demo plugin**
 

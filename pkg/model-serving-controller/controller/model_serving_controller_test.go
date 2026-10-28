@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -2783,7 +2784,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			initialRoleIDs:   []int{0, 1},
 			addEntryPod:      false,
 			expectedRoleSize: 1,
-			expectedPodCount: 2,
+			expectedPodCount: 1,
 			expectRequeue:    false,
 		},
 		{
@@ -2887,6 +2888,16 @@ func TestManageRoleReplicas(t *testing.T) {
 			pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedPodCount, len(pods.Items), "pod count should match expected")
+			if len(tt.initialRoleIDs) > int(tt.roleReplicas) {
+				require.Len(t, pods.Items, 1)
+				assert.Equal(t, utils.GenerateRoleID(roleName, 0), pods.Items[0].Labels[workloadv1alpha1.RoleIDKey], "the retained Role must keep its desired Pod")
+				for _, action := range kubeClient.Actions() {
+					if action.Matches("create", "pods") {
+						created := action.(kubetesting.CreateAction).GetObject().(*corev1.Pod)
+						assert.NotEqual(t, utils.GenerateRoleID(roleName, 1), created.Labels[workloadv1alpha1.RoleIDKey], "shrink must not refill the removed store-only Role first")
+					}
+				}
+			}
 			//}
 
 			if tt.expectRequeue {
@@ -5170,6 +5181,7 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 			ms := &workloadv1alpha1.ModelServing{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-ms",
+					UID:       types.UID("test-ms-uid"),
 					Namespace: "default",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
@@ -5210,8 +5222,10 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 				roleID := fmt.Sprintf("prefill-%d", idx)
 				pod := &corev1.Pod{
 					ObjectMeta: metav1.ObjectMeta{
-						Namespace: "default",
-						Name:      fmt.Sprintf("pod-%s", roleID),
+						Namespace:       "default",
+						Name:            fmt.Sprintf("pod-%s", roleID),
+						UID:             types.UID("uid-" + roleID),
+						OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)},
 						Labels: map[string]string{
 							workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 							workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -5224,7 +5238,9 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 						},
 					},
 				}
-				err := podIndexer.Add(pod)
+				_, err := kubeClient.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				err = podIndexer.Add(pod)
 				assert.NoError(t, err)
 			}
 
@@ -5235,7 +5251,7 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 			}
 
 			// Run scaleDownRoles
-			controller.scaleDownRoles(context.Background(), ms, groupName, targetRole, roleList, tt.expectedCount)
+			require.NoError(t, controller.scaleDownRoles(context.Background(), ms, groupName, targetRole, roleList, tt.expectedCount))
 
 			// Calculate expected deleted roles (all roles except expectedRemainingNames)
 			allRoleIDs := make(map[string]bool)
@@ -5246,25 +5262,23 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 				delete(allRoleIDs, remaining)
 			}
 			var expectedDeletedRoleIDs []string
-			var expectedDeleteSelectors []string
+			var expectedDeleteNames []string
 			for id := range allRoleIDs {
 				expectedDeletedRoleIDs = append(expectedDeletedRoleIDs, id)
-				expectedDeleteSelectors = append(expectedDeleteSelectors, labels.SelectorFromSet(map[string]string{
-					workloadv1alpha1.GroupNameLabelKey: groupName,
-					workloadv1alpha1.RoleLabelKey:      "prefill",
-					workloadv1alpha1.RoleIDKey:         id,
-				}).String())
+				expectedDeleteNames = append(expectedDeleteNames, "pod-"+id)
 			}
 
 			var actualDeletedRoleIDs []string
-			var actualDeleteSelectors []string
+			var actualDeleteNames []string
 			for _, action := range kubeClient.Actions() {
-				if !action.Matches("delete-collection", "pods") {
+				if !action.Matches("delete", "pods") {
 					continue
 				}
-				deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+				deleteAction, ok := action.(kubetesting.DeleteAction)
 				require.True(t, ok)
-				actualDeleteSelectors = append(actualDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+				actualDeleteNames = append(actualDeleteNames, deleteAction.GetName())
+				require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
+				assert.Equal(t, types.UID("uid-"+strings.TrimPrefix(deleteAction.GetName(), "pod-")), *deleteAction.GetDeleteOptions().Preconditions.UID)
 			}
 			for _, idx := range tt.existingIndices {
 				roleID := fmt.Sprintf("prefill-%d", idx)
@@ -5281,10 +5295,17 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 			assert.Equal(t, expectedDeletedRoleIDs, actualDeletedRoleIDs,
 				"%s: expected deleted roles %v, got %v", tt.description, expectedDeletedRoleIDs, actualDeletedRoleIDs)
 
-			sort.Strings(actualDeleteSelectors)
-			sort.Strings(expectedDeleteSelectors)
-			assert.Equal(t, expectedDeleteSelectors, actualDeleteSelectors,
-				"%s: expected pod delete selectors %v, got %v", tt.description, expectedDeleteSelectors, actualDeleteSelectors)
+			sort.Strings(actualDeleteNames)
+			sort.Strings(expectedDeleteNames)
+			assert.Equal(t, expectedDeleteNames, actualDeleteNames,
+				"%s: expected exact pod deletes %v, got %v", tt.description, expectedDeleteNames, actualDeleteNames)
+			remainingPods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})
+			require.NoError(t, err)
+			var remainingRoleIDs []string
+			for _, pod := range remainingPods.Items {
+				remainingRoleIDs = append(remainingRoleIDs, pod.Labels[workloadv1alpha1.RoleIDKey])
+			}
+			assert.ElementsMatch(t, tt.expectedRemainingNames, remainingRoleIDs, "all expected survivor Pods must remain")
 		})
 	}
 }
@@ -5629,7 +5650,7 @@ func TestManageHeadlessService(t *testing.T) {
 			},
 			existingServices:     []*corev1.Service{},
 			servingGroupStatus:   datastore.ServingGroupRunning,
-			expectedServiceCount: 2, // One for each role
+			expectedServiceCount: 4, // One for each role
 			expectServiceCreated: true,
 		},
 		{
@@ -5726,7 +5747,7 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 			},
 			servingGroupStatus:   datastore.ServingGroupRunning,
-			expectedServiceCount: 1,
+			expectedServiceCount: 2,
 			expectServiceCreated: false,
 		},
 		{
@@ -6964,7 +6985,19 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 	}
 }
 
-func TestDeleteRoleRollbackOnFailure(t *testing.T) {
+func TestDeleteRoleAbsentRecordDoesNotAuthorizeDeletion(t *testing.T) {
+	client := kubefake.NewSimpleClientset()
+	controller, err := NewModelServingController(client, kthenafake.NewSimpleClientset(), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())
+	require.NoError(t, err)
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "missing", Namespace: "default", UID: "ms-uid"}}
+	require.Error(t, controller.DeleteRole(context.Background(), ms, "missing-0", "serve", "serve-0"))
+	for _, action := range client.Actions() {
+		assert.NotEqual(t, "delete", action.GetVerb())
+		assert.NotEqual(t, "delete-collection", action.GetVerb())
+	}
+}
+
+func TestDeleteRoleRetainsDeletionOnFailure(t *testing.T) {
 	tests := []struct {
 		name                 string
 		initialRoleStatus    datastore.RoleStatus
@@ -6975,22 +7008,22 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 		description          string
 	}{
 		{
-			name:                 "pod_deletion_fails_with_rollback",
+			name:                 "pod_deletion_failure_keeps_deleting",
 			initialRoleStatus:    datastore.RoleRunning,
 			podDeletionError:     fmt.Errorf("failed to delete pods"),
 			serviceDeletionError: nil,
-			expectedFinalStatus:  datastore.RoleRunning,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
-			description:          "failed to delete pods, should rollback to original status and re-enqueue",
+			description:          "failed to delete pods, retains Deleting and re-enqueues",
 		},
 		{
-			name:                 "service_deletion_fails_with_rollback",
+			name:                 "service_deletion_failure_keeps_deleting",
 			initialRoleStatus:    datastore.RoleCreating,
 			podDeletionError:     nil,
 			serviceDeletionError: fmt.Errorf("failed to delete services"),
-			expectedFinalStatus:  datastore.RoleCreating,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
-			description:          "failed to delete services, should rollback to original status and re-enqueue",
+			description:          "failed to delete services, retains Deleting and re-enqueues",
 		},
 		{
 			name:                 "both_operations_success_no_rollback",
@@ -7002,11 +7035,11 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			description:          "are deletions succeed, no rollback needed",
 		},
 		{
-			name:                 "pod_api_error_no_rollback",
+			name:                 "existing_not_found_status_is_still_a_deletion_target",
 			initialRoleStatus:    datastore.RoleNotFound,
 			podDeletionError:     apierrors.NewInternalError(fmt.Errorf("internal error")),
 			serviceDeletionError: nil,
-			expectedFinalStatus:  datastore.RoleNotFound,
+			expectedFinalStatus:  datastore.RoleDeleting,
 			expectEnqueueCalled:  true,
 			description:          "pod API error, should re-enqueue",
 		},
@@ -7023,15 +7056,22 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			controller, err := NewModelServingController(client, kthenaClient, volcanoClient, apiextfake)
 			assert.NoError(t, err)
 
+			injectFailure := true
 			if tt.podDeletionError != nil {
-				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, tt.podDeletionError
+				client.PrependReactor("delete", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					if injectFailure {
+						return true, nil, tt.podDeletionError
+					}
+					return false, nil, nil
 				})
 			}
 
 			if tt.serviceDeletionError != nil {
 				client.PrependReactor("delete", "services", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, tt.serviceDeletionError
+					if injectFailure {
+						return true, nil, tt.serviceDeletionError
+					}
+					return false, nil, nil
 				})
 			}
 
@@ -7043,9 +7083,9 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 				},
 			}
 
-			groupName := "test-group"
+			groupName := ms.Name + "-0"
 			roleName := "test-role"
-			roleID := "test-role-id"
+			roleID := "test-role-0"
 
 			nsn := utils.GetNamespaceName(ms)
 			controller.store.AddRole(nsn, groupName, roleName, roleID, "test-revision", "test-role-revision")
@@ -7056,8 +7096,10 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
+					Name:            "test-pod",
+					UID:             types.UID("test-pod-uid"),
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)},
+					Namespace:       "default",
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        groupName,
@@ -7070,6 +7112,7 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      utils.GeneratePodName(groupName, roleID, 0),
+					UID:       types.UID("test-service-uid"),
 					Namespace: "default",
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
@@ -7101,7 +7144,12 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 
 			startAction := len(client.Actions())
 
-			controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
+			err = controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID)
+			if tt.podDeletionError != nil || tt.serviceDeletionError != nil {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
 
 			finalStatus := controller.store.GetRoleStatus(nsn, groupName, roleName, roleID)
 			assert.Equal(t, tt.expectedFinalStatus, finalStatus)
@@ -7112,20 +7160,16 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 			} else {
 				assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
 			}
-
-			expectedDeleteSelector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.GroupNameLabelKey: groupName,
-				workloadv1alpha1.RoleLabelKey:      roleName,
-				workloadv1alpha1.RoleIDKey:         roleID,
-			}).String()
-			var podDeleteSelectors []string
+			var podDeleteNames []string
 			var serviceDeleteNames []string
 			for _, action := range client.Actions()[startAction:] {
 				switch {
-				case action.Matches("delete-collection", "pods"):
-					deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+				case action.Matches("delete", "pods"):
+					deleteAction, ok := action.(kubetesting.DeleteAction)
 					require.True(t, ok)
-					podDeleteSelectors = append(podDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+					podDeleteNames = append(podDeleteNames, deleteAction.GetName())
+					require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
+					assert.Equal(t, pod.UID, *deleteAction.GetDeleteOptions().Preconditions.UID)
 				case action.Matches("delete", "services"):
 					deleteAction, ok := action.(kubetesting.DeleteAction)
 					require.True(t, ok)
@@ -7133,11 +7177,20 @@ func TestDeleteRoleRollbackOnFailure(t *testing.T) {
 				}
 			}
 
-			assert.Equal(t, []string{expectedDeleteSelector}, podDeleteSelectors)
+			assert.Equal(t, []string{pod.Name}, podDeleteNames)
 			if tt.podDeletionError != nil {
 				assert.Empty(t, serviceDeleteNames)
 			} else {
 				assert.Equal(t, []string{service.Name}, serviceDeleteNames)
+			}
+			injectFailure = false
+			if tt.podDeletionError != nil || tt.serviceDeletionError != nil {
+				require.NoError(t, controller.DeleteRole(context.Background(), ms, groupName, roleName, roleID))
+				assert.Equal(t, datastore.RoleNotFound, controller.store.GetRoleStatus(nsn, groupName, roleName, roleID))
+				_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				assert.True(t, apierrors.IsNotFound(err))
+				_, err = client.CoreV1().Services(ms.Namespace).Get(context.Background(), service.Name, metav1.GetOptions{})
+				assert.True(t, apierrors.IsNotFound(err))
 			}
 		})
 	}
@@ -7490,7 +7543,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 	}
 }
 
-func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
+func TestDeleteServingGroupRetainsDeletionOnFailure(t *testing.T) {
 	tests := []struct {
 		name                  string
 		initialSgStatus       datastore.ServingGroupStatus
@@ -7503,37 +7556,37 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 		description           string
 	}{
 		{
-			name:                  "pod_group_deletion_fails_with_rollback",
+			name:                  "pod_group_deletion_failure_keeps_deleting",
 			initialSgStatus:       datastore.ServingGroupRunning,
 			podGroupDeletionError: fmt.Errorf("failed to delete pod group"),
 			podDeletionError:      nil,
 			serviceDeletionError:  nil,
-			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete pod group, should rollback to original status and re-enqueue",
+			description:           "failed to delete pod group, retains Deleting and re-enqueues",
 		},
 		{
-			name:                  "pod_deletion_fails_with_rollback",
+			name:                  "pod_deletion_failure_keeps_deleting",
 			initialSgStatus:       datastore.ServingGroupCreating,
 			podGroupDeletionError: nil,
 			podDeletionError:      fmt.Errorf("failed to delete pods"),
 			serviceDeletionError:  nil,
-			expectedFinalStatus:   datastore.ServingGroupCreating,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete pods, should rollback to original status and re-enqueue",
+			description:           "failed to delete pods, retains Deleting and re-enqueues",
 		},
 		{
-			name:                  "service_deletion_fails_with_rollback",
+			name:                  "service_deletion_failure_keeps_deleting",
 			initialSgStatus:       datastore.ServingGroupRunning,
 			podGroupDeletionError: nil,
 			podDeletionError:      nil,
 			serviceDeletionError:  fmt.Errorf("failed to delete services"),
-			expectedFinalStatus:   datastore.ServingGroupRunning,
+			expectedFinalStatus:   datastore.ServingGroupDeleting,
 			expectError:           true,
 			expectEnqueueCalled:   true,
-			description:           "failed to delete services, should rollback to original status and re-enqueue",
+			description:           "failed to delete services, retains Deleting and re-enqueues",
 		},
 		{
 			name:                  "all_operations_success_no_rollback",
@@ -7564,21 +7617,31 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 				deleteFunc: podGroupManager.DeletePodGroup,
 			}
 
+			injectFailure := true
 			if tt.podGroupDeletionError != nil {
 				volcanoClient.PrependReactor("delete", "podgroups", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, tt.podGroupDeletionError
+					if injectFailure {
+						return true, nil, tt.podGroupDeletionError
+					}
+					return false, nil, nil
 				})
 			}
 
 			if tt.podDeletionError != nil {
-				client.PrependReactor("delete-collection", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, tt.podDeletionError
+				client.PrependReactor("delete", "pods", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
+					if injectFailure {
+						return true, nil, tt.podDeletionError
+					}
+					return false, nil, nil
 				})
 			}
 
 			if tt.serviceDeletionError != nil {
 				client.PrependReactor("delete", "services", func(action kubetesting.Action) (handled bool, ret runtime.Object, err error) {
-					return true, nil, tt.serviceDeletionError
+					if injectFailure {
+						return true, nil, tt.serviceDeletionError
+					}
+					return false, nil, nil
 				})
 			}
 
@@ -7604,8 +7667,10 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-pod",
-					Namespace: "default",
+					Name:            "test-pod",
+					UID:             types.UID("test-pod-uid"),
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)},
+					Namespace:       "default",
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
 						workloadv1alpha1.GroupNameLabelKey:        sgName,
@@ -7616,6 +7681,7 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			service := &corev1.Service{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      utils.GeneratePodName(sgName, roleID, 0),
+					UID:       types.UID("test-service-uid"),
 					Namespace: "default",
 					Labels: map[string]string{
 						workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
@@ -7666,18 +7732,16 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			} else {
 				assertQueueStaysEmpty(t, controller.workqueue, 100*time.Millisecond)
 			}
-
-			expectedDeleteSelector := labels.SelectorFromSet(map[string]string{
-				workloadv1alpha1.GroupNameLabelKey: sgName,
-			}).String()
-			var podDeleteSelectors []string
+			var podDeleteNames []string
 			var serviceDeleteNames []string
 			for _, action := range client.Actions()[startAction:] {
 				switch {
-				case action.Matches("delete-collection", "pods"):
-					deleteAction, ok := action.(kubetesting.DeleteCollectionAction)
+				case action.Matches("delete", "pods"):
+					deleteAction, ok := action.(kubetesting.DeleteAction)
 					require.True(t, ok)
-					podDeleteSelectors = append(podDeleteSelectors, deleteAction.GetListRestrictions().Labels.String())
+					podDeleteNames = append(podDeleteNames, deleteAction.GetName())
+					require.NotNil(t, deleteAction.GetDeleteOptions().Preconditions)
+					assert.Equal(t, pod.UID, *deleteAction.GetDeleteOptions().Preconditions.UID)
 				case action.Matches("delete", "services"):
 					deleteAction, ok := action.(kubetesting.DeleteAction)
 					require.True(t, ok)
@@ -7697,16 +7761,26 @@ func TestDeleteServingGroupRollbackOnFailure(t *testing.T) {
 			assert.Equal(t, []string{sgName}, podGroupDeleteNames)
 
 			if tt.podGroupDeletionError != nil {
-				assert.Empty(t, podDeleteSelectors)
-				assert.Empty(t, serviceDeleteNames)
-				return
-			}
-
-			assert.Equal(t, []string{expectedDeleteSelector}, podDeleteSelectors)
-			if tt.podDeletionError != nil {
+				assert.Empty(t, podDeleteNames)
 				assert.Empty(t, serviceDeleteNames)
 			} else {
-				assert.Equal(t, []string{service.Name}, serviceDeleteNames)
+				assert.Equal(t, []string{pod.Name}, podDeleteNames)
+				if tt.podDeletionError != nil {
+					assert.Empty(t, serviceDeleteNames)
+				} else {
+					assert.Equal(t, []string{service.Name}, serviceDeleteNames)
+				}
+			}
+			injectFailure = false
+			if tt.expectError {
+				require.NoError(t, controller.deleteServingGroup(context.Background(), ms, sgName))
+				require.NoError(t, controller.podsInformer.GetIndexer().Delete(pod))
+				require.NoError(t, controller.deleteServingGroup(context.Background(), ms, sgName))
+				assert.Equal(t, datastore.ServingGroupNotFound, controller.store.GetServingGroupStatus(nsn, sgName))
+				_, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+				assert.True(t, apierrors.IsNotFound(err))
+				_, err = client.CoreV1().Services(ms.Namespace).Get(context.Background(), service.Name, metav1.GetOptions{})
+				assert.True(t, apierrors.IsNotFound(err))
 			}
 		})
 	}
@@ -8350,7 +8424,7 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 			controller.store = datastore.New()
 
 			ms := &workloadv1alpha1.ModelServing{
-				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
+				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName, UID: types.UID("ms-uid")},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:        ptr.To[int32](1),
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
@@ -8377,6 +8451,11 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 				roleID := fmt.Sprintf("decode-%d", i)
 				controller.store.AddRole(nsn, groupName, "decode", roleID, oldRevision, outdatedHash)
 				require.NoError(t, controller.store.UpdateRoleStatus(nsn, groupName, "decode", roleID, status))
+				pod := utils.GenerateEntryPod(ms.Spec.Template.Roles[0], ms, groupName, roleID, oldRevision, outdatedHash)
+				pod.UID = types.UID("pod-" + roleID)
+				_, err := kubeClient.CoreV1().Pods(ns).Create(context.Background(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, controller.podsInformer.GetIndexer().Add(pod))
 			}
 
 			_, err = controller.deleteOutdatedResourcesForRollingUpdate(
@@ -8391,8 +8470,12 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 
 			deletions := 0
 			for _, action := range kubeClient.Actions() {
-				if action.Matches("delete-collection", "pods") {
+				if action.Matches("delete", "pods") {
 					deletions++
+					deletion := action.(kubetesting.DeleteAction)
+					require.NotNil(t, deletion.GetDeleteOptions().Preconditions)
+					roleID := strings.TrimSuffix(strings.TrimPrefix(deletion.GetName(), groupName+"-"), "-0")
+					assert.Equal(t, types.UID("pod-"+roleID), *deletion.GetDeleteOptions().Preconditions.UID)
 				}
 			}
 			assert.Equal(t, tt.expectedDeletions, deletions)

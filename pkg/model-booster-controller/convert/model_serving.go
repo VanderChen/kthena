@@ -78,17 +78,12 @@ func BuildModelServing(model *workload.ModelBooster) (*workload.ModelServing, er
 			serving.Spec.Template.Roles[i].WorkerTemplate = nil
 		}
 	}
-	// ModelBooster worker pods use ENTRY_ADDRESS to reach their entry pod, so add
-	// the Headless Service plugin for multi-pod roles.
-	for _, role := range serving.Spec.Template.Roles {
-		if role.WorkerReplicas > 0 {
-			serving.Spec.Plugins = append(serving.Spec.Plugins, workload.PluginSpec{
-				Name: msplugins.HeadlessServicePluginName,
-				Type: workload.PluginTypeBuiltIn,
-			})
-			break
-		}
-	}
+	// Plugins are immutable: declare discovery at creation even when no workers
+	// are requested yet. Roles without a worker template have no plugin effects.
+	serving.Spec.Plugins = append(serving.Spec.Plugins, workload.PluginSpec{
+		Name: msplugins.HeadlessServicePluginName,
+		Type: workload.PluginTypeBuiltIn,
+	})
 	return serving, nil
 }
 
