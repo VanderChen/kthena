@@ -2603,7 +2603,7 @@ func TestScaleUpRoles(t *testing.T) {
 			targetRole := ms.Spec.Template.Roles[0]
 
 			// Call scaleUpRoles directly
-			controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, "new-revision")
+			require.NoError(t, controller.scaleUpRoles(context.Background(), ms, groupName, targetRole, existingRoles, tt.expectedCount, 0, utils.ModelServingRevision(ms)))
 
 			// Verify the results
 			roles, err := controller.store.GetRoleList(nsn, groupName, "prefill")
@@ -2851,7 +2851,7 @@ func TestManageRoleReplicas(t *testing.T) {
 			}
 
 			groupName := utils.GenerateServingGroupName(ms.Name, 0)
-			revision := "rev-1"
+			revision := utils.ModelServingRevision(ms)
 			roleTemplateHash := utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0])
 			controller.store.AddServingGroup(utils.GetNamespaceName(ms), 0, revision)
 			for _, roleID := range tt.initialRoleIDs {
@@ -2944,18 +2944,23 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 	}
 	key := utils.GetNamespaceName(ms)
 	groupName := utils.GenerateServingGroupName(ms.Name, 0)
+	old := ms.DeepCopy()
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
+	_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, "old-revision", old.Spec.Template.Roles)
+	require.NoError(t, err)
 	controller.store.AddServingGroup(key, 0, "old-revision")
 	for ordinal := 0; ordinal < 2; ordinal++ {
 		controller.store.AddRole(key, groupName, "decode", utils.GenerateRoleID("decode", ordinal), "old-revision", "old-hash")
 	}
 
-	require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, "new-revision", nil))
+	newRevision := utils.ModelServingRevision(ms)
+	require.NoError(t, controller.manageRoleReplicasPerGroup(context.Background(), ms, groupName, ms.Spec.Template.Roles[0], 0, newRevision, nil))
 
 	roles, err := controller.store.GetRoleList(key, groupName, "decode")
 	require.NoError(t, err)
 	require.Len(t, roles, 3)
 	assert.Equal(t, "decode-2", roles[2].Name)
-	assert.Equal(t, "new-revision", roles[2].Revision)
+	assert.Equal(t, newRevision, roles[2].Revision)
 	assert.Equal(t, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]), roles[2].RoleTemplateHash)
 
 	pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(context.Background(), metav1.ListOptions{})

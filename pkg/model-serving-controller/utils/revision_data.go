@@ -118,8 +118,9 @@ func buildRevisionPatch(ms *workloadv1alpha1.ModelServing) (*modelServingRevisio
 	roles := make([]modelServingRevisionRole, len(normalized.Spec.Template.Roles))
 	for i := range normalized.Spec.Template.Roles {
 		role := &normalized.Spec.Template.Roles[i]
-		normalizePodTemplate(&role.EntryTemplate, normalized.Spec.SchedulerName, headlessOwnsEntryAddress(plugins, role, workloadv1alpha1.PluginTargetEntry))
-		normalizePodTemplate(role.WorkerTemplate, normalized.Spec.SchedulerName, headlessOwnsEntryAddress(plugins, role, workloadv1alpha1.PluginTargetWorker))
+		generatedEntryAddress := headlessOwnsEntryAddress(plugins, role)
+		normalizePodTemplate(&role.EntryTemplate, normalized.Spec.SchedulerName, generatedEntryAddress)
+		normalizePodTemplate(role.WorkerTemplate, normalized.Spec.SchedulerName, generatedEntryAddress)
 		roles[i] = modelServingRevisionRole{
 			Name:           role.Name,
 			EntryTemplate:  role.EntryTemplate,
@@ -165,7 +166,7 @@ func normalizePodTemplate(template *workloadv1alpha1.PodTemplateSpec, schedulerN
 
 // Keep this applicability check aligned with headless-service OnPodCreate and
 // plugin scope dispatch. utils cannot import plugins, which depends on utils.
-func headlessOwnsEntryAddress(specs []workloadv1alpha1.PluginSpec, role *workloadv1alpha1.Role, target workloadv1alpha1.PluginTarget) bool {
+func headlessOwnsEntryAddress(specs []workloadv1alpha1.PluginSpec, role *workloadv1alpha1.Role) bool {
 	if role.WorkerTemplate == nil {
 		return false
 	}
@@ -179,7 +180,8 @@ func headlessOwnsEntryAddress(specs []workloadv1alpha1.PluginSpec, role *workloa
 		if len(spec.Scope.Roles) > 0 && !slices.Contains(spec.Scope.Roles, role.Name) {
 			continue
 		}
-		return spec.Scope.Target == "" || spec.Scope.Target == workloadv1alpha1.PluginTargetAll || spec.Scope.Target == target
+		// The headless plugin rejects Entry/Worker-only targets at construction.
+		return spec.Scope.Target == "" || spec.Scope.Target == workloadv1alpha1.PluginTargetAll
 	}
 	return false
 }

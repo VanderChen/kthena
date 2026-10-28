@@ -140,6 +140,8 @@ The plugin sets each newly created Pod's hostname to its generated Pod name and 
 
 The plugin accepts `scope.roles`; `scope.target` must be omitted or `All`. A Role without `workerTemplate` gets neither these Services nor the generated DNS settings. A non-nil `workerTemplate` still qualifies when `workerReplicas` is zero. Desired Services are recovered after accidental deletion. They are auxiliary resources: their presence, absence, or terminating state does not establish whether a Role or ServingGroup exists.
 
+Deletion retries retain the original Pod and Service UIDs. If a new Pod has reused an instance identity, the controller reports `DeletionIdentityChanged`, preserves that Pod and its existing networking, and leaves deletion pending. It does not automatically adopt or delete the replacement; resolve the conflicting workload identity before expecting deletion to finish.
+
 ### Upgrade and migration
 
 Older controller versions created Entry Services and injected `ENTRY_ADDRESS` without an explicit plugin. With the opt-in model, an existing ModelServing without `headless-service` does not receive these settings when Pods are later recreated. Adding the plugin to that existing object is an immutable-field change: create a new object with the required chain and migrate traffic after verifying readiness.

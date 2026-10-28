@@ -270,8 +270,8 @@ func TestBuildRevisionDataPreservesEntryAddressUnlessPluginOverwritesIt(t *testi
 	}{
 		{name: "no-plugin"},
 		{name: "all", plugin: true, entryOverwritten: true, workerOverwritten: true},
-		{name: "entry-only", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetEntry}, entryOverwritten: true},
-		{name: "worker-only", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetWorker}, workerOverwritten: true},
+		{name: "unsupported-entry-target", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetEntry}},
+		{name: "unsupported-worker-target", plugin: true, scope: &workloadv1alpha1.PluginScope{Target: workloadv1alpha1.PluginTargetWorker}},
 		{name: "excluded-role", plugin: true, scope: &workloadv1alpha1.PluginScope{Roles: []string{"other"}}},
 		{name: "nil-worker", plugin: true, nilWorker: true},
 	} {

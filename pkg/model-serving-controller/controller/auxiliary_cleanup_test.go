@@ -200,7 +200,7 @@ func TestMigrationErrorDoesNotBlockAnotherRoleShrink(t *testing.T) {
 	ms.Spec.Template.Roles = []workload.Role{blocked, shrink}
 	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}
 	for _, role := range []workload.Role{blocked, shrink} {
-		c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", role.Name, role.Name+"-0", "v1", "hash")
+		c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", role.Name, role.Name+"-0", utils.ModelServingRevision(ms), "hash")
 		for n := int32(0); n <= role.WorkerReplicas; n++ {
 			name := utils.GeneratePodName("cleanup-0", role.Name+"-0", int(n))
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, UID: types.UID(name), Labels: map[string]string{workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: "cleanup-0", workload.RoleLabelKey: role.Name, workload.RoleIDKey: role.Name + "-0", workload.EntryLabelKey: fmt.Sprint(n == 0)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}}, Spec: corev1.PodSpec{Subdomain: utils.GeneratePodName("cleanup-0", role.Name+"-0", 0)}}
@@ -222,7 +222,7 @@ func TestMigrationErrorDoesNotBlockRestartOrphanCleanup(t *testing.T) {
 	ms.Spec.Template.Roles = []workload.Role{{Name: "blocked", Replicas: ptr.To[int32](1), WorkerReplicas: 1, WorkerTemplate: &workload.PodTemplateSpec{}}}
 	ms.Spec.Plugins = []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}}
 	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
-	c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", "blocked", "blocked-0", "v1", "hash")
+	c.store.AddRole(utils.GetNamespaceName(ms), "cleanup-0", "blocked", "blocked-0", utils.ModelServingRevision(ms), "hash")
 	// Restart recovered the surviving Role from Pods; no store record remains for
 	// this old auxiliary Service, which is outside the desired Role identities.
 	for n := 0; n < 2; n++ {
