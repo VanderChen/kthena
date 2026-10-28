@@ -294,3 +294,72 @@ func TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry(t *testing.T) {
 		})
 	}
 }
+
+func TestSparseOrphanCleanupRequiresStableSurvivingCapacity(t *testing.T) {
+	for _, layer := range []string{"group", "role"} {
+		for _, state := range []string{"stable", "deficient", "creating", "deleting", "pod-missing", "worker-missing", "terminating", "not-ready", "foreign-pod", "target-creating", "target-pod"} {
+			t.Run(layer+"/"+state, func(t *testing.T) {
+				c, client, ms, orphan := auxiliaryFixture(t)
+				ms.Spec.Replicas = ptr.To[int32](1)
+				ms.Spec.Template.Roles = []workload.Role{{Name: "infer", Replicas: ptr.To[int32](1)}}
+				group, id := "cleanup-1", "infer-0"
+				if layer == "role" {
+					group, id = "cleanup-0", "infer-1"
+				}
+				key := utils.GetNamespaceName(ms)
+				c.store.AddRole(key, group, "infer", id, utils.ModelServingRevision(ms), "hash")
+				require.NoError(t, c.store.UpdateRoleStatus(key, group, "infer", id, datastore.RoleRunning))
+				require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+				pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: utils.GeneratePodName(group, id, 0), Namespace: ms.Namespace, UID: "survivor", Labels: map[string]string{workload.ModelServingNameLabelKey: ms.Name, workload.GroupNameLabelKey: group, workload.RoleLabelKey: "infer", workload.RoleIDKey: id}, OwnerReferences: orphan.OwnerReferences}, Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}}}
+				switch state {
+				case "deficient":
+					if layer == "group" {
+						ms.Spec.Replicas = ptr.To[int32](2)
+					} else {
+						ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](2)
+					}
+				case "creating":
+					require.NoError(t, c.store.UpdateRoleStatus(key, group, "infer", id, datastore.RoleCreating))
+					require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupCreating))
+				case "deleting":
+					require.NoError(t, c.store.UpdateRoleStatus(key, group, "infer", id, datastore.RoleDeleting))
+					require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupDeleting))
+				case "worker-missing":
+					ms.Spec.Template.Roles[0].WorkerReplicas = 1
+				case "terminating":
+					pod.DeletionTimestamp = ptr.To(metav1.Now())
+				case "not-ready":
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+				case "foreign-pod":
+					pod.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(ms, workload.ModelServingKind)}
+					pod.OwnerReferences[0].UID = "foreign"
+				case "target-creating":
+					c.store.AddRole(key, "cleanup-0", "infer", "infer-0", "new", "hash")
+				case "target-pod":
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "new-target", Labels: orphan.Labels}}, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				if state != "pod-missing" {
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				client.PrependReactor("delete", "services", func(a kt.Action) (bool, runtime.Object, error) {
+					require.Equal(t, orphan.UID, *a.(kt.DeleteAction).GetDeleteOptions().Preconditions.UID)
+					return false, nil, nil
+				})
+				require.NoError(t, c.cleanupOrphanServices(context.Background(), ms))
+				_, err := client.CoreV1().Services(ms.Namespace).Get(context.Background(), orphan.Name, metav1.GetOptions{})
+				if state == "stable" {
+					require.True(t, apierrors.IsNotFound(err))
+				} else {
+					require.NoError(t, err)
+				}
+				if state != "pod-missing" {
+					actual, err := client.CoreV1().Pods(ms.Namespace).Get(context.Background(), pod.Name, metav1.GetOptions{})
+					require.NoError(t, err)
+					require.Equal(t, pod.UID, actual.UID)
+				}
+			})
+		}
+	}
+}
