@@ -34,16 +34,10 @@ import (
 )
 
 const (
-	// PodDiscoveryPluginName is the name of the pod discovery plugin.
 	PodDiscoveryPluginName = "pod-discovery"
-	// ConfigMapNameSuffix is the suffix for the discovery ConfigMap name.
-	ConfigMapNameSuffix = "-discovery"
-	// DiscoveryVolumeName is the name of the volume mounted to the pod.
-	DiscoveryVolumeName = "pod-discovery-volume"
-	// DiscoveryMountPath is the path where the ConfigMap is mounted.
-	DiscoveryMountPath = "/etc/pod-discovery"
-	// DiscoveryFileName is the key in the ConfigMap and the file name in the volume.
-	DiscoveryFileName = "ips.json"
+	ConfigMapNameSuffix    = "-groupinfo"
+	DiscoveryVolumeName    = "groupinfo-volume"
+	DiscoveryFileName      = "groupinfo.config"
 )
 
 func init() {
@@ -51,75 +45,180 @@ func init() {
 }
 
 // PodDiscoveryPlugin aggregates Pod IPs of each ServingGroup into a ConfigMap.
-type PodDiscoveryPlugin struct {
-	name string
+type PodDiscoveryConfig struct {
+	AutoMountPath string `json:"autoMountPath,omitempty"`
 }
 
-// NewPodDiscoveryPlugin creates a new PodDiscoveryPlugin.
+type PodDiscoveryPlugin struct {
+	name   string
+	config PodDiscoveryConfig
+}
+
+func (p *PodDiscoveryPlugin) OnRoleSync(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
 func NewPodDiscoveryPlugin(spec workloadv1alpha1.PluginSpec) (Plugin, error) {
-	return &PodDiscoveryPlugin{name: spec.Name}, nil
+	p := &PodDiscoveryPlugin{name: spec.Name}
+	if spec.Config != nil {
+		if err := DecodeJSON(spec.Config, &p.config); err != nil {
+			return nil, fmt.Errorf("failed to decode pod-discovery config: %w", err)
+		}
+	}
+	return p, nil
 }
 
 func (p *PodDiscoveryPlugin) Name() string {
 	return p.name
 }
 
-func (p *PodDiscoveryPlugin) OnPodRunning(context.Context, *HookRequest) error         { return nil }
-func (p *PodDiscoveryPlugin) OnPodDelete(context.Context, *HookRequest) error          { return nil }
-func (p *PodDiscoveryPlugin) OnRoleSync(context.Context, *HookRequest) error           { return nil }
-func (p *PodDiscoveryPlugin) OnRoleDelete(context.Context, *HookRequest) error         { return nil }
-func (p *PodDiscoveryPlugin) OnServingGroupDelete(context.Context, *HookRequest) error { return nil }
+// GroupInfo represents the group information stored in ConfigMap.
+type GroupInfo struct {
+	Group        string     `json:"group,omitempty"`
+	RoleInfoList []RoleInfo `json:"roles,omitempty"`
+}
+
+// RoleInfo represents the role information.
+type RoleInfo struct {
+	Role             string             `json:"role,omitempty"`
+	RoleInstanceList []RoleInstanceInfo `json:"roleInstanceList,omitempty"`
+}
+
+// RoleInstanceInfo represents the role instance information.
+type RoleInstanceInfo struct {
+	RoleInstanceName string    `json:"roleInstanceName,omitempty"`
+	PodInfoList      []PodInfo `json:"podList,omitempty"`
+}
+
+// PodInfo represents the pod information.
+type PodInfo struct {
+	PodName string `json:"podName,omitempty"`
+	PodIP   string `json:"podIP,omitempty"`
+	NodeIP  string `json:"nodeIP,omitempty"`
+}
+
+// hasVolume checks if a volume with the given name already exists in a pod spec
+func hasVolume(podSpec corev1.PodSpec, volumeName string) bool {
+	for _, vol := range podSpec.Volumes {
+		if vol.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// hasVolumeMount checks if a volume mount with the given name already exists in a container
+func hasVolumeMount(container corev1.Container, volumeName string) bool {
+	for _, mount := range container.VolumeMounts {
+		if mount.Name == volumeName {
+			return true
+		}
+	}
+	return false
+}
+
+// addVolumeMountToContainer adds a volume mount to a container if it doesn't already exist
+// Returns true if the mount was added, false if it already existed
+func addVolumeMountToContainer(container *corev1.Container, mount corev1.VolumeMount) bool {
+	if hasVolumeMount(*container, mount.Name) {
+		return false
+	}
+	container.VolumeMounts = append(container.VolumeMounts, mount)
+	return true
+}
 
 func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) error {
-	cmName := req.ServingGroup + ConfigMapNameSuffix
-
-	// Add Volume
-	volume := corev1.Volume{
-		Name: DiscoveryVolumeName,
-		VolumeSource: corev1.VolumeSource{
-			ConfigMap: &corev1.ConfigMapVolumeSource{
-				LocalObjectReference: corev1.LocalObjectReference{
-					Name: cmName,
-				},
-				// Optional: true, because the ConfigMap might not exist when the first pod is created.
-				// However, if we want strict ordering, it might be better to create it beforehand.
-				// But plugins currently only hook into Pod lifecycle.
-				// Making it optional prevents Pod creation failure if CM is missing.
-				Optional: func(b bool) *bool { return &b }(true),
-			},
-		},
+	if p.config.AutoMountPath == "" {
+		klog.Infof("PodDiscoveryPlugin: autoMountPath not configured, skipping mount for pod %s", req.Pod.Name)
+		return nil
 	}
-	req.Pod.Spec.Volumes = append(req.Pod.Spec.Volumes, volume)
-
-	// Add VolumeMount to all containers
+	podRevision := utils.ObjectRevision(req.Pod)
+	targetRevision := req.ModelServing.Status.UpdateRevision
+	if targetRevision == "" {
+		targetRevision = podRevision
+		klog.Infof("PodDiscoveryPlugin: UpdateRevision is empty, using pod revision %s as target", podRevision)
+	}
+	if podRevision != targetRevision {
+		klog.Infof("PodDiscoveryPlugin: Skipping mount for pod %s - pod revision %s does not match target revision %s",
+			req.Pod.Name, podRevision, targetRevision)
+		return nil
+	}
+	cmName := req.ServingGroup + ConfigMapNameSuffix
+	klog.Infof("PodDiscoveryPlugin: Starting mount configuration for pod %s in namespace %s, ServingGroup %s",
+		req.Pod.Name, req.Pod.Namespace, req.ServingGroup)
+	if !hasVolume(req.Pod.Spec, DiscoveryVolumeName) {
+		volume := corev1.Volume{
+			Name: DiscoveryVolumeName,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{
+						Name: cmName,
+					},
+					Optional: func(b bool) *bool { return &b }(true),
+				},
+			},
+		}
+		req.Pod.Spec.Volumes = append(req.Pod.Spec.Volumes, volume)
+		klog.Infof("PodDiscoveryPlugin: Added volume %s referencing ConfigMap %s to pod %s",
+			DiscoveryVolumeName, cmName, req.Pod.Name)
+	}
 	mount := corev1.VolumeMount{
 		Name:      DiscoveryVolumeName,
-		MountPath: DiscoveryMountPath,
+		MountPath: p.config.AutoMountPath,
 		ReadOnly:  true,
 	}
-
+	containerCount := 0
 	for i := range req.Pod.Spec.Containers {
-		req.Pod.Spec.Containers[i].VolumeMounts = append(req.Pod.Spec.Containers[i].VolumeMounts, mount)
+		if addVolumeMountToContainer(&req.Pod.Spec.Containers[i], mount) {
+			klog.Infof("PodDiscoveryPlugin: Added volume mount to container %s in pod %s (path: %s, readonly: %v)",
+				req.Pod.Spec.Containers[i].Name, req.Pod.Name, mount.MountPath, mount.ReadOnly)
+			containerCount++
+		} else {
+			klog.Infof("PodDiscoveryPlugin: Volume mount already exists in container %s in pod %s, skipping",
+				req.Pod.Spec.Containers[i].Name, req.Pod.Name)
+		}
 	}
+	initContainerCount := 0
 	for i := range req.Pod.Spec.InitContainers {
-		req.Pod.Spec.InitContainers[i].VolumeMounts = append(req.Pod.Spec.InitContainers[i].VolumeMounts, mount)
+		if addVolumeMountToContainer(&req.Pod.Spec.InitContainers[i], mount) {
+			klog.Infof("PodDiscoveryPlugin: Added volume mount to init container %s in pod %s (path: %s, readonly: %v)",
+				req.Pod.Spec.InitContainers[i].Name, req.Pod.Name, mount.MountPath, mount.ReadOnly)
+			initContainerCount++
+		} else {
+			klog.Infof("PodDiscoveryPlugin: Volume mount already exists in init container %s in pod %s, skipping",
+				req.Pod.Spec.InitContainers[i].Name, req.Pod.Name)
+		}
 	}
-
+	klog.Infof("PodDiscoveryPlugin: Completed mount configuration for pod %s - %d containers and %d init containers mounted",
+		req.Pod.Name, containerCount, initContainerCount)
 	return nil
 }
 
-func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) error {
+func (p *PodDiscoveryPlugin) OnPodRunning(ctx context.Context, req *HookRequest) error {
 	if req.KubeClient == nil {
-		klog.Warningf("KubeClient is nil in HookRequest for plugin %s, skipping OnPodReady", p.Name())
+		klog.Warningf("KubeClient is nil in HookRequest for plugin %s, skipping OnPodRunning", p.Name())
 		return nil
 	}
-
+	// Only apply to new groups (where pod revision equals UpdateRevision)
+	if req.ModelServing.Status.UpdateRevision == "" {
+		// No update revision yet, skip
+		klog.Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - UpdateRevision is empty", req.Pod.Name)
+		return nil
+	}
+	podRevision := utils.ObjectRevision(req.Pod)
+	if podRevision != req.ModelServing.Status.UpdateRevision {
+		// This is an old group, skip
+		klog.Infof("PodDiscoveryPlugin: Skipping ConfigMap update for pod %s - pod revision %s does not match UpdateRevision %s",
+			req.Pod.Name, podRevision, req.ModelServing.Status.UpdateRevision)
+		return nil
+	}
 	namespace := req.ModelServing.Namespace
 	servingGroupName := req.ServingGroup
 	cmName := servingGroupName + ConfigMapNameSuffix
-
-	// Retry loop for updating ConfigMap to handle conflicts
-	return wait.PollImmediate(100*time.Millisecond, 5*time.Second, func() (bool, error) {
+	klog.Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod %s in ServingGroup %s", req.Pod.Name, servingGroupName)
+	// 使用 PollUntilContextTimeout 替换 PollImmediate
+	// 100ms: interval, 5s: timeout, true: immediate (立即执行第一次检测)
+	return wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		// 1. List all pods in the ServingGroup
 		pods, err := req.KubeClient.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: fmt.Sprintf("%s=%s", workloadv1alpha1.GroupNameLabelKey, servingGroupName),
@@ -128,44 +227,77 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 			klog.Errorf("Failed to list pods for ServingGroup %s: %v", servingGroupName, err)
 			return false, err
 		}
-
-		// 2. Group IPs by Role
-		// Structure: { "role1": ["ip1", "ip2"], "role2": ["ip3"] }
-		roleIPs := make(map[string][]string)
-
+		// 2. Build GroupInfo structure
+		groupInfo := GroupInfo{
+			Group: servingGroupName,
+		}
+		// Map to store pods by role and roleID (statefulSet)
+		// role -> roleID -> []PodInfo
+		roleStatefulSetPods := make(map[string]map[string][]PodInfo)
 		for _, pod := range pods.Items {
 			// Check if pod is ready and has an IP
 			if pod.Status.PodIP == "" {
 				continue
 			}
-
-			// Simple check for Running/Ready.
-			// You might want stricter checks (e.g., check Ready condition),
-			// but PodIP implies network connectivity usually.
-			// Let's stick to PodIP existence + Running phase for now.
 			if pod.Status.Phase != corev1.PodRunning {
 				continue
 			}
-
 			roleName := utils.GetRoleName(&pod)
 			if roleName == "" {
 				continue
 			}
-			roleIPs[roleName] = append(roleIPs[roleName], pod.Status.PodIP)
+			roleID := utils.GetRoleID(&pod)
+			if roleID == "" {
+				continue
+			}
+			// Initialize map for this role if not exists
+			if roleStatefulSetPods[roleName] == nil {
+				roleStatefulSetPods[roleName] = make(map[string][]PodInfo)
+			}
+			// Add pod info to the map
+			podInfo := PodInfo{
+				PodName: pod.Name,
+				PodIP:   pod.Status.PodIP,
+				NodeIP:  pod.Status.HostIP,
+			}
+			roleStatefulSetPods[roleName][roleID] = append(roleStatefulSetPods[roleName][roleID], podInfo)
 		}
-
-		// Sort IPs for deterministic output
-		for _, ips := range roleIPs {
-			sort.Strings(ips)
+		// 3. Build RoleInfoList from the map
+		for roleName, statefulSetMap := range roleStatefulSetPods {
+			roleInfo := RoleInfo{
+				Role: roleName,
+			}
+			// Sort statefulSet names for deterministic output
+			statefulSetNames := make([]string, 0, len(statefulSetMap))
+			for statefulSetName := range statefulSetMap {
+				statefulSetNames = append(statefulSetNames, statefulSetName)
+			}
+			sort.Strings(statefulSetNames)
+			// Build RoleInstanceList
+			for _, statefulSetName := range statefulSetNames {
+				podList := statefulSetMap[statefulSetName]
+				// Sort pods by name for deterministic output
+				sort.Slice(podList, func(i, j int) bool {
+					return podList[i].PodName < podList[j].PodName
+				})
+				roleInstanceInfo := RoleInstanceInfo{
+					RoleInstanceName: statefulSetName,
+					PodInfoList:      podList,
+				}
+				roleInfo.RoleInstanceList = append(roleInfo.RoleInstanceList, roleInstanceInfo)
+			}
+			groupInfo.RoleInfoList = append(groupInfo.RoleInfoList, roleInfo)
 		}
-
-		jsonData, err := json.Marshal(roleIPs)
+		// Sort roles by name for deterministic output
+		sort.Slice(groupInfo.RoleInfoList, func(i, j int) bool {
+			return groupInfo.RoleInfoList[i].Role < groupInfo.RoleInfoList[j].Role
+		})
+		jsonData, err := json.Marshal(groupInfo)
 		if err != nil {
-			return false, fmt.Errorf("failed to marshal pod IPs: %v", err)
+			return false, fmt.Errorf("failed to marshal group info: %v", err)
 		}
 		jsonString := string(jsonData)
-
-		// 3. Get or Create ConfigMap
+		// 4. Get or Create ConfigMap
 		cm, err := req.KubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, cmName, metav1.GetOptions{})
 		if err != nil {
 			if errors.IsNotFound(err) {
@@ -194,13 +326,12 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 					}
 					return false, err
 				}
-				klog.Infof("Created discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+				klog.Infof("Created groupinfo ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
 				return true, nil
 			}
 			return false, err
 		}
-
-		// 4. Update if changed
+		// 5. Update if changed
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
 		}
@@ -208,7 +339,6 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 			// No change
 			return true, nil
 		}
-
 		cm.Data[DiscoveryFileName] = jsonString
 		_, err = req.KubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
 		if err != nil {
@@ -218,7 +348,100 @@ func (p *PodDiscoveryPlugin) OnPodReady(ctx context.Context, req *HookRequest) e
 			}
 			return false, err
 		}
-		klog.Infof("Updated discovery ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
+		klog.Infof("Updated groupinfo ConfigMap %s for ServingGroup %s", cmName, servingGroupName)
 		return true, nil
 	})
+}
+
+func (p *PodDiscoveryPlugin) OnPodReady(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (p *PodDiscoveryPlugin) OnPodDelete(ctx context.Context, req *HookRequest) error {
+	if req.KubeClient == nil {
+		klog.Warningf("PodDiscoveryPlugin: KubeClient is nil in HookRequest, skipping OnPodDelete")
+		return nil
+	}
+	namespace := req.ModelServing.Namespace
+	servingGroupName := req.ServingGroup
+	cmName := servingGroupName + ConfigMapNameSuffix
+	klog.Infof("PodDiscoveryPlugin: Starting ConfigMap update for pod deletion %s in ServingGroup %s", req.Pod.Name, servingGroupName)
+	// 使用 PollUntilContextTimeout 替换 PollImmediate
+	// 100ms: interval, 5s: timeout, true: immediate (立即执行第一次检测)
+	return wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		cm, err := req.KubeClient.CoreV1().ConfigMaps(namespace).Get(ctx, cmName, metav1.GetOptions{})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				klog.Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to remove", cmName)
+				return true, nil
+			}
+			return false, err
+		}
+		jsonStr := cm.Data[DiscoveryFileName]
+		if jsonStr == "" {
+			klog.Infof("PodDiscoveryPlugin: ConfigMap %s has no data, nothing to remove", cmName)
+			return true, nil
+		}
+		var groupInfo GroupInfo
+		if err := json.Unmarshal([]byte(jsonStr), &groupInfo); err != nil {
+			klog.Errorf("PodDiscoveryPlugin: Failed to unmarshal ConfigMap data: %v", err)
+			return true, nil
+		}
+		deletedPodName := req.Pod.Name
+		found := false
+		for i := range groupInfo.RoleInfoList {
+			roleInfo := &groupInfo.RoleInfoList[i]
+			for j := range roleInfo.RoleInstanceList {
+				ri := &roleInfo.RoleInstanceList[j]
+				for k := len(ri.PodInfoList) - 1; k >= 0; k-- {
+					if ri.PodInfoList[k].PodName == deletedPodName {
+						ri.PodInfoList = append(ri.PodInfoList[:k], ri.PodInfoList[k+1:]...)
+						found = true
+					}
+				}
+			}
+		}
+		if !found {
+			klog.Infof("PodDiscoveryPlugin: Pod %s not found in ConfigMap %s, nothing to remove", deletedPodName, cmName)
+			return true, nil
+		}
+		newData, err := json.Marshal(groupInfo)
+		if err != nil {
+			return false, fmt.Errorf("failed to marshal group info: %v", err)
+		}
+		cm.Data[DiscoveryFileName] = string(newData)
+		_, err = req.KubeClient.CoreV1().ConfigMaps(namespace).Update(ctx, cm, metav1.UpdateOptions{})
+		if err != nil {
+			if errors.IsConflict(err) {
+				// 乐观锁冲突，重试
+				return false, nil
+			}
+			return false, err
+		}
+		klog.Infof("PodDiscoveryPlugin: Removed pod %s from ConfigMap %s", deletedPodName, cmName)
+		return true, nil
+	})
+}
+
+func (p *PodDiscoveryPlugin) OnRoleDelete(_ context.Context, _ *HookRequest) error {
+	return nil
+}
+
+func (p *PodDiscoveryPlugin) OnServingGroupDelete(ctx context.Context, req *HookRequest) error {
+	if req.KubeClient == nil {
+		klog.Warningf("PodDiscoveryPlugin: KubeClient is nil in HookRequest, skipping OnServingGroupDelete")
+		return nil
+	}
+	namespace := req.ModelServing.Namespace
+	cmName := req.ServingGroup + ConfigMapNameSuffix
+	err := req.KubeClient.CoreV1().ConfigMaps(namespace).Delete(ctx, cmName, metav1.DeleteOptions{})
+	if err != nil {
+		if errors.IsNotFound(err) {
+			klog.Infof("PodDiscoveryPlugin: ConfigMap %s not found, nothing to delete", cmName)
+			return nil
+		}
+		return fmt.Errorf("failed to delete ConfigMap %s: %w", cmName, err)
+	}
+	klog.Infof("PodDiscoveryPlugin: Deleted ConfigMap %s for ServingGroup %s", cmName, req.ServingGroup)
+	return nil
 }
