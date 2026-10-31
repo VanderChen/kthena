@@ -1707,7 +1707,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			// Delete the Pod from the indexer (simulating the Pod disappearing from the cluster)
 			err = podIndexer.Delete(pod)
 			assert.NoError(t, err)
-			controller.deletePod(pod)
+			controller.syncPodDeletion(pod)
 		}
 
 		// Wait for pods to be created and synced to cache
@@ -1887,7 +1887,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			// Delete the Pod from the indexer (simulating the Pod disappearing from the cluster)
 			err = podIndexer.Delete(pod)
 			assert.NoError(t, err)
-			controller.deletePod(pod)
+			controller.syncPodDeletion(pod)
 		}
 
 		// Wait for pods to be created and synced to cache
@@ -2058,7 +2058,7 @@ func TestModelServingControllerModelServingLifecycle(t *testing.T) {
 			// Delete the Pod from the indexer (simulating the Pod disappearing from the cluster)
 			err = podIndexer.Delete(pod)
 			assert.NoError(t, err)
-			controller.deletePod(pod)
+			controller.syncPodDeletion(pod)
 		}
 
 		// Wait for controller to process deletions
@@ -7436,46 +7436,25 @@ func TestHandlePodWithoutGraceTimeUsesUIDPrecondition(t *testing.T) {
 }
 
 func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
-	const (
-		namespace = "default"
-		podName   = "test-model-0-prefill-0-0"
-	)
-	gracePeriod := int64(1)
-	failedPod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      podName,
-			UID:       types.UID("failed-pod"),
-		},
-	}
+	ms, pods := recoveryFixture(workloadv1alpha1.RoleRecreate, 0)
+	ms.Spec.Template.RestartGracePeriodSeconds = ptr.To[int64](1)
+	failedPod := pods[0].DeepCopy()
+	failedPod.Status.Phase = corev1.PodFailed
+	failedPod.Status.Conditions[0].Status = corev1.ConditionFalse
+	controller, kubeClient := recoveryController(t, ms, failedPod)
 	replacementPod := failedPod.DeepCopy()
-	replacementPod.UID = types.UID("replacement-pod")
-	replacementPod.Status.Phase = corev1.PodFailed
-
-	ms := &workloadv1alpha1.ModelServing{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      "test-model",
-		},
-		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
-				RestartGracePeriodSeconds: &gracePeriod,
-			},
-		},
-	}
-	controller, kubeClient := newGracePeriodTestController(t, ms, replacementPod)
-	controller.store = datastore.New()
-	controller.workqueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter()) //nolint:staticcheck
-	t.Cleanup(controller.workqueue.ShutDown)
-
-	require.NoError(t, controller.handleErrorPod(ms, "test-model-0", failedPod))
-	require.NoError(t, controller.handleErrorPod(ms, "test-model-0", replacementPod))
+	replacementPod.UID = "replacement-pod"
+	updateRecoveryPod(t, controller, replacementPod)
+	controller.updatePod(failedPod, replacementPod)
+	unlock := controller.lifecycle.lock(ms.Namespace + "/" + ms.Name)
+	err := controller.processPodInputs(context.Background(), ms)
+	unlock()
+	require.NoError(t, err)
 
 	_, failedPodTracked := controller.graceMap.Load(getPodGracePeriodKey(failedPod))
 	_, replacementPodTracked := controller.graceMap.Load(getPodGracePeriodKey(replacementPod))
-	require.True(t, failedPodTracked)
+	require.False(t, failedPodTracked, "the old UID cannot retain the replacement's wait")
 	require.True(t, replacementPodTracked)
-
 	require.Eventually(t, func() bool {
 		for _, action := range kubeClient.Actions() {
 			deleteAction, ok := action.(kubetesting.DeleteAction)
@@ -10681,7 +10660,7 @@ func TestPodReadinessLossRevokesAvailabilityWithoutRecovery(t *testing.T) {
 	unready := pod.DeepCopy()
 	unready.Status.Conditions[0].Status = corev1.ConditionFalse
 	require.NoError(t, c.podsInformer.GetIndexer().Update(unready))
-	c.updatePod(pod, unready)
+	c.syncPodObservation(unready)
 	key := utils.GetNamespaceName(ms)
 	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, "readiness-loss-0", "prefill", "prefill-0"))
 	require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(key, "readiness-loss-0"))
@@ -10689,7 +10668,7 @@ func TestPodReadinessLossRevokesAvailabilityWithoutRecovery(t *testing.T) {
 		require.NotEqual(t, "delete-collection", action.GetVerb(), "readiness loss must not trigger failure recovery")
 	}
 	require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
-	c.updatePod(unready, pod)
+	c.syncPodObservation(pod)
 	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, "readiness-loss-0", "prefill", "prefill-0"))
 	require.Equal(t, datastore.ServingGroupRunning, c.store.GetServingGroupStatus(key, "readiness-loss-0"))
 }

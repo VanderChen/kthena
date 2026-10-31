@@ -401,7 +401,7 @@ func TestProtectedSingleRoleRecoveryKeepsGroupTemplate(t *testing.T) {
 	deleted := lifecyclePod(t, c, ms, ms, 1, "protected-v2")
 	require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, deleted.Name, metav1.DeleteOptions{}))
 	require.NoError(t, c.podsInformer.GetIndexer().Delete(deleted))
-	c.deletePod(deleted)
+	c.syncPodDeletion(deleted)
 	group := "protected-recovery-1"
 	revision, exists := c.store.GetServingGroupRevision(utils.GetNamespaceName(ms), group)
 	require.True(t, exists)
@@ -521,7 +521,7 @@ func TestZeroScaleExpansionBeforeQueuedEmptyReconcile(t *testing.T) {
 			// They finish Role deletion plans and enqueue another reconcile, which has not run yet.
 			for _, p := range oldPods {
 				require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
-				c.deletePod(p)
+				c.syncPodDeletion(p)
 			}
 			pods, err := c.kubeClientSet.CoreV1().Pods(zero.Namespace).List(ctx, metav1.ListOptions{})
 			require.NoError(t, err)
@@ -581,7 +581,7 @@ func TestZeroScaleRetiresPodGroups(t *testing.T) {
 	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
 	for _, p := range pods {
 		require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
-		c.deletePod(p)
+		c.syncPodDeletion(p)
 	}
 	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
 	zero = zero.DeepCopy()
@@ -620,7 +620,7 @@ func TestZeroScaleReappliesProtectedBaseline(t *testing.T) {
 	require.NoError(t, c.syncModelServing(ctx, utils.GetNamespaceName(zero).String()))
 	for _, p := range oldPods {
 		require.NoError(t, c.podsInformer.GetIndexer().Delete(p))
-		c.deletePod(p)
+		c.syncPodDeletion(p)
 	}
 	for i := 0; i < 3; i++ {
 		require.False(t, c.podDeletionPlanActive(zero, fmt.Sprintf("review-protected-%d", i)))

@@ -111,7 +111,7 @@ func TestDeletionScopeRoleShrinkCallbacksPreserveRetainedUIDs(t *testing.T) {
 			for _, pod := range selected {
 				event := deleteEvents[pod.Name]
 				require.NotNil(t, event)
-				c.deletePod(event)
+				c.syncPodDeletion(event)
 				t.Logf("after callback %s: removed role=%s group=%s", pod.Name,
 					c.store.GetRoleStatus(key, group, role.Name, "prefill-1"), c.store.GetServingGroupStatus(key, group))
 			}
@@ -197,6 +197,6 @@ func TestDeletionScopeGenuineLossRecreatesGroup(t *testing.T) {
 	// This loss has no controller deletion plan and the current Role is tracked.
 	require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(ctx, lost.Name, metav1.DeleteOptions{}))
 	require.NoError(t, c.podsInformer.GetIndexer().Delete(lost))
-	c.deletePod(lost)
+	c.syncPodDeletion(lost)
 	require.True(t, lifecycleDeletionMatches(c, peer), "genuine loss must retain the configured whole-group scope")
 }

@@ -86,6 +86,7 @@ func verifyDeletedWatchCannotEvictCurrentIdentity(t *testing.T, policy api.Recov
 	case <-time.After(5 * time.Second):
 		t.Fatal("update callback not delivered")
 	}
+	require.NoError(t, c.processPodInputs(ctx, ms))
 	require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
 	require.NoError(t, c.manageRollingUpdate(ctx, ms, utils.ModelServingRevision(ms), nil))
 	require.False(t, lifecycleDeletionMatches(c, current))
@@ -97,6 +98,7 @@ func verifyDeletedWatchCannotEvictCurrentIdentity(t *testing.T, policy api.Recov
 			t.Fatal("delete callback not delivered")
 		}
 	}
+	require.NoError(t, c.processPodInputs(ctx, ms))
 	require.False(t, lifecycleDeletionMatches(c, current), "a stale Watch deletion must not delete the live replacement")
 	// SharedIndexInformer applies Delete by namespace/name before calling us.
 	// The API snapshot must preserve physical Ready even when that cache is empty.

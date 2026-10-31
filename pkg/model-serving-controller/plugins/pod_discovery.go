@@ -195,6 +195,15 @@ func (p *PodDiscoveryPlugin) OnPodCreate(ctx context.Context, req *HookRequest) 
 }
 
 func (p *PodDiscoveryPlugin) OnPodRunning(ctx context.Context, req *HookRequest) error {
+	return p.syncConfigMap(ctx, req, false)
+}
+
+// syncConfigMap keeps the production Running-hook behavior and revision gate. The independent
+// maintenance entry additionally refuses to take over another owner's output.
+func (p *PodDiscoveryPlugin) syncConfigMap(ctx context.Context, req *HookRequest, requireOwner bool) error {
+	if requireOwner && (req.ModelServing == nil || req.ModelServing.UID == "") {
+		return fmt.Errorf("cannot maintain discovery ConfigMap without a ModelServing UID")
+	}
 	if req.KubeClient == nil {
 		klog.Warningf("KubeClient is nil in HookRequest for plugin %s, skipping OnPodRunning", p.Name())
 		return nil
@@ -331,6 +340,14 @@ func (p *PodDiscoveryPlugin) OnPodRunning(ctx context.Context, req *HookRequest)
 			}
 			return false, err
 		}
+
+		// Check the actual object on every attempt, including after AlreadyExists
+		// or Conflict. Update retains this GET's UID and resourceVersion so a
+		// same-name replacement cannot receive an update intended for the old CM.
+		if requireOwner && !metav1.IsControlledBy(cm, req.ModelServing) {
+			return false, fmt.Errorf("discovery ConfigMap %s/%s is not controlled by ModelServing UID %s", namespace, cmName, req.ModelServing.UID)
+		}
+
 		// 5. Update if changed
 		if cm.Data == nil {
 			cm.Data = make(map[string]string)
