@@ -234,7 +234,7 @@ func TestInstanceLifecycle_LateDeleteTargetsHealthyReplacement(t *testing.T) {
 					old.Labels[api.RevisionLabelKey] = "previous-revision"
 				}
 				c.kubeClientSet.(*kubefake.Clientset).ClearActions()
-				c.deletePod(old)
+				c.syncPodDeletion(old)
 				matched := lifecycleDeletionMatches(c, current)
 				require.False(t, matched)
 				count, err := c.store.GetRunningPodNumByServingGroup(utils.GetNamespaceName(ms), "late-delete-0")
@@ -308,7 +308,7 @@ func TestInstanceLifecycleRemovedWorkerCannotRecoverReplacement(t *testing.T) {
 			oldWorker.UID = "retired-worker"
 			oldWorker.Annotations[roleInstanceAnnotation] = "old-role"
 			c.kubeClientSet.(*kubefake.Clientset).ClearActions()
-			c.deletePod(oldWorker)
+			c.syncPodDeletion(oldWorker)
 			require.False(t, lifecycleDeletionMatches(c, current), "changing recovery scope cannot make an old Role incarnation fault a replacement")
 		})
 	}
@@ -434,6 +434,7 @@ func TestInstanceLifecycleCreationBeforeReadyControlsMissingPodRecovery(t *testi
 					// None of these Pods has become Ready; creation is a separate fact.
 					if cold {
 						c.store = datastore.New()
+						c.members = memberObservations{}
 					}
 					for i := range original.Items {
 						pod := &original.Items[i]
@@ -447,8 +448,12 @@ func TestInstanceLifecycleCreationBeforeReadyControlsMissingPodRecovery(t *testi
 					kube.ClearActions()
 					ctx, err := c.withRolloutPodSnapshot(context.Background(), ms)
 					require.NoError(t, err)
-					require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
-					require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, ms.Spec.Template.Roles[0], 0, revision, nil, true))
+					handled, err := c.processKnownMemberLosses(ctx, ms)
+					require.NoError(t, err)
+					if !handled {
+						require.NoError(t, c.refreshRolloutAvailability(ctx, ms))
+						require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, ms.Spec.Template.Roles[0], 0, revision, nil, true))
+					}
 					for i := range original.Items {
 						pod := &original.Items[i]
 						if pod.Name == missing {
@@ -591,7 +596,7 @@ func TestInstanceLifecycle_EnablingRecoveryRevisitsExistingFault(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
 				// Replay the observation under the original disabled/long grace setting.
-				c.updatePod(nil, pod)
+				c.syncPodObservation(pod)
 				latest := ms.DeepCopy()
 				latest.Generation++
 				latest.Spec.RecoveryPolicy = api.RoleRecreate

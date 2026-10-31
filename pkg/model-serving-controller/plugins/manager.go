@@ -23,9 +23,11 @@ import (
 	"slices"
 	"sort"
 
+	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 // Factory constructs a Plugin from a PluginSpec.
@@ -172,6 +174,49 @@ func (c *Chain) OnPodRunning(ctx context.Context, req *HookRequest) error {
 		}
 	}
 	return nil
+}
+
+// PodDiscoveryEligible applies the original Pod hook scope to the built-in
+// discovery plugin. The controller rechecks it when selecting a retry trigger.
+func (c *Chain) PodDiscoveryEligible(req *HookRequest) bool {
+	return c.podDiscovery(req) != nil
+}
+
+func (c *Chain) podDiscovery(req *HookRequest) *PodDiscoveryPlugin {
+	if c == nil {
+		return nil
+	}
+	for _, entry := range c.entries {
+		if plugin, ok := entry.plugin.(*PodDiscoveryPlugin); ok && shouldRun(entry.spec, req) {
+			return plugin
+		}
+	}
+	return nil
+}
+
+// MaintainPodDiscovery converges Running/NotReady member output independently
+// of the original hook chain. Its error must only schedule this output's retry;
+// it must not prevent later Running hooks from being attempted. Ready Pods use
+// the original OnPodReady path instead.
+func (c *Chain) MaintainPodDiscovery(ctx context.Context, req *HookRequest) (bool, error) {
+	plugin := c.podDiscovery(req)
+	if plugin == nil || req.Pod == nil || req.Pod.DeletionTimestamp != nil ||
+		req.Pod.Status.Phase != corev1.PodRunning || utils.IsPodRunningAndReady(req.Pod) {
+		return false, nil
+	}
+	return true, plugin.syncConfigMap(ctx, req, true)
+}
+
+// RetryPodDiscovery completes an already pending independent output update.
+// A trigger may have become Ready since its original NotReady maintenance
+// failed. Callers must consume a successful original Ready update first and
+// must never create this retry merely because the original hook chain failed.
+func (c *Chain) RetryPodDiscovery(ctx context.Context, req *HookRequest) (bool, error) {
+	plugin := c.podDiscovery(req)
+	if plugin == nil || req.Pod == nil || req.Pod.DeletionTimestamp != nil || req.Pod.Status.Phase != corev1.PodRunning {
+		return false, nil
+	}
+	return true, plugin.syncConfigMap(ctx, req, true)
 }
 
 // OnPodReady executes plugins' ready hooks in order.

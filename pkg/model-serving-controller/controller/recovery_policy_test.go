@@ -73,7 +73,7 @@ func recoveryController(t *testing.T, ms *workloadv1alpha1.ModelServing, pods ..
 	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms.DeepCopy()))
 	for _, pod := range pods {
 		require.NoError(t, c.podsInformer.GetIndexer().Add(pod.DeepCopy()))
-		c.addPod(pod)
+		c.syncPodObservation(pod)
 	}
 	c.initialSync.Store(true)
 	t.Cleanup(c.workqueue.ShutDown)
@@ -140,6 +140,7 @@ func TestRecoveryGraceRestartsFromNewProcessObservation(t *testing.T) {
 	failed.Status.Conditions[0].Status = corev1.ConditionFalse
 	updateRecoveryPod(t, fresh, failed)
 	before := time.Now()
+	fresh.observePodEpisode(failed)
 	require.NoError(t, fresh.schedulePodRecovery(ctx, ms, failed))
 	started, ok := fresh.graceMap.Load(getPodGracePeriodKey(failed))
 	require.True(t, ok)
@@ -188,7 +189,7 @@ func TestDisabledRecoveryNeedsNoPersistentEpisode(t *testing.T) {
 			require.True(t, ok)
 			require.False(t, started.(time.Time).Before(before))
 			updateRecoveryPod(t, c, pods[0])
-			c.updatePod(failed, pods[0])
+			c.syncPodObservation(pods[0])
 			_, scheduled = c.graceMap.Load(getPodGracePeriodKey(failed))
 			require.False(t, scheduled)
 			for _, a := range kube.Actions() {
@@ -209,13 +210,17 @@ func TestRecoveryGraceDoesNotCrossPodUID(t *testing.T) {
 	c.graceMap.Store(getPodGracePeriodKey(pods[0]), oldStart)
 	replacement := pods[0].DeepCopy()
 	replacement.UID = "replacement-pod"
+	replacement.Status.Phase = corev1.PodFailed
+	replacement.Status.Conditions[0].Status = corev1.ConditionFalse
+	updateRecoveryPod(t, c, replacement)
 	before := time.Now()
+	c.observePodEpisode(replacement)
 	require.NoError(t, c.schedulePodRecovery(ctx, ms, replacement))
 	started, ok := c.graceMap.Load(getPodGracePeriodKey(replacement))
 	require.True(t, ok)
 	require.False(t, started.(time.Time).Before(before))
-	original, _ := c.graceMap.Load(getPodGracePeriodKey(pods[0]))
-	require.Equal(t, oldStart, original)
+	_, oldWaiting := c.graceMap.Load(getPodGracePeriodKey(pods[0]))
+	require.False(t, oldWaiting, "the replaced UID no longer owns a recovery wait")
 }
 
 func TestRecoveryHasNoConfigMapWriteDependency(t *testing.T) {
@@ -233,6 +238,8 @@ func TestRecoveryHasNoConfigMapWriteDependency(t *testing.T) {
 	failed := pods[0].DeepCopy()
 	failed.Status.Phase = corev1.PodFailed
 	failed.Status.Conditions[0].Status = corev1.ConditionFalse
+	updateRecoveryPod(t, c, failed)
+	c.observePodEpisode(failed)
 	require.NoError(t, c.handleErrorPod(ms, "ms-0", failed))
 	_, scheduled := c.graceMap.Load(getPodGracePeriodKey(failed))
 	require.True(t, scheduled)
@@ -299,7 +306,7 @@ func TestRecoveryPolicyUnhealthyPods(t *testing.T) {
 						pod.Status.Phase = corev1.PodFailed
 					}
 					updateRecoveryPod(t, c, pod)
-					c.updatePod(pods[1], pod)
+					c.syncPodObservation(pod)
 					require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(utils.GetNamespaceName(ms), "ms-0", "prefill", "prefill-0"))
 					require.Equal(t, datastore.ServingGroupCreating, c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), "ms-0"))
 					key := getPodGracePeriodKey(pod)
@@ -333,7 +340,7 @@ func TestRecoveryPolicyChangesDuringGrace(t *testing.T) {
 			pod.Status.Conditions[0].Status = corev1.ConditionFalse
 			pod.Status.ContainerStatuses = []corev1.ContainerStatus{{RestartCount: 1}}
 			updateRecoveryPod(t, c, pod)
-			c.updatePod(pods[0], pod)
+			c.syncPodObservation(pod)
 			key := getPodGracePeriodKey(pod)
 			started, waiting := c.graceMap.Load(key)
 			require.True(t, waiting)
@@ -351,7 +358,7 @@ func TestRecoveryPolicyChangesDuringGrace(t *testing.T) {
 				ready := pod.DeepCopy()
 				ready.Status.Conditions[0].Status = corev1.ConditionTrue
 				updateRecoveryPod(t, c, ready)
-				c.updatePod(pod, ready)
+				c.syncPodObservation(ready)
 			}
 			require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
 			if change == "extend" {
@@ -390,7 +397,7 @@ func TestRecoveryPolicyPodDeletionScope(t *testing.T) {
 				require.NoError(t, kube.CoreV1().Pods(ms.Namespace).Delete(context.Background(), pods[1].Name, metav1.DeleteOptions{}))
 				require.NoError(t, c.podsInformer.GetIndexer().Delete(pods[1]))
 				kube.ClearActions()
-				c.deletePod(pods[1])
+				c.syncPodDeletion(pods[1])
 				if policy == workloadv1alpha1.NoneRestartPolicy {
 					require.Empty(t, recoveryDeletedPods(kube))
 					require.Positive(t, c.workqueue.Len())
@@ -436,9 +443,9 @@ func TestRecoveryReadyStartsNewGraceEpisode(t *testing.T) {
 	c.graceMap.Store(key, oldStart)
 	// Ready clears the old episode before a second unhealthy event arrives.
 	updateRecoveryPod(t, c, pods[0])
-	c.updatePod(pod, pods[0])
+	c.syncPodObservation(pods[0])
 	updateRecoveryPod(t, c, pod)
-	c.updatePod(pods[0], pod)
+	c.syncPodObservation(pod)
 	newStart, ok := c.graceMap.Load(key)
 	require.True(t, ok)
 	require.NotEqual(t, oldStart, newStart)

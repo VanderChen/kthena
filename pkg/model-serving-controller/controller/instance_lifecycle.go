@@ -83,6 +83,7 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 	if pod.UID == "" {
 		return pod
 	} // Synthetic objects without an API identity.
+	observed := c.capturePodObservation(pod)
 	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
 	// A stale Watch frame can overwrite the informer store before this callback.
 	// API objects always carry resourceVersion; synthetic fixtures may not.
@@ -95,30 +96,31 @@ func (c *ModelServingController) currentPodEvent(pod *corev1.Pod) *corev1.Pod {
 		c.enqueueModelServingByChildResourceAfter(pod, enqueueAfter)
 		return nil
 	}
+	if c.modelServingLister != nil {
+		if ms, _, err := c.getModelServingByChildResource(latest); err == nil && utils.IsOwnedByModelServingWithUID(latest, ms.UID) {
+			c.observeLivePodEpisode(ms, latest, observed)
+			if pod.ResourceVersion != "" {
+				c.observeKnownMember(ms, latest)
+			}
+		}
+	}
 	return latest
 }
 
 func (c *ModelServingController) stalePodDeletion(ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) bool {
+	stale, _, err := c.deletionObservation(context.Background(), ms, pod)
+	return stale || err != nil
+}
+
+// Keep Unknown distinct from a stale notification so the worker retains the
+// DELETE input on read failures. Freeze siblings before the final absence GET:
+// a replacement created after that GET must never enter this recovery's plan.
+func (c *ModelServingController) deletionObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod) (bool, []*corev1.Pod, error) {
 	if pod.Annotations[deletionScopeAnnotation] == deleteRoleScope || pod.Annotations[deletionScopeAnnotation] == deleteGroupScope {
-		return true
+		return true, nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
-	if ms.ResourceVersion != "" {
-		latest, err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
-		// An object still present in the API is not an observed physical loss,
-		// irrespective of whether the replayed frame carries its current UID.
-		if err == nil {
-			return true
-		}
-	}
-	if err == nil && latest.UID != pod.UID {
-		return true
-	}
-	if err != nil && !apierrors.IsNotFound(err) {
-		return true
-	}
 	// A removed worker ordinal may have no same-name replacement. Its surviving
 	// siblings still identify whether the Role/SG has already been replaced.
 	selector := labels.Set{workloadv1alpha1.GroupNameLabelKey: pod.Labels[workloadv1alpha1.GroupNameLabelKey]}
@@ -134,24 +136,39 @@ func (c *ModelServingController) stalePodDeletion(ms *workloadv1alpha1.ModelServ
 		}
 	}
 	if err != nil {
-		return true
+		return false, nil, err
 	}
+	owned := make([]*corev1.Pod, 0, len(pods))
 	for _, sibling := range pods {
 		if !utils.IsOwnedByModelServingWithUID(sibling, ms.UID) {
 			continue
 		}
 		if sibling.Annotations[groupInstanceAnnotation] != pod.Annotations[groupInstanceAnnotation] {
-			return true
+			return true, nil, nil
 		}
 		// RecoveryPolicy and rollout mode are mutable. The event must still
 		// belong to the current Role incarnation before its failure can be
 		// expanded to a whole-group recovery under the latest policy.
 		if utils.GetRoleName(sibling) == utils.GetRoleName(pod) && utils.GetRoleID(sibling) == utils.GetRoleID(pod) &&
 			sibling.Annotations[roleInstanceAnnotation] != pod.Annotations[roleInstanceAnnotation] {
-			return true
+			return true, nil, nil
+		}
+		owned = append(owned, sibling)
+	}
+	latest, err := c.podsLister.Pods(pod.Namespace).Get(pod.Name)
+	if ms.ResourceVersion != "" {
+		latest, err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		if err == nil {
+			return true, nil, nil
 		}
 	}
-	return false
+	if err == nil && latest.UID != pod.UID {
+		return true, nil, nil
+	}
+	if err != nil && !apierrors.IsNotFound(err) {
+		return false, nil, err
+	}
+	return false, owned, nil
 }
 
 // instanceAnnotations survives controller restarts and partial Pod creation.
@@ -170,6 +187,7 @@ func (c *ModelServingController) instanceAnnotations(ctx context.Context, ms *wo
 		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
 			continue
 		}
+		c.observeKnownMember(ms, pod)
 		if !groupFound {
 			groupID = pod.Annotations[groupInstanceAnnotation]
 			groupFound = true
@@ -199,6 +217,7 @@ func setInstanceAnnotations(pod *corev1.Pod, instance map[string]string) {
 	// Completion evidence exists only in this controller process.
 	delete(pod.Annotations, roleCreatedAnnotation)
 	delete(pod.Annotations, deletionScopeAnnotation)
+	delete(pod.Annotations, creationTokenAnnotation)
 }
 
 // Record that all members were created, independently of whether they are

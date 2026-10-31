@@ -78,10 +78,56 @@ func (c *ModelServingController) ownedDeletionPods(ctx context.Context, ms *api.
 	for i := range list.Items {
 		pod := &list.Items[i]
 		if utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			c.observeKnownMember(ms, pod)
 			pods = append(pods, *pod)
 		}
 	}
 	return pods, nil
+}
+
+type observedPodDeletionKey struct{}
+
+// Carry the UIDs selected before the absence GET to the original plan creation
+// point. Constructing this snapshot does not accept a deletion operation.
+func withObservedPodDeletion(ctx context.Context, ms *api.ModelServing, pod *corev1.Pod, siblings []*corev1.Pod) context.Context {
+	if ms.Spec.RecoveryPolicy == api.NoneRestartPolicy {
+		return ctx
+	}
+	group, role, instance := pod.Labels[api.GroupNameLabelKey], utils.GetRoleName(pod), utils.GetRoleID(pod)
+	scope := deleteRoleScope
+	if ms.Spec.RecoveryPolicy == api.ServingGroupRecreate {
+		scope = deleteGroupScope
+	}
+	selected := []corev1.Pod{*memberIdentity(pod)}
+	for _, sibling := range siblings {
+		if !utils.IsOwnedByModelServingWithUID(sibling, ms.UID) || sibling.Labels[api.GroupNameLabelKey] != group || sibling.Name == pod.Name ||
+			(scope == deleteRoleScope && (utils.GetRoleName(sibling) != role || utils.GetRoleID(sibling) != instance)) {
+			continue
+		}
+		selected = append(selected, *sibling.DeepCopy())
+	}
+	sort.Slice(selected, func(i, j int) bool { return selected[i].Name < selected[j].Name })
+	return context.WithValue(ctx, observedPodDeletionKey{}, &podDeletionPlan{Key: deletionPlanKey(ms, scope, group, role, instance), Pods: selected})
+}
+
+func observedPodDeletion(ctx context.Context, key podDeletionPlanKey) *podDeletionPlan {
+	plan, _ := ctx.Value(observedPodDeletionKey{}).(*podDeletionPlan)
+	if plan != nil && plan.Key == key {
+		return plan
+	}
+	return nil
+}
+
+// A partial POST can precede AddRole. After the ordinary intent check, register
+// existence so the original deletion path can retire even an empty old scope.
+// This never grants Initialized/Ready credit or installs an accepted plan.
+func (c *ModelServingController) registerObservedDeletionScope(ctx context.Context, ms *api.ModelServing, scope, group, role, instance string) {
+	if plan := observedPodDeletion(ctx, deletionPlanKey(ms, scope, group, role, instance)); plan != nil {
+		for i := range plan.Pods {
+			pod := &plan.Pods[i]
+			c.store.AddServingGroupAndRole(utils.GetNamespaceName(ms), group, utils.ObjectRevision(pod), utils.ObjectRoleTemplateHash(pod), utils.GetRoleName(pod), utils.GetRoleID(pod))
+		}
+	}
 }
 
 func (c *ModelServingController) preparePodDeletionPlan(ctx context.Context, ms *api.ModelServing, selector labels.Selector, scope string) (*podDeletionPlan, error) {
@@ -98,9 +144,15 @@ func (c *ModelServingController) preparePodDeletionPlan(ctx context.Context, ms 
 	if err := c.checkRolloutIntent(ctx, ms); err != nil {
 		return nil, err
 	}
-	pods, err := c.ownedDeletionPods(ctx, ms, selector)
-	if err != nil {
-		return nil, err
+	var pods []corev1.Pod
+	if observed := observedPodDeletion(ctx, key); observed != nil {
+		pods = observed.Pods
+	} else {
+		var err error
+		pods, err = c.ownedDeletionPods(ctx, ms, selector)
+		if err != nil {
+			return nil, err
+		}
 	}
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
 	if err := c.checkRolloutIntent(ctx, ms); err != nil {
@@ -260,6 +312,10 @@ func (c *ModelServingController) restoreDeletionIntents(ctx context.Context, ms 
 
 func (c *ModelServingController) clearDeletionPlan(ms *api.ModelServing, scope, group, role, instance string) {
 	c.deletionPlans.Delete(deletionPlanKey(ms, scope, group, role, instance))
+	if scope == deleteGroupScope {
+		role, instance = "", ""
+	}
+	c.forgetKnownMemberScope(ms, group, role, instance)
 }
 
 func (c *ModelServingController) resetDeletionStatus(ms *api.ModelServing, group, role, instance string) {
@@ -304,6 +360,7 @@ func (c *ModelServingController) finishDeletionWithReplacement(ctx context.Conte
 		return true, nil
 	}
 	c.deletionPlans.Delete(plan.Key)
+	c.forgetKnownMemberScope(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 	key := utils.GetNamespaceName(ms)
 	if plan.Key.Scope == deleteGroupScope {
 		c.store.DeleteServingGroup(key, plan.Key.Group)
@@ -312,6 +369,7 @@ func (c *ModelServingController) finishDeletionWithReplacement(ctx context.Conte
 	}
 	for i := range pods {
 		pod := &pods[i]
+		c.observeKnownMember(ms, pod)
 		c.store.AddServingGroupAndRole(key, plan.Key.Group, utils.ObjectRevision(pod), utils.ObjectRoleTemplateHash(pod), utils.GetRoleName(pod), utils.GetRoleID(pod))
 	}
 	c.resetDeletionStatus(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
@@ -345,6 +403,7 @@ func (c *ModelServingController) podDeletionPlanActive(ms *api.ModelServing, gro
 // Called under the ModelServing lifecycle lock. An absent/terminating owner
 // retains no plans; a recreated owner retains only plans for its current UID.
 func (c *ModelServingController) prunePodDeletionPlans(owner types.NamespacedName, currentUID types.UID) {
+	c.forgetKnownMemberOwner(owner, currentUID)
 	c.deletionPlans.Range(func(key, _ interface{}) bool {
 		planKey := key.(podDeletionPlanKey)
 		if planKey.Owner == owner && (currentUID == "" || planKey.UID != currentUID) {
@@ -395,6 +454,7 @@ func (c *ModelServingController) resumeOrphanedRoleDeletion(ctx context.Context,
 		return fmt.Errorf("waiting for orphaned Role cleanup %s/%s/%s", plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 	}
 	c.deletionPlans.Delete(plan.Key)
+	c.forgetKnownMemberScope(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 	c.clearRoleDeletionProgress(ms, plan.Key.Group, plan.Key.Role, plan.Key.Instance)
 	c.enqueueModelServing(ms)
 	return nil
