@@ -19,7 +19,6 @@ package podgroupmanager
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +27,7 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -764,12 +764,21 @@ func copyInt32Pointer(value *int32) *int32 {
 }
 
 func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
-	return current.Spec.MinMember != updated.Spec.MinMember ||
-		!reflect.DeepEqual(current.Spec.MinResources, updated.Spec.MinResources) ||
-		!reflect.DeepEqual(current.Spec.NetworkTopology, updated.Spec.NetworkTopology) ||
-		!reflect.DeepEqual(current.Spec.TopologyAffinity, updated.Spec.TopologyAffinity) ||
-		!reflect.DeepEqual(current.Spec.SubGroupPolicy, updated.Spec.SubGroupPolicy) ||
-		current.Spec.Queue != updated.Spec.Queue
+	// Compare the complete desired spec, including scheduling policies. The
+	// update starts from a copy of current, so fields we do not manage remain
+	// intact. Semantic equality ignores Quantity representation and empty
+	// collection differences without dropping policy changes or list ordering.
+	currentSpec, updatedSpec := current.Spec, updated.Spec
+	currentSpec.Queue = effectiveQueue(currentSpec.Queue)
+	updatedSpec.Queue = effectiveQueue(updatedSpec.Queue)
+	return !apiequality.Semantic.DeepEqual(currentSpec, updatedSpec)
+}
+
+func effectiveQueue(queue string) string {
+	if queue == "" {
+		return schedulingv1beta1.DefaultQueue
+	}
+	return queue
 }
 
 func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
