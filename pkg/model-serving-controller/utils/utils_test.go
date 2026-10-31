@@ -17,12 +17,16 @@ limitations under the License.
 package utils
 
 import (
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -544,8 +548,107 @@ func TestRolloutConditionsRemainBoundedAndStable(t *testing.T) {
 	require.Equal(t, cond.LastTransitionTime, ms.Status.Conditions[0].LastTransitionTime)
 	require.True(t, SetConditionWithRolloutAndProgressState(ms, groups[:1], groups, nil, true, true))
 	require.Equal(t, cond.LastTransitionTime, ms.Status.Conditions[0].LastTransitionTime)
+	lastMessage := ms.Status.Conditions[0].Message
 	require.True(t, SetConditionWithRolloutAndProgressState(ms, nil, groups, nil, false, false))
 	require.Equal(t, metav1.ConditionFalse, ms.Status.Conditions[0].Status)
-	require.Equal(t, "Condition is inactive", ms.Status.Conditions[0].Message)
+	require.Equal(t, lastMessage, ms.Status.Conditions[0].Message)
 	require.False(t, SetConditionWithRolloutAndProgressState(ms, nil, groups, nil, false, false))
+}
+
+func TestConditionTransitionsPreserveInactiveDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		previous       workloadv1alpha1.ModelServingConditionType
+		next           workloadv1alpha1.ModelServingConditionType
+		rolloutActive  bool
+		progressActive bool
+	}{
+		{"creation completes", workloadv1alpha1.ModelServingProgressing, workloadv1alpha1.ModelServingAvailable, false, false},
+		{"rollout completes", workloadv1alpha1.ModelServingUpdateInProgress, workloadv1alpha1.ModelServingAvailable, false, false},
+		{"availability lost", workloadv1alpha1.ModelServingAvailable, workloadv1alpha1.ModelServingProgressing, false, true},
+		{"rollout starts", workloadv1alpha1.ModelServingAvailable, workloadv1alpha1.ModelServingUpdateInProgress, true, true},
+		{"partition stop still recovering", workloadv1alpha1.ModelServingUpdateInProgress, workloadv1alpha1.ModelServingProgressing, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+			old := newCondition(tc.previous, "Previous diagnostic: 2 groups")
+			old.ObservedGeneration = 1
+			old.LastTransitionTime = metav1.NewTime(time.Unix(100, 0))
+			ms.Status.Conditions = []metav1.Condition{old}
+			require.True(t, SetConditionWithRolloutAndProgressState(ms, []int{1}, nil, nil, tc.rolloutActive, tc.progressActive))
+			inactive := apiMeta.FindStatusCondition(ms.Status.Conditions, string(tc.previous))
+			require.NotNil(t, inactive)
+			require.Equal(t, metav1.ConditionFalse, inactive.Status)
+			require.Equal(t, old.Reason, inactive.Reason)
+			require.Equal(t, old.Message, inactive.Message)
+			require.EqualValues(t, 2, inactive.ObservedGeneration)
+			require.True(t, inactive.LastTransitionTime.After(old.LastTransitionTime.Time))
+			require.True(t, apiMeta.IsStatusConditionTrue(ms.Status.Conditions, string(tc.next)))
+			stable := ms.DeepCopy()
+			require.False(t, SetConditionWithRolloutAndProgressState(ms, []int{1}, nil, nil, tc.rolloutActive, tc.progressActive))
+			require.Equal(t, stable.Status, ms.Status)
+			ms.Generation++
+			require.True(t, SetConditionWithRolloutAndProgressState(ms, []int{1}, nil, nil, tc.rolloutActive, tc.progressActive))
+			active := apiMeta.FindStatusCondition(ms.Status.Conditions, string(tc.next))
+			require.EqualValues(t, 3, active.ObservedGeneration)
+			require.Equal(t, apiMeta.FindStatusCondition(stable.Status.Conditions, active.Type).LastTransitionTime, active.LastTransitionTime)
+			require.Equal(t, *apiMeta.FindStatusCondition(stable.Status.Conditions, inactive.Type), *inactive)
+
+			// The previous type becomes active again with a fresh diagnostic.
+			inactive.LastTransitionTime = old.LastTransitionTime
+			rollout := tc.previous == workloadv1alpha1.ModelServingUpdateInProgress
+			progress := tc.previous != workloadv1alpha1.ModelServingAvailable
+			require.True(t, SetConditionWithRolloutAndProgressState(ms, []int{0}, nil, nil, rollout, progress))
+			reactivated := apiMeta.FindStatusCondition(ms.Status.Conditions, string(tc.previous))
+			require.Equal(t, metav1.ConditionTrue, reactivated.Status)
+			require.NotEqual(t, old.Message, reactivated.Message)
+			require.True(t, reactivated.LastTransitionTime.After(old.LastTransitionTime.Time))
+		})
+	}
+}
+
+func TestInactiveConditionDiagnosticsAreBoundedAndScoped(t *testing.T) {
+	for _, conditionType := range []string{
+		string(workloadv1alpha1.ModelServingAvailable),
+		string(workloadv1alpha1.ModelServingProgressing),
+		string(workloadv1alpha1.ModelServingUpdateInProgress),
+	} {
+		for _, message := range []string{"Previous diagnostic", "Condition is inactive", strings.Repeat("a", 512), strings.Repeat("a", 513), strings.Repeat("诊断", 300)} {
+			t.Run(conditionType+"/"+message[:min(len(message), 12)], func(t *testing.T) {
+				ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Generation: 2}}
+				progress := conditionType == string(workloadv1alpha1.ModelServingAvailable)
+				SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, progress)
+				old := metav1.Condition{Type: conditionType, Status: metav1.ConditionFalse, Reason: "PreviousReason", Message: message,
+					ObservedGeneration: 1, LastTransitionTime: metav1.NewTime(time.Unix(100, 0))}
+				ms.Status.Conditions = append(ms.Status.Conditions, old)
+				want := old
+				if utf8.RuneCountInString(message) > 512 {
+					want.Message = string([]rune(message)[:509]) + "..."
+				}
+				require.Equal(t, want.Message != message, SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, progress))
+				actual := apiMeta.FindStatusCondition(ms.Status.Conditions, conditionType)
+				require.Equal(t, want, *actual)
+				require.True(t, utf8.ValidString(actual.Message))
+				require.LessOrEqual(t, utf8.RuneCountInString(actual.Message), 512)
+				require.False(t, SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, progress))
+			})
+		}
+	}
+	for _, tc := range []struct {
+		typeName string
+		status   metav1.ConditionStatus
+	}{
+		{"ExternalCondition", metav1.ConditionFalse},
+		{string(workloadv1alpha1.ModelServingCoordinatedRoleRolloutBlocked), metav1.ConditionFalse},
+		{string(workloadv1alpha1.ModelServingProgressing), metav1.ConditionUnknown},
+	} {
+		t.Run(tc.typeName+"/"+string(tc.status), func(t *testing.T) {
+			ms := &workloadv1alpha1.ModelServing{}
+			SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, false)
+			old := metav1.Condition{Type: tc.typeName, Status: tc.status, Reason: "Untouched", Message: strings.Repeat("x", 600)}
+			ms.Status.Conditions = append(ms.Status.Conditions, old)
+			require.False(t, SetConditionWithRolloutAndProgressState(ms, nil, nil, nil, false, false))
+			require.Equal(t, old, *apiMeta.FindStatusCondition(ms.Status.Conditions, tc.typeName))
+		})
+	}
 }

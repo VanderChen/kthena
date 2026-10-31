@@ -20,11 +20,14 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
+	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -36,6 +39,10 @@ func TestStatusLoggingOnlyAfterCommittedChange(t *testing.T) {
 		for _, failure := range []string{"none", "conflict", "forbidden"} {
 			t.Run(fmt.Sprintf("v%d/%s", verbosity, failure), func(t *testing.T) {
 				ms := lifecycleMS("status-logs", 1, 1, 0)
+				previous := metav1.Condition{Type: string(api.ModelServingProgressing), Status: metav1.ConditionTrue,
+					Reason: "GroupProgressing", Message: "Some serving groups are progressing: 1",
+					ObservedGeneration: ms.Generation, LastTransitionTime: metav1.NewTime(time.Unix(100, 0))}
+				ms.Status.Conditions = []metav1.Condition{previous}
 				c := lifecycleController(t, ms)
 				pod := lifecyclePod(t, c, ms, ms, 0, "stable-pod")
 				logs := captureModelServingLogs(t, verbosity)
@@ -71,6 +78,9 @@ func TestStatusLoggingOnlyAfterCommittedChange(t *testing.T) {
 					require.Error(t, err)
 					require.Equal(t, 1, attempts)
 					require.Zero(t, count())
+					persisted, getErr := client.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
+					require.NoError(t, getErr)
+					require.Equal(t, previous, *apiMeta.FindStatusCondition(persisted.Status.Conditions, previous.Type))
 					for _, entry := range logs.entries() {
 						require.NotEqual(t, "ModelServing condition changed", entry.Message)
 					}
@@ -92,6 +102,13 @@ func TestStatusLoggingOnlyAfterCommittedChange(t *testing.T) {
 				}
 				latest, err := client.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
 				require.NoError(t, err)
+				inactive := apiMeta.FindStatusCondition(latest.Status.Conditions, previous.Type)
+				require.NotNil(t, inactive)
+				require.Equal(t, metav1.ConditionFalse, inactive.Status)
+				require.Equal(t, previous.Reason, inactive.Reason)
+				require.Equal(t, previous.Message, inactive.Message)
+				require.True(t, inactive.LastTransitionTime.After(previous.LastTransitionTime.Time))
+				require.Equal(t, previous, ms.Status.Conditions[0], "status calculation must not mutate the informer object")
 				require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
 				beforeAttempts := attempts
 				for range 3 {

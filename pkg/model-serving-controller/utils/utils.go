@@ -471,11 +471,13 @@ func SetConditionWithRolloutAndProgressState(
 		if cur.Status == metav1.ConditionFalse &&
 			(cur.Type == string(workloadv1alpha1.ModelServingAvailable) ||
 				cur.Type == string(workloadv1alpha1.ModelServingProgressing) ||
-				cur.Type == string(workloadv1alpha1.ModelServingUpdateInProgress)) && cur.Message != "Condition is inactive" {
-			// Retire legacy ordinal lists even on inactive conditions. Keep the
-			// transition time when only the diagnostic text changes.
-			cur.Message = "Condition is inactive"
-			shouldUpdate = true
+				cur.Type == string(workloadv1alpha1.ModelServingUpdateInProgress)) {
+			// Keep the last diagnostic when a condition becomes False. Bound
+			// legacy messages without changing their status transition time.
+			if text := []rune(cur.Message); len(text) > 512 {
+				cur.Message = string(text[:509]) + "..."
+				shouldUpdate = true
+			}
 		}
 	}
 	existing := apiMeta.FindStatusCondition(ms.Status.Conditions, newCond.Type)
