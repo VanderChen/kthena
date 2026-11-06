@@ -504,12 +504,22 @@ func TestUpgradeWithoutAnyHistoryKeepsStatusEvidenceAcrossSyncs(t *testing.T) {
 		require.Equal(t, originalUIDs[pod.Name], pod.UID)
 	}
 
-	// Removing the never-applied change (the Pods now prove the template) lets
+	// Reverting the spec alone is not enough: the recorded pending identity is
+	// evidence the operator must clear deliberately (status subresource).
+	reverted := reloadFromAPI(t, c, ms).DeepCopy()
+	reverted.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = nil
+	_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, reverted, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(reverted))
+	err = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+	require.ErrorContains(t, err, `status.updateRevision "pending" is not the running revision`)
+	require.Equal(t, "pending", reloadFromAPI(t, c, ms).Status.UpdateRevision)
+
+	// Clearing the pending identity (the Pods now prove the template) lets
 	// recovery proceed on the next sync, and the frozen status resumes normally.
 	fixed := reloadFromAPI(t, c, ms).DeepCopy()
-	fixed.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = nil
 	fixed.Status.UpdateRevision = legacyHash
-	_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, fixed, metav1.UpdateOptions{})
+	_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).UpdateStatus(ctx, fixed, metav1.UpdateOptions{})
 	require.NoError(t, err)
 	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(fixed))
 	for i := 0; i < 3; i++ {

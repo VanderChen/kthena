@@ -160,6 +160,20 @@ advance the unit's revision while a historical worker is still missing.
   it with `modelserving.volcano.sh/legacy-revision-baseline-rebuilt` and emits
   a `LegacyBaselineRebuilt` warning: a scheduler or plugin edit made while the
   baseline was missing is adopted as the baseline and does not roll on its own.
+  A rebuilt missing revision (annotated
+  `modelserving.volcano.sh/revision-rebuilt-from-generation`) is stored under
+  the name the previous controller would also choose but with canonical data,
+  which that controller refuses to overwrite; delete such objects before
+  downgrading so the previous controller can recreate its own.
+- **Recovering from a persistent `RevisionUnresolved` pause.** The event names
+  the Pod and field that disagree with the template. Either revert the spec
+  to what the Pods run (if `status.updateRevision` already recorded a rollout
+  the Pods never received, also reset it through the status subresource, e.g.
+  `kubectl patch modelserving <name> --subresource=status --type=merge -p
+  '{"status":{"updateRevision":"<running hash>"}}'`), or delete the affected
+  Pods so they are recreated at the current template (a restart of that role
+  instance), or remove the admission change that altered the Pods and then
+  delete them.
 
 ## Example
 
