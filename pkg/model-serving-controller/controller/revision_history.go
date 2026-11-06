@@ -225,18 +225,15 @@ func (h *revisionHistory) rebuildMissingRevision(ctx context.Context, revision s
 	if len(pods) == 0 {
 		return decline("no live Pod references it")
 	}
-	desired := utils.ModelServingRevision(h.ms)
+	// The recorded identities are frozen while history is unresolved (see
+	// updateModelServingStatusInRound), so a status that points elsewhere is
+	// durable evidence of a rollout the Pods never received.
 	if current := h.ms.Status.CurrentRevision; current != "" && current != revision {
 		return decline("status.currentRevision is %q", current)
 	}
-	if update := h.ms.Status.UpdateRevision; update != "" && update != revision && update != desired {
-		return decline("status.updateRevision %q is neither the running nor the desired revision", update)
+	if update := h.ms.Status.UpdateRevision; update != "" && update != revision {
+		return decline("status.updateRevision %q is not the running revision", update)
 	}
-	rendered := make(map[string]int, len(h.ms.Spec.Template.Roles))
-	for _, role := range h.ms.Spec.Template.Roles {
-		rendered[role.Name] = int(role.WorkerReplicas) + 1
-	}
-	observed := make(map[string]int, len(pods))
 	for _, pod := range pods {
 		if other := utils.ObjectRevision(pod); other != revision {
 			return decline("Pod %s runs revision %q", pod.Name, other)
@@ -244,23 +241,16 @@ func (h *revisionHistory) rebuildMissingRevision(ctx context.Context, revision s
 		if inplace.InProgress(pod) {
 			return decline("Pod %s has an unfinished in-place update", pod.Name)
 		}
-		roleName := pod.Labels[workloadv1alpha1.RoleLabelKey]
-		if _, ok := rendered[roleName]; !ok {
-			return decline("Pod %s runs Role %q, which the current template does not define", pod.Name, roleName)
+		// Every live Pod must match what the template renders at its position:
+		// the same container set, images, command, args, declared env (which
+		// includes GROUP_SIZE, so a WorkerReplicas change is detected), ports,
+		// mounts and resources. Admission or plugin additions are tolerated.
+		rendered := utils.RenderPodForRecovery(h.ms, pod)
+		if rendered == nil {
+			return decline("Pod %s does not occupy a position the current template defines", pod.Name)
 		}
-		if missing := inplace.MissingContainers(h.ms, pod); len(missing) > 0 {
-			return decline("Pod %s lacks containers %v of the current template", pod.Name, missing)
-		}
-		images := inplace.TargetImages(h.ms, pod)
-		for _, container := range pod.Spec.Containers {
-			if want, ok := images[container.Name]; ok && want != container.Image {
-				return decline("Pod %s container %s runs %s but the current template renders %s", pod.Name, container.Name, container.Image, want)
-			}
-		}
-		unit := pod.Labels[workloadv1alpha1.GroupNameLabelKey] + "/" + pod.Labels[workloadv1alpha1.RoleIDKey]
-		observed[unit]++
-		if observed[unit] > rendered[roleName] {
-			return decline("Role instance %s has more Pods than the current template renders (%d)", unit, rendered[roleName])
+		if reason := utils.PodDeviation(rendered, pod); reason != "" {
+			return decline("Pod %s: %s", pod.Name, reason)
 		}
 	}
 
@@ -271,11 +261,11 @@ func (h *revisionHistory) rebuildMissingRevision(ctx context.Context, revision s
 	if round := coordinatedRoundOf(ctx, h.ms); round != nil {
 		round.snapshots[revision] = controllerRevisionObservation{revision: cr}
 	}
-	klog.Warningf("Rebuilt missing ControllerRevision %s for ModelServing %s/%s from the current template; %d live Pods run it with matching images",
+	klog.Warningf("Rebuilt missing ControllerRevision %s for ModelServing %s/%s from the current template; %d live Pods run it and match the template",
 		cr.Name, h.ms.Namespace, h.ms.Name, len(pods))
 	if h.controller.recorder != nil {
 		h.controller.recorder.Eventf(h.ms, corev1.EventTypeNormal, "RevisionRebuilt",
-			"Rebuilt missing ControllerRevision %s from the current template; %d live Pods run revision %q with matching images", cr.Name, len(pods), revision)
+			"Rebuilt missing ControllerRevision %s from the current template; %d live Pods run revision %q and match the template", cr.Name, len(pods), revision)
 	}
 	return cr, nil
 }

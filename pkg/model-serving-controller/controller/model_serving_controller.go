@@ -2586,13 +2586,18 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 				}
 				selector := selectorSet.String()
 				conditionChanged, _ := rolloutPolicy.setCondition(copy)
-				currentRevision := revision
+				currentRevision, updateRevision := revision, revision
 				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
 					// Removing all groups supplies no evidence that an unfinished
 					// target template completed. Retain the last completed baseline.
 					currentRevision = copy.Status.CurrentRevision
 				}
-				needsUpdate := copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != revision || copy.Status.LabelSelector != selector || conditionChanged
+				if c.revisionHistory(ctx, ms).errors() != nil {
+					// Same freeze as the main path: unresolved history must not
+					// overwrite the recorded identities.
+					currentRevision, updateRevision = copy.Status.CurrentRevision, copy.Status.UpdateRevision
+				}
+				needsUpdate := copy.Status.CurrentRevision != currentRevision || copy.Status.UpdateRevision != updateRevision || copy.Status.LabelSelector != selector || conditionChanged
 				if roleCoordination(latestMS) != nil && modelServingReplicas(latestMS) == 0 {
 					needsUpdate = needsUpdate || copy.Status.Replicas != 0 || copy.Status.AvailableReplicas != 0 || copy.Status.CurrentReplicas != 0 || copy.Status.UpdatedReplicas != 0 || copy.Status.ObservedGeneration != latestMS.Generation
 					copy.Status.Replicas, copy.Status.AvailableReplicas = 0, 0
@@ -2604,7 +2609,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 				}
 				if needsUpdate {
 					copy.Status.CurrentRevision = currentRevision
-					copy.Status.UpdateRevision = revision
+					copy.Status.UpdateRevision = updateRevision
 					copy.Status.LabelSelector = selector
 					_, updateErr := c.modelServingClient.WorkloadV1alpha1().ModelServings(copy.GetNamespace()).UpdateStatus(context.TODO(), copy, metav1.UpdateOptions{})
 					return updateErr
@@ -2756,6 +2761,14 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			copy.Status.AvailableReplicas = int32(available)
 			copy.Status.UpdatedReplicas = int32(updated)
 			copy.Status.CurrentReplicas = int32(current)
+		}
+
+		// While some referenced history cannot be resolved, keep the recorded
+		// identities untouched: they are the only durable evidence of what the
+		// Pods were meant to run, and rebuilding a missing revision from live
+		// Pods relies on them (see revisionHistory.rebuildMissingRevision).
+		if c.revisionHistory(ctx, ms).errors() != nil {
+			currentRevision, updateRevision = copy.Status.CurrentRevision, copy.Status.UpdateRevision
 		}
 
 		revisionUpdated := false

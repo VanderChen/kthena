@@ -330,6 +330,35 @@ func TestUpgradeWithoutAnyHistoryStaysPausedWhenPodsDoNotProveTheTemplate(t *tes
 			reason: `status.currentRevision is "elsewhere"`,
 		},
 		{
+			name: "env changed while history was missing",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				container := &ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0]
+				container.Env = append(container.Env, corev1.EnvVar{Name: "NEW_FLAG", Value: "on"})
+			},
+			reason: "env NEW_FLAG differs",
+		},
+		{
+			name: "worker replicas increased while history was missing",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				ms.Spec.Template.Roles[0].WorkerReplicas = 2
+			},
+			reason: "env GROUP_SIZE differs",
+		},
+		{
+			name: "worker replicas decreased while history was missing",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				ms.Spec.Template.Roles[0].WorkerReplicas = 0
+			},
+			reason: "env GROUP_SIZE differs",
+		},
+		{
+			name: "container removed while history was missing",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers = append(ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers, corev1.Container{Name: "sidecar", Image: "image:v1"})
+			},
+			reason: "1 containers run but the template declares 2",
+		},
+		{
 			name: "a second revision is running",
 			mutate: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, legacyHash string) {
 				// A desired second group keeps this a history question, not an explicit scale-down.
@@ -424,4 +453,72 @@ func TestSteadyStateRevisionLookupsAreBounded(t *testing.T) {
 			}
 		})
 	}
+}
+
+// reloadFromAPI makes the next sync observe the status the previous sync wrote,
+// as a real informer would.
+func reloadFromAPI(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing) *workloadv1alpha1.ModelServing {
+	t.Helper()
+	latest, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(context.Background(), ms.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(latest))
+	return latest
+}
+
+// TestUpgradeWithoutAnyHistoryKeepsStatusEvidenceAcrossSyncs covers a pre-upgrade
+// rollout the Pods never received: status.updateRevision already names another
+// hash while every Pod still runs the old one. Recording the new identity in
+// status would erase that evidence after one sync and let the next sync adopt
+// the pending template as "already running"; the status must stay frozen and
+// the rebuild must keep being refused.
+func TestUpgradeWithoutAnyHistoryKeepsStatusEvidenceAcrossSyncs(t *testing.T) {
+	ctx := context.Background()
+	c := newAppliedHistoryController(t)
+	ms := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 1)
+	legacyHash, originalUIDs := seedLegacyPods(t, c, ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = legacyHash, "pending"
+	container := &ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0]
+	container.Env = append(container.Env, corev1.EnvVar{Name: "NEW_FLAG", Value: "on"})
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+	_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(ctx, ms, metav1.CreateOptions{})
+	require.NoError(t, err)
+	c.syncAll()
+
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	for i := 0; i < 3; i++ {
+		client.ClearActions()
+		err := c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+		require.ErrorContains(t, err, "ControllerRevision is missing", "sync %d", i)
+		for _, action := range podMutations(client.Actions()) {
+			require.NotContains(t, []string{"create", "delete", "delete-collection"}, action, "sync %d", i)
+		}
+		latest := reloadFromAPI(t, c, ms)
+		require.Equal(t, legacyHash, latest.Status.CurrentRevision, "sync %d must not advance currentRevision", i)
+		require.Equal(t, "pending", latest.Status.UpdateRevision, "sync %d must not erase the pending identity", i)
+	}
+	_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, utils.GenerateControllerRevisionName(ms.Name, legacyHash), metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err), "a pending rollout must never be adopted as running")
+	pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	for _, pod := range pods.Items {
+		require.Equal(t, originalUIDs[pod.Name], pod.UID)
+	}
+
+	// Removing the never-applied change (the Pods now prove the template) lets
+	// recovery proceed on the next sync, and the frozen status resumes normally.
+	fixed := reloadFromAPI(t, c, ms).DeepCopy()
+	fixed.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Env = nil
+	fixed.Status.UpdateRevision = legacyHash
+	_, err = c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Update(ctx, fixed, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, c.modelServingsInformer.GetIndexer().Update(fixed))
+	for i := 0; i < 3; i++ {
+		require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)), "recovery sync %d", i)
+		reloadFromAPI(t, c, ms)
+	}
+	_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, utils.GenerateControllerRevisionName(ms.Name, legacyHash), metav1.GetOptions{})
+	require.NoError(t, err, "the rebuilt revision must exist once the Pods prove the template")
+	latest := reloadFromAPI(t, c, ms)
+	require.Equal(t, legacyHash, latest.Status.UpdateRevision)
+	require.Equal(t, legacyHash, latest.Status.CurrentRevision)
 }

@@ -137,15 +137,21 @@ advance the unit's revision while a historical worker is still missing.
   no `ControllerRevision` exists for a running replica's revision label (for
   example it was created by a controller older than v0.3 or the object was
   deleted manually), the controller rebuilds it from the current spec only when
-  every owned Pod carries that label, runs the images the current template
-  renders, has no in-place update in flight and fits the template's replica
-  shape, and `status` does not point at another revision. The rebuilt object
-  is annotated with `modelserving.volcano.sh/revision-rebuilt-from-generation`
+  every owned Pod carries that label, has no in-place update in flight, and
+  matches what the current template renders at its position: the same
+  container set, images, command, args, declared environment (including the
+  `GROUP_SIZE` the worker count produces), ports, mounts, resources and
+  pod-level placement fields. Additions made by admission webhooks or plugins
+  are tolerated, but an injected sidecar container prevents recovery. `status`
+  must also not name another revision; the recorded `currentRevision` and
+  `updateRevision` are left untouched while history is unresolved so that a
+  rollout the Pods never received stays visible. The rebuilt object is
+  annotated with `modelserving.volcano.sh/revision-rebuilt-from-generation`
   and a `RevisionRebuilt` event is emitted; nothing rolls. Otherwise the
-  controller records the new identity in `status.updateRevision`, emits a
-  `RevisionUnresolved` warning explaining why recovery was refused and leaves
-  the replica untouched. Scale-down and explicit scale-to-zero still apply;
-  deleting the Pods recreates them at the current revision.
+  controller emits a `RevisionUnresolved` warning explaining why recovery was
+  refused and leaves the replica untouched. Scale-down and explicit
+  scale-to-zero still apply; deleting the Pods recreates them at the current
+  revision.
 - **Downgrade is one-way, re-upgrade is self-healing.** A previous controller
   cannot decode canonical revision data and computes different hashes, so
   downgrading rolls every ServingGroup and may garbage-collect `-baseline`
