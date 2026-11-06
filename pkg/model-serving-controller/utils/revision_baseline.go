@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
@@ -34,6 +35,33 @@ import (
 const legacyRevisionSource = "modelserving.volcano.sh/legacy-revision-source"
 const legacyRevisionUID = "modelserving.volcano.sh/legacy-revision-uid"
 const legacyRevisionBaseline = "modelserving.volcano.sh/legacy-revision-baseline"
+
+// LegacyRevisionBaselineRebuiltAnnotation marks a baseline that was recreated
+// after the pinned original disappeared (downgrade, manual deletion, GC). Its
+// value is the ModelServing generation whose scheduler/plugins were adopted.
+const LegacyRevisionBaselineRebuiltAnnotation = "modelserving.volcano.sh/legacy-revision-baseline-rebuilt"
+
+// EventSink receives operator-facing events from revision helpers. A
+// record.EventRecorder satisfies it.
+type EventSink interface {
+	Eventf(object runtime.Object, eventtype, reason, messageFmt string, args ...interface{})
+}
+
+// RevisionBaselineOption tunes EnsureRevisionBaseline.
+type RevisionBaselineOption func(*revisionBaselineOptions)
+
+type revisionBaselineOptions struct {
+	events EventSink
+}
+
+// WithRevisionBaselineEvents reports baseline rebuilds on the ModelServing.
+func WithRevisionBaselineEvents(sink EventSink) RevisionBaselineOption {
+	return func(o *revisionBaselineOptions) {
+		if sink != nil {
+			o.events = sink
+		}
+	}
+}
 
 // CoordinatedRoleReplicaBaselineAnnotation is the existing coordinator's
 // operational replica baseline, separate from immutable template data.
@@ -67,7 +95,11 @@ func legacyCoordinatedReplicaBaseline(ms *workloadv1alpha1.ModelServing, source 
 // this snapshot, not silently adopt subsequent plugin changes as a new baseline.
 // A plugin edit simultaneous with the first migration cannot be distinguished
 // from the initial configuration because legacy history never recorded it.
-func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, source *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
+func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms *workloadv1alpha1.ModelServing, source *appsv1.ControllerRevision, opts ...RevisionBaselineOption) (*appsv1.ControllerRevision, error) {
+	var options revisionBaselineOptions
+	for _, opt := range opts {
+		opt(&options)
+	}
 	if source == nil || !controlledByModelServing(source, ms) {
 		return nil, fmt.Errorf("revision is missing or not controlled by the current ModelServing")
 	}
@@ -93,8 +125,11 @@ func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms
 		return baseline, nil
 	}
 	baselines := client.AppsV1().ControllerRevisions(ms.Namespace)
-	// Record migration in source metadata as well. If a baseline is lost later,
-	// do not silently rebuild it from changed plugins and mask a real update.
+	// Record migration in source metadata as well. If a baseline is lost later
+	// it is rebuilt from the current spec, but loudly: the rebuilt object is
+	// annotated and an event is emitted, because a scheduler/plugin edit made
+	// while the baseline was missing can no longer be told apart from the
+	// original configuration.
 	pin := func(baseline *appsv1.ControllerRevision) (*appsv1.ControllerRevision, error) {
 		if _, err := validate(baseline); err != nil {
 			return nil, err
@@ -158,9 +193,10 @@ func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms
 	if liveSource.UID != source.UID || !controlledByModelServing(liveSource, ms) {
 		return nil, fmt.Errorf("legacy source %s has conflicting identity", source.Name)
 	}
-	if liveSource.Annotations[legacyRevisionBaseline] != "" {
-		return nil, fmt.Errorf("previously established legacy baseline %s is missing", name)
+	if pinned := liveSource.Annotations[legacyRevisionBaseline]; pinned != "" && pinned != name {
+		return nil, fmt.Errorf("legacy source %s pins a conflicting baseline %s", source.Name, pinned)
 	}
+	rebuilding := liveSource.Annotations[legacyRevisionBaseline] == name
 	workload, err := ModelServingForControllerRevision(ms, source)
 	if err != nil {
 		return nil, err
@@ -189,6 +225,9 @@ func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms
 		Revision: source.Revision,
 		Data:     runtime.RawExtension{Raw: data},
 	}
+	if rebuilding {
+		baseline.Annotations[LegacyRevisionBaselineRebuiltAnnotation] = fmt.Sprintf("%d", ms.Generation)
+	}
 	created, err := baselines.Create(ctx, baseline, metav1.CreateOptions{})
 	if apierrors.IsAlreadyExists(err) {
 		existing, err = baselines.Get(ctx, name, metav1.GetOptions{})
@@ -198,6 +237,14 @@ func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms
 	}
 	if err != nil {
 		return nil, err
+	}
+	if rebuilding {
+		message := fmt.Sprintf("legacy revision baseline %s pinned by %s was missing and has been rebuilt from the current spec (generation %d); scheduler or plugin changes made while it was missing will not trigger a rollout",
+			name, source.Name, ms.Generation)
+		klog.Warningf("ModelServing %s/%s: %s", ms.Namespace, ms.Name, message)
+		if options.events != nil {
+			options.events.Eventf(ms, "Warning", "LegacyBaselineRebuilt", "%s", message)
+		}
 	}
 	return pin(created)
 }

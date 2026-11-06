@@ -177,7 +177,36 @@ func TestUpgradeFromLegacyRevisionKeepsPodsAndMigratesHistory(t *testing.T) {
 				require.Equal(t, legacyHash, updated.Status.UpdateRevision, "desired identity must stay on the legacy hash")
 				require.Equal(t, legacyHash, updated.Status.CurrentRevision)
 				require.Equal(t, int32(1), updated.Status.UpdatedReplicas)
+
+				// Downgrade to a release that garbage-collects the baseline (or an
+				// operator deleting it), then upgrade again: the pinned baseline is
+				// rebuilt instead of pausing the workload forever, and Pods stay put.
+				events := record.NewFakeRecorder(32)
+				c.recorder = events
+				require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, baseline.Name, metav1.DeleteOptions{}))
+				client.ClearActions()
+				for i := 0; i < 2; i++ {
+					require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)), "post-downgrade sync %d", i)
+				}
+				require.Empty(t, podMutations(client.Actions()), "a rebuilt baseline must not mutate Pods")
+				rebuilt, err := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, baseline.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.NotEmpty(t, rebuilt.Annotations[utils.LegacyRevisionBaselineRebuiltAnnotation])
+				require.Equal(t, baseline.Data, rebuilt.Data, "unchanged spec must rebuild an identical baseline")
+				require.Contains(t, drainEvents(events), "LegacyBaselineRebuilt")
 			})
+		}
+	}
+}
+
+func drainEvents(recorder *record.FakeRecorder) string {
+	var all []string
+	for {
+		select {
+		case e := <-recorder.Events:
+			all = append(all, e)
+		default:
+			return strings.Join(all, "\n")
 		}
 	}
 }

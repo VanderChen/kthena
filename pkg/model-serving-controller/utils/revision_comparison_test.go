@@ -288,7 +288,48 @@ func TestLegacyRevisionBaselineIsDurableAndImmutable(t *testing.T) {
 	_, err = EnsureRevisionBaseline(ctx, client, ms, source)
 	require.ErrorContains(t, err, "conflicting identity")
 
+	// A pinned baseline that disappears (downgrade, GC, manual deletion) is
+	// rebuilt from the current spec instead of pausing the workload forever,
+	// and the rebuild is made visible.
 	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, baseline.Name, metav1.DeleteOptions{}))
+	ms.Generation = 9
+	sink := &recordingEventSink{}
+	rebuilt, err := EnsureRevisionBaseline(ctx, client, ms, unchanged, WithRevisionBaselineEvents(sink))
+	require.NoError(t, err)
+	require.Equal(t, baseline.Name, rebuilt.Name)
+	require.Empty(t, baseline.Annotations[LegacyRevisionBaselineRebuiltAnnotation])
+	require.Equal(t, "9", rebuilt.Annotations[LegacyRevisionBaselineRebuiltAnnotation])
+	require.Equal(t, "legacy", rebuilt.Labels[ControllerRevisionRevisionLabelKey])
+	historical, err = ModelServingForControllerRevision(ms, rebuilt)
+	require.NoError(t, err)
+	require.Equal(t, "changed-after-migration", historical.Spec.Plugins[0].Name, "the rebuilt baseline adopts the current spec")
+	require.Len(t, sink.reasons, 1)
+	require.Equal(t, "LegacyBaselineRebuilt", sink.reasons[0])
+	pinnedSource, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, rebuilt.Name, pinnedSource.Annotations[legacyRevisionBaseline])
+
+	// Once rebuilt it is durable again: no further events, no redefinition.
+	ms.Spec.Plugins[0].Name = "changed-again"
+	reloaded, err = EnsureRevisionBaseline(ctx, client, ms, unchanged, WithRevisionBaselineEvents(sink))
+	require.NoError(t, err)
+	require.Equal(t, rebuilt.Data, reloaded.Data)
+	require.Equal(t, "9", reloaded.Annotations[LegacyRevisionBaselineRebuiltAnnotation])
+	require.Len(t, sink.reasons, 1)
+
+	// A source pinning a different baseline name is still a hard conflict.
+	pinnedSource.Annotations[legacyRevisionBaseline] = "somewhere-else"
+	_, err = client.AppsV1().ControllerRevisions(ms.Namespace).Update(ctx, pinnedSource, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.NoError(t, client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, rebuilt.Name, metav1.DeleteOptions{}))
 	_, err = EnsureRevisionBaseline(ctx, client, ms, unchanged)
-	require.ErrorContains(t, err, "previously established legacy baseline")
+	require.ErrorContains(t, err, "conflicting baseline")
+}
+
+type recordingEventSink struct {
+	reasons []string
+}
+
+func (s *recordingEventSink) Eventf(_ runtime.Object, _, reason, _ string, _ ...interface{}) {
+	s.reasons = append(s.reasons, reason)
 }

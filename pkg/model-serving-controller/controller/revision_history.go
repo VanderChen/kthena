@@ -132,6 +132,13 @@ func (c *ModelServingController) revisionHistory(ctx context.Context, ms *worklo
 	return history
 }
 
+func (h *revisionHistory) baselineOptions() []utils.RevisionBaselineOption {
+	if h.controller.recorder == nil {
+		return nil
+	}
+	return []utils.RevisionBaselineOption{utils.WithRevisionBaselineEvents(h.controller.recorder)}
+}
+
 func (h *revisionHistory) decode(ctx context.Context, cr *appsv1.ControllerRevision) revisionSnapshot {
 	if cr == nil {
 		return revisionSnapshot{err: fmt.Errorf("ControllerRevision is missing")}
@@ -139,7 +146,7 @@ func (h *revisionHistory) decode(ctx context.Context, cr *appsv1.ControllerRevis
 	if err := validateControllerRevisionOwner(h.ms, cr); err != nil {
 		return revisionSnapshot{err: err}
 	}
-	cr, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr)
+	cr, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr, h.baselineOptions()...)
 	if err != nil {
 		return revisionSnapshot{err: err}
 	}
@@ -449,7 +456,7 @@ func (h *revisionHistory) desiredRevision(ctx context.Context) (string, error) {
 		if !metav1.IsControlledBy(cr, h.ms) || cr.Annotations[utils.ControllerRevisionDataVersionAnnotation] != "" {
 			continue
 		}
-		if _, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr); err != nil {
+		if _, err := utils.EnsureRevisionBaseline(ctx, h.controller.kubeClientSet, h.ms, cr, h.baselineOptions()...); err != nil {
 			return "", fmt.Errorf("establish legacy revision baseline: %w", err)
 		}
 	}

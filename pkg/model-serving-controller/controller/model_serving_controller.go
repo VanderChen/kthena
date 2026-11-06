@@ -3376,7 +3376,11 @@ func (c *ModelServingController) resolveRoleTemplateHashFromRevision(ms *workloa
 		return "", false
 	}
 
-	cr, err = utils.EnsureRevisionBaseline(ctx, c.kubeClientSet, ms, cr)
+	var baselineOpts []utils.RevisionBaselineOption
+	if c.recorder != nil {
+		baselineOpts = append(baselineOpts, utils.WithRevisionBaselineEvents(c.recorder))
+	}
+	cr, err = utils.EnsureRevisionBaseline(ctx, c.kubeClientSet, ms, cr, baselineOpts...)
 	if err != nil {
 		return "", false
 	}
