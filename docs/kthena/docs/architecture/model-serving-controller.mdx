@@ -114,6 +114,33 @@ Role comparisons, including scheduler and applicable plugin inputs. Completing
 an update requires observing all expected members, so an informer delay cannot
 advance the unit's revision while a historical worker is still missing.
 
+### Upgrade and compatibility notes
+
+- **Upgrading the controller does not roll unchanged workloads.** Running Pods
+  keep their revision label; the legacy `ControllerRevision` is pinned and gains
+  a `<name>-baseline` companion. `status.currentRevision` and
+  `status.updateRevision` keep the legacy hash as long as that history exists.
+- **Changing `schedulerName` or plugins now rolls the workload.** Both are part
+  of the revision identity. Previously only Role templates were compared, so
+  such edits silently applied to newly created Pods only.
+- **Partition-protected replicas follow the current replica count.** Replica
+  counts are operational, not revisioned; a protected ServingGroup whose stored
+  historical count differs from `spec` is scaled to `spec` while keeping the
+  historical Pod template.
+- **Workloads without any history are paused, not replaced.** If no
+  `ControllerRevision` exists for a running replica's revision label (for
+  example it was created by a controller older than v0.3 or the object was
+  deleted manually), the controller records the new identity in
+  `status.updateRevision`, emits a `RevisionUnresolved` warning and leaves the
+  replica untouched. Scale-down and explicit scale-to-zero still apply; deleting
+  the Pods recreates them at the current revision.
+- **Downgrade is one-way.** A previous controller cannot decode canonical
+  revision data and computes different hashes, so downgrading rolls every
+  ServingGroup and may garbage-collect `-baseline` objects. Re-upgrading after
+  such a downgrade requires removing the
+  `modelserving.volcano.sh/legacy-revision-baseline` annotation from the
+  affected legacy `ControllerRevision` so the baseline can be re-established.
+
 ## Example
 
 Read the [examples](https://github.com/volcano-sh/kthena/tree/main/examples/model-serving/sample.yaml) to learn more.

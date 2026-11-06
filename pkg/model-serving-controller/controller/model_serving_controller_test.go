@@ -2670,7 +2670,7 @@ func TestScaleUpRoles(t *testing.T) {
 	}
 }
 
-func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerRevision(t *testing.T) {
+func TestManageRoleReplicasWithPartitionProtectedServingGroupUsesCurrentReplicaCount(t *testing.T) {
 	kubeClient := kubefake.NewSimpleClientset()
 	kthenaClient := kthenafake.NewSimpleClientset()
 	volcanoClient := volcanofake.NewSimpleClientset()
@@ -8705,10 +8705,12 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		roles             []workloadv1alpha1.Role
-		setupStore        func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing)
-		expected          []roleToDelete
+		name       string
+		roles      []workloadv1alpha1.Role
+		setupStore func(t *testing.T, store datastore.Store, ms *workloadv1alpha1.ModelServing)
+		expected   []roleToDelete
+		// skipHistory leaves the ServingGroup revision without a ControllerRevision.
+		skipHistory       bool
 		expectedOutdated  bool
 		expectHistoryErr  bool
 		expectErrContains string
@@ -8878,7 +8880,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			expectedOutdated: true,
 		},
 		{
-			name: "missing roleTemplateHash without ControllerRevision is skipped",
+			name: "missing roleTemplateHash without ControllerRevision keeps the group outdated and reports the history error",
 			roles: []workloadv1alpha1.Role{
 				newRole("prefill", "nginx:latest", 1, nil),
 			},
@@ -8887,6 +8889,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 				store.AddServingGroup(utils.GetNamespaceName(ms), 0, oldRevision)
 				addRole(t, store, ms, "prefill", "prefill-0", "", datastore.RoleRunning)
 			},
+			skipHistory:      true,
 			expectedOutdated: true, // Unknown history must not advance the group identity.
 			expectHistoryErr: true,
 		},
@@ -8937,7 +8940,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 			tt.setupStore(t, store, ms)
 
 			kubeClient := kubefake.NewSimpleClientset()
-			if tt.name != "missing roleTemplateHash without ControllerRevision is skipped" && len(tt.roles) > 0 {
+			if !tt.skipHistory && len(tt.roles) > 0 {
 				historical := ms.DeepCopy().Spec.Template.Roles
 				for i := range historical {
 					if len(historical[i].EntryTemplate.Spec.Containers) > 0 {

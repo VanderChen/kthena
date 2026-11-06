@@ -110,20 +110,24 @@ func TestRevisionEntryPointsAreStableAndPreserveSpec(t *testing.T) {
 	ms := newModelServing([]workloadv1alpha1.Role{role})
 	original := ms.DeepCopy()
 
+	// These constants pin the canonical hash of an unchanged spec. A mismatch
+	// means every existing Pod's revision identity changes on upgrade; update
+	// them only together with a migration path, never to make the test pass.
 	const (
 		wantModelServingRevision = "8566755bc6"
 		wantRoleTemplateHash     = "77c9446dc4"
 		wantRoleRevisionHash     = "67cd749666"
 	)
+	const pinnedHashHint = "pinned hash changed: this rolls every existing Pod on upgrade unless a migration is added"
 	for i := 0; i < 2; i++ {
 		if got := ModelServingRevision(ms); got != wantModelServingRevision {
-			t.Fatalf("ModelServingRevision() call %d = %q, want %q", i+1, got, wantModelServingRevision)
+			t.Fatalf("ModelServingRevision() call %d = %q, want %q; %s", i+1, got, wantModelServingRevision, pinnedHashHint)
 		}
 		if got := CalRoleTemplateHash(ms.Spec.Template.Roles[0]); got != wantRoleTemplateHash {
-			t.Fatalf("CalRoleTemplateHash() call %d = %q, want %q", i+1, got, wantRoleTemplateHash)
+			t.Fatalf("CalRoleTemplateHash() call %d = %q, want %q; %s", i+1, got, wantRoleTemplateHash, pinnedHashHint)
 		}
 		if got, err := RoleRevisionHash(ms, "decode"); err != nil || got != wantRoleRevisionHash {
-			t.Fatalf("RoleRevisionHash() call %d = %q, %v; want %q", i+1, got, err, wantRoleRevisionHash)
+			t.Fatalf("RoleRevisionHash() call %d = %q, %v; want %q; %s", i+1, got, err, wantRoleRevisionHash, pinnedHashHint)
 		}
 	}
 
