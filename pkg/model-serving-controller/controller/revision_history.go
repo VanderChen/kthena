@@ -162,6 +162,11 @@ func (h *revisionHistory) roles(ctx context.Context, revision string) ([]workloa
 	snapshot := revisionSnapshot{err: fmt.Errorf("revision or Kubernetes client is missing")}
 	if revision != "" && h.controller.kubeClientSet != nil {
 		cr, err := h.controller.controllerRevisionInRound(ctx, h.ms, revision)
+		if err == nil && cr == nil {
+			if cr, err = h.rebuildMissingRevision(ctx, revision); err != nil {
+				err = fmt.Errorf("ControllerRevision %s: %w", revision, err)
+			}
+		}
 		if err != nil {
 			snapshot.err = err
 		} else {
@@ -191,6 +196,81 @@ func (h *revisionHistory) workload(ctx context.Context, revision string) (*workl
 		return nil, err
 	}
 	return h.snapshots[revision].workload.DeepCopy(), nil
+}
+
+// rebuildMissingRevision restores history for a revision that live Pods still
+// reference but no ControllerRevision describes: workloads created before the
+// controller persisted history, or history deleted out of band. The template
+// recorded under that identity is the current spec, so adoption is allowed only
+// when the live state proves the spec is what those Pods run: every owned Pod
+// carries this single revision, status does not name another running or
+// pending identity, and each Pod's containers run the images the current
+// template renders for its Role. Any doubt leaves the revision unresolved and
+// the existing pause in place, with the reason in the returned error.
+func (h *revisionHistory) rebuildMissingRevision(ctx context.Context, revision string) (*appsv1.ControllerRevision, error) {
+	decline := func(format string, args ...interface{}) (*appsv1.ControllerRevision, error) {
+		return nil, fmt.Errorf("ControllerRevision is missing and was not rebuilt from live Pods: "+format, args...)
+	}
+	pods, err := h.controller.coordinatedPods(ctx, h.ms, labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("ControllerRevision is missing; list live Pods: %w", err)
+	}
+	if len(pods) == 0 {
+		return decline("no live Pod references it")
+	}
+	desired := utils.ModelServingRevision(h.ms)
+	if current := h.ms.Status.CurrentRevision; current != "" && current != revision {
+		return decline("status.currentRevision is %q", current)
+	}
+	if update := h.ms.Status.UpdateRevision; update != "" && update != revision && update != desired {
+		return decline("status.updateRevision %q is neither the running nor the desired revision", update)
+	}
+	rendered := make(map[string]int, len(h.ms.Spec.Template.Roles))
+	for _, role := range h.ms.Spec.Template.Roles {
+		rendered[role.Name] = int(role.WorkerReplicas) + 1
+	}
+	observed := make(map[string]int, len(pods))
+	for _, pod := range pods {
+		if other := utils.ObjectRevision(pod); other != revision {
+			return decline("Pod %s runs revision %q", pod.Name, other)
+		}
+		if inplace.InProgress(pod) {
+			return decline("Pod %s has an unfinished in-place update", pod.Name)
+		}
+		roleName := pod.Labels[workloadv1alpha1.RoleLabelKey]
+		if _, ok := rendered[roleName]; !ok {
+			return decline("Pod %s runs Role %q, which the current template does not define", pod.Name, roleName)
+		}
+		if missing := inplace.MissingContainers(h.ms, pod); len(missing) > 0 {
+			return decline("Pod %s lacks containers %v of the current template", pod.Name, missing)
+		}
+		images := inplace.TargetImages(h.ms, pod)
+		for _, container := range pod.Spec.Containers {
+			if want, ok := images[container.Name]; ok && want != container.Image {
+				return decline("Pod %s container %s runs %s but the current template renders %s", pod.Name, container.Name, container.Image, want)
+			}
+		}
+		unit := pod.Labels[workloadv1alpha1.GroupNameLabelKey] + "/" + pod.Labels[workloadv1alpha1.RoleIDKey]
+		observed[unit]++
+		if observed[unit] > rendered[roleName] {
+			return decline("Role instance %s has more Pods than the current template renders (%d)", unit, rendered[roleName])
+		}
+	}
+
+	cr, err := utils.RebuildModelServingRevision(ctx, h.controller.kubeClientSet, h.ms, revision)
+	if err != nil {
+		return nil, fmt.Errorf("ControllerRevision is missing; rebuild from live Pods: %w", err)
+	}
+	if round := coordinatedRoundOf(ctx, h.ms); round != nil {
+		round.snapshots[revision] = controllerRevisionObservation{revision: cr}
+	}
+	klog.Warningf("Rebuilt missing ControllerRevision %s for ModelServing %s/%s from the current template; %d live Pods run it with matching images",
+		cr.Name, h.ms.Namespace, h.ms.Name, len(pods))
+	if h.controller.recorder != nil {
+		h.controller.recorder.Eventf(h.ms, corev1.EventTypeNormal, "RevisionRebuilt",
+			"Rebuilt missing ControllerRevision %s from the current template; %d live Pods run revision %q with matching images", cr.Name, len(pods), revision)
+	}
+	return cr, nil
 }
 
 // appliedRoleTemplate resolves an existing rollout unit, independently of its

@@ -19,15 +19,19 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
@@ -55,15 +59,23 @@ func legacyRevisionLabels(ms *workloadv1alpha1.ModelServing, roleName string) (s
 // datastore stays empty so the caller can replay a controller restart.
 func seedLegacyWorkload(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing) (legacyCR *appsv1.ControllerRevision, legacyHash string, originalUIDs map[string]types.UID) {
 	t.Helper()
+	legacyHash, originalUIDs = seedLegacyPods(t, c, ms)
+	legacyCR, err := utils.CreateControllerRevision(context.Background(), c.kubeClientSet, ms, legacyHash, ms.Spec.Template.Roles)
+	require.NoError(t, err)
+	require.Empty(t, legacyCR.Annotations[utils.ControllerRevisionDataVersionAnnotation], "fixture must be a pre-canonical Roles-only revision")
+	return legacyCR, legacyHash, originalUIDs
+}
+
+// seedLegacyPods writes only the Running Pods of a pre-canonical controller, as
+// left by releases that never persisted ControllerRevisions (kthena <= v0.2) or
+// after history was deleted out of band.
+func seedLegacyPods(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing) (legacyHash string, originalUIDs map[string]types.UID) {
+	t.Helper()
 	ctx := context.Background()
 	role := ms.Spec.Template.Roles[0]
 	legacyHash, legacyRoleHash := legacyRevisionLabels(ms, role.Name)
 	require.NotEqual(t, legacyHash, utils.ModelServingRevision(ms), "test requires the legacy and canonical hashes to differ")
 	require.NotEqual(t, legacyRoleHash, utils.CalRoleTemplateHash(role), "test requires the legacy and canonical role hashes to differ")
-
-	legacyCR, err := utils.CreateControllerRevision(ctx, c.kubeClientSet, ms, legacyHash, ms.Spec.Template.Roles)
-	require.NoError(t, err)
-	require.Empty(t, legacyCR.Annotations[utils.ControllerRevisionDataVersionAnnotation], "fixture must be a pre-canonical Roles-only revision")
 
 	group := utils.GenerateServingGroupName(ms.Name, 0)
 	roleID := utils.GenerateRoleID(role.Name, 0)
@@ -82,7 +94,7 @@ func seedLegacyWorkload(t *testing.T, c *ModelServingController, ms *workloadv1a
 		require.NoError(t, c.podsInformer.GetIndexer().Add(created))
 		originalUIDs[created.Name] = created.UID
 	}
-	return legacyCR, legacyHash, originalUIDs
+	return legacyHash, originalUIDs
 }
 
 func podMutations(actions []clienttesting.Action) []string {
@@ -194,4 +206,144 @@ func TestUpgradeFromLegacyRevisionStillRollsRealTemplateChange(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, legacyHash, updated.Status.UpdateRevision)
 	require.Equal(t, utils.ModelServingRevision(ms), updated.Status.UpdateRevision)
+}
+
+// TestUpgradeWithoutAnyHistoryRebuildsRevisionAndKeepsPods covers workloads whose
+// Pods reference a revision no ControllerRevision describes (releases before
+// history was persisted, or history deleted out of band). With an unchanged spec
+// the live Pods prove the template, so the controller rebuilds the missing
+// revision under the running identity instead of pausing forever, and converges
+// without touching a Pod.
+func TestUpgradeWithoutAnyHistoryRebuildsRevisionAndKeepsPods(t *testing.T) {
+	strategies := []workloadv1alpha1.RolloutStrategyType{workloadv1alpha1.ServingGroupRollingUpdate, workloadv1alpha1.RoleRollingUpdate}
+	for _, strategy := range strategies {
+		for _, statusRecorded := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/status-recorded-%t", strategy, statusRecorded), func(t *testing.T) {
+				ctx := context.Background()
+				c := newAppliedHistoryController(t)
+				events := record.NewFakeRecorder(32)
+				c.recorder = events
+				ms := appliedHistoryWorkload(strategy, "image:v1", 1)
+				legacyHash, originalUIDs := seedLegacyPods(t, c, ms)
+				if statusRecorded {
+					ms.Status.CurrentRevision, ms.Status.UpdateRevision = legacyHash, legacyHash
+				}
+				require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+				_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(ctx, ms, metav1.CreateOptions{})
+				require.NoError(t, err)
+
+				c.syncAll()
+				client := c.kubeClientSet.(*kubefake.Clientset)
+				client.ClearActions()
+				for i := 0; i < 3; i++ {
+					require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)), "sync %d", i)
+				}
+				require.Empty(t, podMutations(client.Actions()), "an unchanged spec must not mutate Pods when history is rebuilt")
+				pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+				require.NoError(t, err)
+				require.Len(t, pods.Items, len(originalUIDs))
+				for _, pod := range pods.Items {
+					require.Equal(t, originalUIDs[pod.Name], pod.UID)
+					require.Equal(t, legacyHash, utils.ObjectRevision(&pod))
+				}
+
+				rebuilt, err := c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, utils.GenerateControllerRevisionName(ms.Name, legacyHash), metav1.GetOptions{})
+				require.NoError(t, err, "the running identity must gain a ControllerRevision")
+				require.Equal(t, utils.ControllerRevisionDataVersionV1, rebuilt.Annotations[utils.ControllerRevisionDataVersionAnnotation])
+				require.Equal(t, fmt.Sprint(ms.Generation), rebuilt.Annotations[utils.RevisionRebuiltFromGenerationAnnotation])
+				historical, err := utils.ModelServingForControllerRevision(ms, rebuilt)
+				require.NoError(t, err)
+				require.Equal(t, "image:v1", historical.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image)
+				equal, err := utils.EqualModelServingRevisions(legacyHash, utils.ModelServingRevision(ms), historical, ms)
+				require.NoError(t, err)
+				require.True(t, equal, "rebuilt history must describe the current template")
+
+				updated, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, legacyHash, updated.Status.UpdateRevision, "desired identity must settle on the running hash")
+				require.Equal(t, legacyHash, updated.Status.CurrentRevision)
+				require.Equal(t, int32(1), updated.Status.UpdatedReplicas)
+
+				var rebuiltEvents int
+				for len(events.Events) > 0 {
+					if event := <-events.Events; strings.Contains(event, "RevisionRebuilt") {
+						rebuiltEvents++
+					}
+				}
+				require.Equal(t, 1, rebuiltEvents, "the rebuild must be reported exactly once")
+			})
+		}
+	}
+}
+
+// TestUpgradeWithoutAnyHistoryStaysPausedWhenPodsDoNotProveTheTemplate is the
+// safety counterpart: when the live Pods cannot prove they run the current spec
+// the missing revision is not rebuilt, template-driven mutation stays paused,
+// and the reason is actionable.
+func TestUpgradeWithoutAnyHistoryStaysPausedWhenPodsDoNotProveTheTemplate(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, legacyHash string)
+		reason string
+	}{
+		{
+			name: "image changed while history was missing",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "image:v2"
+			},
+			reason: "renders image:v2",
+		},
+		{
+			name: "status names another running revision",
+			mutate: func(_ *testing.T, _ *ModelServingController, ms *workloadv1alpha1.ModelServing, _ string) {
+				ms.Status.CurrentRevision = "elsewhere"
+			},
+			reason: `status.currentRevision is "elsewhere"`,
+		},
+		{
+			name: "a second revision is running",
+			mutate: func(t *testing.T, c *ModelServingController, ms *workloadv1alpha1.ModelServing, legacyHash string) {
+				// A desired second group keeps this a history question, not an explicit scale-down.
+				ms.Spec.Replicas = ptr.To(int32(2))
+				role := ms.Spec.Template.Roles[0]
+				pod := utils.GenerateEntryPod(*role.DeepCopy(), ms, utils.GenerateServingGroupName(ms.Name, 1), utils.GenerateRoleID(role.Name, 0), "other-"+legacyHash, "other")
+				pod.Status = corev1.PodStatus{Phase: corev1.PodRunning}
+				created, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Create(context.Background(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+				require.NoError(t, c.podsInformer.GetIndexer().Add(created))
+			},
+			reason: "runs revision \"",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			c := newAppliedHistoryController(t)
+			ms := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 1)
+			legacyHash, originalUIDs := seedLegacyPods(t, c, ms)
+			tc.mutate(t, c, ms, legacyHash)
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(ctx, ms, metav1.CreateOptions{})
+			require.NoError(t, err)
+
+			c.syncAll()
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			client.ClearActions()
+			err = c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name))
+			require.ErrorContains(t, err, "ControllerRevision is missing")
+			require.ErrorContains(t, err, tc.reason)
+			for _, action := range podMutations(client.Actions()) {
+				require.NotContains(t, []string{"create", "delete", "delete-collection"}, action, "unproven history must keep template-driven creation and deletion paused")
+			}
+			_, err = c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, utils.GenerateControllerRevisionName(ms.Name, legacyHash), metav1.GetOptions{})
+			require.True(t, apierrors.IsNotFound(err), "an unproven revision must not be rebuilt")
+			pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+			require.NoError(t, err)
+			for _, pod := range pods.Items {
+				if uid, ok := originalUIDs[pod.Name]; ok {
+					require.Equal(t, uid, pod.UID)
+				}
+			}
+		})
+	}
 }
