@@ -51,7 +51,7 @@ func TestModelBoosterDeprecationWarnings(t *testing.T) {
 			operation:       admissionv1.Update,
 			includeOldModel: true,
 			mutate: func(model *registryv1alpha1.ModelBooster) {
-				model.Spec.Backend.SchedulerName = "volcano"
+				model.Spec.Backend.Replicas = 2
 			},
 			wantWarning: true,
 		},

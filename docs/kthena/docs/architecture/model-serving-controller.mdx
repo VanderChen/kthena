@@ -120,26 +120,40 @@ advance the unit's revision while a historical worker is still missing.
   keep their revision label; the legacy `ControllerRevision` is pinned and gains
   a `<name>-baseline` companion. `status.currentRevision` and
   `status.updateRevision` keep the legacy hash as long as that history exists.
-- **Changing `schedulerName` or plugins now rolls the workload.** Both are part
-  of the revision identity. Previously only Role templates were compared, so
-  such edits silently applied to newly created Pods only.
+- **Changing plugins now rolls the workload.** Plugins and `schedulerName` are
+  part of the revision identity. Previously only Role templates were compared,
+  so such edits silently applied to newly created Pods only.
 - **Partition-protected replicas follow the current replica count.** Replica
   counts are operational, not revisioned; a protected ServingGroup whose stored
   historical count differs from `spec` is scaled to `spec` while keeping the
   historical Pod template.
-- **Workloads without any history are paused, not replaced.** If no
-  `ControllerRevision` exists for a running replica's revision label (for
+- **Changing `schedulerName` is rejected by admission.** The scheduler is
+  bound to the shared PodGroup, so the ModelServing webhook keeps the effective
+  scheduler (an explicit empty string equals `default-scheduler`) immutable. The ModelBooster
+  webhook enforces the same rule for `spec.backend.schedulerName` and keeps
+  `spec.backend.type` immutable, because the type fixes the generated role set
+  that ModelServing refuses to change; recreate the ModelBooster instead.
+- **Workloads without any history are recovered when the Pods prove it.** If
+  no `ControllerRevision` exists for a running replica's revision label (for
   example it was created by a controller older than v0.3 or the object was
-  deleted manually), the controller records the new identity in
-  `status.updateRevision`, emits a `RevisionUnresolved` warning and leaves the
-  replica untouched. Scale-down and explicit scale-to-zero still apply; deleting
-  the Pods recreates them at the current revision.
-- **Downgrade is one-way.** A previous controller cannot decode canonical
-  revision data and computes different hashes, so downgrading rolls every
-  ServingGroup and may garbage-collect `-baseline` objects. Re-upgrading after
-  such a downgrade requires removing the
-  `modelserving.volcano.sh/legacy-revision-baseline` annotation from the
-  affected legacy `ControllerRevision` so the baseline can be re-established.
+  deleted manually), the controller rebuilds it from the current spec only when
+  every owned Pod carries that label, runs the images the current template
+  renders, has no in-place update in flight and fits the template's replica
+  shape, and `status` does not point at another revision. The rebuilt object
+  is annotated with `modelserving.volcano.sh/revision-rebuilt-from-generation`
+  and a `RevisionRebuilt` event is emitted; nothing rolls. Otherwise the
+  controller records the new identity in `status.updateRevision`, emits a
+  `RevisionUnresolved` warning explaining why recovery was refused and leaves
+  the replica untouched. Scale-down and explicit scale-to-zero still apply;
+  deleting the Pods recreates them at the current revision.
+- **Downgrade is one-way, re-upgrade is self-healing.** A previous controller
+  cannot decode canonical revision data and computes different hashes, so
+  downgrading rolls every ServingGroup and may garbage-collect `-baseline`
+  objects. When the new controller later finds a legacy revision whose pinned
+  baseline is missing, it rebuilds the baseline from the current spec, marks
+  it with `modelserving.volcano.sh/legacy-revision-baseline-rebuilt` and emits
+  a `LegacyBaselineRebuilt` warning: a scheduler or plugin edit made while the
+  baseline was missing is adopted as the baseline and does not roll on its own.
 
 ## Example
 

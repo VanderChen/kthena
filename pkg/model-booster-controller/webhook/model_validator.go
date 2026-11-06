@@ -28,8 +28,10 @@ import (
 	registryv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/convert"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
+	servingutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	admissionv1 "k8s.io/api/admission/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
+	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/klog/v2"
@@ -59,6 +61,9 @@ func (v *ModelValidator) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Validate the ModelBooster
 	allowed, reason := v.validateModel(model)
+	if allowed && admissionReview.Request.Operation == admissionv1.Update {
+		allowed, reason = v.validateModelUpdate(admissionReview.Request, model)
+	}
 
 	// Create the admission response
 	admissionResponse := admissionv1.AdmissionResponse{
@@ -110,6 +115,47 @@ func modelBoosterDeprecationWarnings(request *admissionv1.AdmissionRequest, mode
 	return nil
 }
 
+// validateModelUpdate enforces the update rules of the generated ModelServing
+// at the ModelBooster boundary so users get an immediate rejection instead of
+// a controller that can never apply the new spec.
+func (v *ModelValidator) validateModelUpdate(request *admissionv1.AdmissionRequest, model *registryv1alpha1.ModelBooster) (bool, string) {
+	if request.SubResource != "" || request.RequestSubResource != "" || len(request.OldObject.Raw) == 0 {
+		return true, ""
+	}
+	var oldModel registryv1alpha1.ModelBooster
+	if err := json.Unmarshal(request.OldObject.Raw, &oldModel); err != nil {
+		return false, fmt.Sprintf("failed to decode old ModelBooster: %v", err)
+	}
+	if allErrs := validateBackendImmutableFields(&oldModel, model); len(allErrs) > 0 {
+		return false, formatValidationErrors(allErrs)
+	}
+	return true, ""
+}
+
+// validateBackendImmutableFields mirrors ModelServing's immutability rules.
+// The backend type fixes the generated role set (vLLM renders "leader",
+// vLLMDisaggregated renders "prefill" and "decode") and the scheduler is
+// pinned to the shared PodGroup; the ModelServing webhook rejects both
+// changes, so a ModelBooster carrying them could never be reconciled.
+func validateBackendImmutableFields(old, current *registryv1alpha1.ModelBooster) field.ErrorList {
+	backendPath := field.NewPath("spec", "backend")
+	var allErrs field.ErrorList
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(current.Spec.Backend.Type, old.Spec.Backend.Type, backendPath.Child("type"))...)
+	allErrs = append(allErrs, apivalidation.ValidateImmutableField(
+		servingutils.EffectiveSchedulerName(current.Spec.Backend.SchedulerName),
+		servingutils.EffectiveSchedulerName(old.Spec.Backend.SchedulerName),
+		backendPath.Child("schedulerName"))...)
+	return allErrs
+}
+
+func formatValidationErrors(allErrs field.ErrorList) string {
+	var messages []string
+	for _, err := range allErrs {
+		messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
+	}
+	return fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
+}
+
 // validateModel validates the ModelBooster resource
 func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bool, string) {
 	var allErrs field.ErrorList
@@ -122,12 +168,7 @@ func (v *ModelValidator) validateModel(model *registryv1alpha1.ModelBooster) (bo
 	allErrs = append(allErrs, validateKvConnectorConfig(model)...)
 
 	if len(allErrs) > 0 {
-		// Convert field errors to a formatted multi-line error message
-		var messages []string
-		for _, err := range allErrs {
-			messages = append(messages, fmt.Sprintf("  - %s", err.Error()))
-		}
-		return false, fmt.Sprintf("validation failed:\n%s", strings.Join(messages, "\n"))
+		return false, formatValidationErrors(allErrs)
 	}
 	return true, ""
 }
