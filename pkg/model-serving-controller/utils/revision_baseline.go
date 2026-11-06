@@ -181,6 +181,22 @@ func EnsureRevisionBaseline(ctx context.Context, client kubernetes.Interface, ms
 	}
 	existing, err := baselines.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
+		// Steady state: the caller's source already records the pin and the
+		// baseline carries the proven counts, so the migration is complete and
+		// re-reading the source every reconcile would only add API traffic.
+		if source.Annotations[legacyRevisionBaseline] == name {
+			baseline, err := validate(existing)
+			if err != nil {
+				return nil, err
+			}
+			counts, err := legacyCoordinatedReplicaBaseline(ms, source)
+			if err != nil {
+				return nil, err
+			}
+			if counts == "" || baseline.Annotations[CoordinatedRoleReplicaBaselineAnnotation] == counts {
+				return baseline, nil
+			}
+		}
 		return pin(existing)
 	}
 	if !apierrors.IsNotFound(err) {

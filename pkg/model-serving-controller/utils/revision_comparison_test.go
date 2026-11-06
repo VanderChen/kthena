@@ -288,6 +288,16 @@ func TestLegacyRevisionBaselineIsDurableAndImmutable(t *testing.T) {
 	_, err = EnsureRevisionBaseline(ctx, client, ms, source)
 	require.ErrorContains(t, err, "conflicting identity")
 
+	// Steady state costs a single read of the baseline once the source records
+	// the pin; the source handed in by the caller is not re-read.
+	pinnedSource, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	client.ClearActions()
+	_, err = EnsureRevisionBaseline(ctx, client, ms, pinnedSource)
+	require.NoError(t, err)
+	require.Len(t, client.Actions(), 1)
+	require.Equal(t, "get", client.Actions()[0].GetVerb())
+
 	// A pinned baseline that disappears (downgrade, GC, manual deletion) is
 	// rebuilt from the current spec instead of pausing the workload forever,
 	// and the rebuild is made visible.
@@ -305,7 +315,7 @@ func TestLegacyRevisionBaselineIsDurableAndImmutable(t *testing.T) {
 	require.Equal(t, "changed-after-migration", historical.Spec.Plugins[0].Name, "the rebuilt baseline adopts the current spec")
 	require.Len(t, sink.reasons, 1)
 	require.Equal(t, "LegacyBaselineRebuilt", sink.reasons[0])
-	pinnedSource, err := client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
+	pinnedSource, err = client.AppsV1().ControllerRevisions(ms.Namespace).Get(ctx, source.Name, metav1.GetOptions{})
 	require.NoError(t, err)
 	require.Equal(t, rebuilt.Name, pinnedSource.Annotations[legacyRevisionBaseline])
 

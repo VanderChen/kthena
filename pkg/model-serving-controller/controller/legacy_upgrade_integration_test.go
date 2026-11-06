@@ -376,3 +376,52 @@ func TestUpgradeWithoutAnyHistoryStaysPausedWhenPodsDoNotProveTheTemplate(t *tes
 		})
 	}
 }
+
+// TestSteadyStateRevisionLookupsAreBounded guards the per-sync ControllerRevision
+// traffic: history is resolved once per round and a migrated legacy revision
+// costs one baseline read, never a re-read of its source.
+func TestSteadyStateRevisionLookupsAreBounded(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprintf("legacy-history-%t", legacy), func(t *testing.T) {
+			ctx := context.Background()
+			c := newAppliedHistoryController(t)
+			ms := appliedHistoryWorkload(workloadv1alpha1.ServingGroupRollingUpdate, "image:v1", 1)
+			ms.Spec.Replicas = ptr.To(int32(4))
+			if legacy {
+				seedLegacyWorkload(t, c, ms)
+			}
+			require.NoError(t, c.modelServingsInformer.GetIndexer().Add(ms))
+			_, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Create(ctx, ms, metav1.CreateOptions{})
+			require.NoError(t, err)
+			c.syncAll()
+			for i := 0; i < 3; i++ {
+				require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)), "warm-up sync %d", i)
+			}
+
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			client.ClearActions()
+			require.NoError(t, c.syncModelServing(ctx, namespacedKey(ms.Namespace, ms.Name)))
+			var lists, gets, writes int
+			for _, action := range client.Actions() {
+				if action.GetResource().Resource != "controllerrevisions" {
+					continue
+				}
+				switch action.GetVerb() {
+				case "list":
+					lists++
+				case "get":
+					gets++
+				default:
+					writes++
+				}
+			}
+			require.LessOrEqual(t, lists, 2, "history must be listed at most twice per sync regardless of group count")
+			require.Zero(t, writes, "an unchanged spec must not write history")
+			if legacy {
+				require.Equal(t, 1, gets, "a migrated legacy revision costs exactly one baseline read")
+			} else {
+				require.Zero(t, gets)
+			}
+		})
+	}
+}
