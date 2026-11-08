@@ -118,6 +118,7 @@ type ServingGroup struct {
 	// before applying recoveryPolicy. Defaults to 0; -1 disables active recovery.
 	// Finite grace uses the first fault observation in the current controller
 	// process and the latest configured value. Becoming Ready ends that observation.
+	// +kubebuilder:validation:Minimum=-1
 	// +optional
 	// +kubebuilder:default=0
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
