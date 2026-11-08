@@ -517,7 +517,7 @@ func (c *ModelServingController) reconcileInPlaceUnit(ctx context.Context, ms *w
 
 	if !retargeted && hasUnpatchedOutdatedPod(unit, revision) {
 		// A patch that keeps failing must not leave the unit half updated forever.
-		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && ms.Spec.RecoveryPolicy != workloadv1alpha1.NoneRestartPolicy {
+		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && !recoverySuppressed(ms) {
 			return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline)
 		} else if remaining > 0 {
 			c.enqueueModelServingAfter(ms, remaining)
@@ -647,7 +647,7 @@ func (c *ModelServingController) repairInPlaceRevision(ctx context.Context, ms *
 // podFinished tells whether the update of a Pod is done. With recoveryPolicy None a crash is
 // never recovered, so it must not keep a Pod that runs the target image from finishing.
 func podFinished(ms *workloadv1alpha1.ModelServing, state *inplace.State, pod *corev1.Pod) bool {
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoverySuppressed(ms) {
 		return state.OnTarget(pod)
 	}
 	return state.Completed(pod)

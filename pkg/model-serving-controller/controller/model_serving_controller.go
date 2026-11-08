@@ -2323,11 +2323,13 @@ func (c *ModelServingController) handlePodAfterGraceTime(ctx context.Context, ms
 		return nil
 	}
 	observation := podRecoveryObservation{firstSeen: time.Now(), inPlaceTimeout: unit != nil}
-	if previous, ok := c.graceMap.Load(key); ok && previous.(podRecoveryObservation).inPlaceTimeout == observation.inPlaceTimeout {
-		observation = previous.(podRecoveryObservation)
-	} else {
-		c.graceMap.Store(key, observation)
+	if previous, ok := c.graceMap.Load(key); ok {
+		previous := previous.(podRecoveryObservation)
+		if previous.inPlaceTimeout == observation.inPlaceTimeout || podNeedsRecovery(pod) {
+			observation.firstSeen = previous.firstSeen
+		}
 	}
+	c.graceMap.Store(key, observation)
 	grace := int64(0)
 	if latestMS.Spec.Template.RestartGracePeriodSeconds != nil {
 		grace = *latestMS.Spec.Template.RestartGracePeriodSeconds
