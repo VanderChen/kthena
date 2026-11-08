@@ -30,6 +30,7 @@ import (
 
 	api "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -125,6 +126,74 @@ func (b *rolloutBudget) take(ready bool) bool {
 	}
 	return true
 }
+
+// All groups participate in the ledger, including protected groups and actual
+// surge. Refresh complete physical readiness before planning and each action;
+// the datastore can lag a readiness change or a replacement incarnation.
+func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup, revision string) (rolloutBudget, error) {
+	u, err := utils.GetMaxUnavailable(ms)
+	if err != nil {
+		return rolloutBudget{}, err
+	}
+	var pods []*corev1.Pod
+	if ms.ResourceVersion != "" {
+		pods, err = c.coordinatedPods(ctx, ms, labels.Everything())
+		if err != nil {
+			return rolloutBudget{}, err
+		}
+	}
+	ready, unavailable := 0, 0
+	for i := range groups {
+		group := &groups[i]
+		pending := group.Status == datastore.ServingGroupDeleting || c.rolloutDeletionPending(ms, group.Name, "", "")
+		if ms.ResourceVersion != "" && !pending {
+			for _, pod := range pods {
+				if pod.Labels[api.GroupNameLabelKey] != group.Name {
+					continue
+				}
+				if pod.DeletionTimestamp != nil || inplace.StateOf(pod).InProgress() {
+					pending = true
+				}
+				if utils.ObjectRevision(pod) != group.Revision {
+					// A cached old revision never authorizes deleting a replacement.
+					group.Revision = ""
+				}
+			}
+			complete := group.Revision != ""
+			roles, historyErr := c.rolesForServingGroupReadinessWithContext(ctx, ms, group.Name)
+			if historyErr != nil {
+				complete = false
+			}
+			for _, role := range roles {
+				instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, role.Name)
+				if err != nil {
+					return rolloutBudget{}, err
+				}
+				complete = complete && len(instances) == roleReplicas(role)
+				for _, instance := range instances {
+					complete = complete && instance.Status != datastore.RoleDeleting &&
+						rolePodsComplete(ms, group.Name, instance.Name, role, group.Revision, pods, true)
+				}
+			}
+			group.Status = datastore.ServingGroupCreating
+			if complete {
+				group.Status = datastore.ServingGroupRunning
+			}
+		}
+		if pending {
+			// A committed deletion still occupies capacity and its allowance.
+			// Once it disappears, the lower active count accounts for it instead.
+			group.Status = datastore.ServingGroupDeleting
+			unavailable++
+		} else if group.Status == datastore.ServingGroupRunning {
+			ready++
+		} else if c.compareServingGroupTemplate(ctx, ms, *group, revision) != templateDifferent {
+			unavailable++
+		}
+	}
+	return newRolloutBudget(modelServingReplicas(ms), u, len(groups), ready, unavailable), nil
+}
+
 func roleRolloutBudget(role api.Role, instances []datastore.Role, unavailable int) (rolloutBudget, error) {
 	u, configured, err := utils.GetMaxUnavailableForRole(role)
 	if err != nil {
@@ -159,7 +228,11 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 	if c.podsInformer == nil {
 		return false
 	}
-	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance))
+	index, key := GroupNameKey, ms.Namespace+"/"+group
+	if role != "" {
+		index, key = RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, instance)
+	}
+	pods, err := c.getPodsByIndex(index, key)
 	if err != nil {
 		return true
 	}
