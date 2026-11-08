@@ -159,22 +159,8 @@ func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, 
 					group.Revision = ""
 				}
 			}
-			complete := group.Revision != ""
-			roles, historyErr := c.rolesForServingGroupReadinessWithContext(ctx, ms, group.Name)
-			if historyErr != nil {
-				complete = false
-			}
-			for _, role := range roles {
-				instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group.Name, role.Name)
-				if err != nil {
-					return rolloutBudget{}, err
-				}
-				complete = complete && len(instances) == roleReplicas(role)
-				for _, instance := range instances {
-					complete = complete && instance.Status != datastore.RoleDeleting &&
-						rolePodsComplete(ms, group.Name, instance.Name, role, group.Revision, pods, true)
-				}
-			}
+			complete, historyErr := c.checkServingGroupReadyWithContext(ctx, ms, group.Name)
+			complete = complete && historyErr == nil && group.Revision != ""
 			group.Status = datastore.ServingGroupCreating
 			if complete {
 				group.Status = datastore.ServingGroupRunning
@@ -294,6 +280,11 @@ func (c *ModelServingController) creationTargetPending(ctx context.Context, ms *
 				}
 				ready = rolePodsComplete(ms, group, id, applied, revision, pods, true)
 			}
+		}
+	} else if ready {
+		ready, err = c.checkServingGroupReadyWithContext(ctx, ms, group)
+		if err != nil {
+			return false, err
 		}
 	}
 	pending := false

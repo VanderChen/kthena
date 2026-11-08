@@ -798,3 +798,39 @@ func TestServingGroupReplansAfterNewLowFault(t *testing.T) {
 	require.GreaterOrEqual(t, len(order), 2)
 	require.Equal(t, ms.Name+"-0-decode-0-0", order[1], "fresh live budget observes a new low old NotReady; it must precede the next healthy old action")
 }
+func TestHistoricalCreationClearRechecksLiveWholeUnit(t *testing.T) {
+	ctx := context.Background()
+	ms := semanticRevisionTestModelServing("origin-clear", "target")
+	ms.ResourceVersion = "1"
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate}
+	ms.Spec.Template.Roles[0].WorkerReplicas = 1
+	ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+	c := newRevisionTestController(t, ms)
+	old := ms.DeepCopy()
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	key, group, target := utils.GetNamespaceName(ms), ms.Name+"-0", utils.ModelServingRevision(ms)
+	c.store.AddServingGroup(key, 0, "old")
+	pods := addMergeReadyInstance(t, c, ms, group, old.Spec.Template.Roles[0], 0, "old", "old", utils.CalRoleTemplateHash(old.Spec.Template.Roles[0]))
+	for _, pod := range pods {
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[creationTargetAnnotation] = target
+		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+	}
+	require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+	worker := pods[1].DeepCopy()
+	worker.Status.Conditions[0].Status = corev1.ConditionFalse
+	_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	// The Ready entry callback sees a cached Ready worker, but its API version
+	// is no longer Ready. Clearing a reservation must use the same whole-unit
+	// live facts as the action budget rather than this stale cache projection.
+	require.NoError(t, c.handleReadyPod(ms, group, pods[0]))
+	actual, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, worker.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, target, actual.Annotations[creationTargetAnnotation], "unready live worker must retain the original historical-creation reservation")
+}

@@ -2287,7 +2287,7 @@ func (c *ModelServingController) checkServingGroupReadyWithContext(ctx context.C
 			return false, nil
 		}
 		for _, r := range roleList {
-			if r.Status != datastore.RoleRunning {
+			if r.Status == datastore.RoleDeleting || (r.Status != datastore.RoleRunning && ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate) {
 				klog.V(4).Infof("checkServingGroupReady: role %s/%s in group %s not ready: status=%s",
 					role.Name, r.Name, servingGroupName, r.Status)
 				return false, nil
@@ -2307,7 +2307,7 @@ func (c *ModelServingController) checkRoleReadyInRound(ctx context.Context, ms *
 	if err != nil {
 		return false, err
 	}
-	if roleCoordination(ms) != nil && ms.ResourceVersion != "" {
+	if ms.ResourceVersion != "" {
 		pods, err = c.coordinatedPods(ctx, ms, labels.Set{workloadv1alpha1.GroupNameLabelKey: groupName, workloadv1alpha1.RoleLabelKey: roleName, workloadv1alpha1.RoleIDKey: roleID}.AsSelector())
 		if err != nil {
 			return false, err
@@ -2324,7 +2324,7 @@ func (c *ModelServingController) checkRoleReadyInRound(ctx context.Context, ms *
 		if instance.Status == datastore.RoleDeleting {
 			return false, nil
 		}
-		if roleCoordination(ms) != nil && ms.ResourceVersion != "" {
+		if ms.ResourceVersion != "" {
 			live, pod, err := c.coordinatedLiveRole(ctx, ms, groupName, roleName, instance)
 			if err != nil || pod == nil {
 				return false, err
