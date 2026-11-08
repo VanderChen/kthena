@@ -26,6 +26,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
+	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -566,4 +567,234 @@ func TestCoordinatedScaleToZeroPreservesLastCompletedRevision(t *testing.T) {
 			})
 		}
 	}
+}
+func TestHistoricalReplacementRetainsRolloutAllowance(t *testing.T) {
+	ms := semanticRevisionTestModelServing("history-reservation", "target")
+	ms.ResourceVersion = "1"
+	ms.Spec.Replicas = ptr.To[int32](3)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1)), Partition: ptr.To(intstr.FromInt(1))}}
+	ms.Status.CurrentRevision = "old"
+	c := newRevisionTestController(t, ms)
+	old := ms.DeepCopy()
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	key, ctx := utils.GetNamespaceName(ms), context.Background()
+	var removed *corev1.Pod
+	// A prior explicit shrink left sparse stable ordinals. All old members are
+	// now NotReady, so one legal non-degrading replacement can initially start.
+	for _, ordinal := range []int{1, 2, 3} {
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		pod := seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], ordinal, 0, "old", -1)
+		_ = pod
+		name := utils.GeneratePodName(group, "decode-0", 0)
+		member, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+		require.NoError(t, err)
+		member.Status.Conditions[0].Status = corev1.ConditionFalse
+		member, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, member, metav1.UpdateOptions{})
+		require.NoError(t, err)
+		require.NoError(t, c.podsInformer.GetIndexer().Update(member))
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupCreating))
+		if ordinal == 3 {
+			removed = member
+		}
+	}
+	target := utils.ModelServingRevision(ms)
+	require.NoError(t, c.manageRollingUpdate(ctx, ms, target))
+	require.Equal(t, datastore.ServingGroupDeleting, c.store.GetServingGroupStatus(key, ms.Name+"-3"))
+	// Deliver disappearance, finish that original deletion, then refill the
+	// lowest formal hole. Absolute ordinal 0 is protected, so refill uses v1.
+	require.NoError(t, c.podsInformer.GetIndexer().Delete(removed))
+	require.NoError(t, c.finishPendingDeletions(ctx, ms))
+	require.Equal(t, datastore.ServingGroupNotFound, c.store.GetServingGroupStatus(key, ms.Name+"-3"))
+	require.NoError(t, c.syncServingGroupReplicas(ctx, ms, target))
+	created, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, ms.Name+"-0-decode-0-0", metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "old", utils.ObjectRevision(created))
+	require.NoError(t, c.podsInformer.GetIndexer().Add(created))
+	require.NoError(t, c.syncRoleReplicas(ctx, ms, target, nil))
+	// API 2.3: historical replacement still NotReady retains its original
+	// reservation. It must not release another old-instance cleanup allowance.
+	require.NoError(t, c.manageRollingUpdate(ctx, ms, target))
+	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, ms.Name+"-2-decode-0-0", metav1.GetOptions{})
+	require.NoError(t, err, "historical refill has not restored the single in-flight allowance")
+}
+
+func TestHistoricalCreationReservationLifetime(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		for _, transition := range []string{"pending", "cold observation", "Ready then fault", "new target"} {
+			t.Run(string(mode)+"/"+transition, func(t *testing.T) {
+				ms := semanticRevisionTestModelServing("creation-lifetime", "target-v2")
+				ms.ResourceVersion, ms.Status.CurrentRevision = "1", "old"
+				ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+				config := api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1)), Partition: ptr.To(intstr.FromInt(1))}
+				if mode == api.ServingGroupRollingUpdate {
+					ms.Spec.Replicas = ptr.To[int32](3)
+					ms.Spec.RolloutStrategy.RollingUpdateConfiguration = &config
+				} else {
+					ms.Spec.Template.Roles[0].Replicas = ptr.To[int32](3)
+					ms.Spec.Template.Roles[0].RollingUpdateConfiguration = config
+				}
+				c := newRevisionTestController(t, ms)
+				old := ms.DeepCopy()
+				old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+				recordTestRevision(t, c.kubeClientSet, old, "old")
+				target, key, ctx := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), context.Background()
+				// Historical slot0 is a new complete-unit creation, while old1/2
+				// are ordinary existing faults. Both must survive a cold observation.
+				var replacement *corev1.Pod
+				for ordinal := 0; ordinal < 3; ordinal++ {
+					groupOrdinal, roleOrdinal := ordinal, 0
+					if mode == api.RoleRollingUpdate {
+						groupOrdinal, roleOrdinal = 0, ordinal
+					}
+					group := utils.GenerateServingGroupName(ms.Name, groupOrdinal)
+					c.store.AddServingGroup(key, groupOrdinal, "old")
+					pod := addMergeReadyInstance(t, c, ms, group, old.Spec.Template.Roles[0], roleOrdinal, "old", "old", utils.CalRoleTemplateHash(old.Spec.Template.Roles[0]))[0]
+					pod.Status.Conditions[0].Status = corev1.ConditionFalse
+					if ordinal == 0 {
+						if pod.Annotations == nil {
+							pod.Annotations = map[string]string{}
+						}
+						pod.Annotations[creationTargetAnnotation] = target
+						replacement = pod
+					}
+					_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.podsInformer.GetIndexer().Update(pod))
+					require.NoError(t, c.store.UpdateRoleStatus(key, group, "decode", utils.GenerateRoleID("decode", roleOrdinal), datastore.RoleCreating))
+					require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupCreating))
+				}
+				if transition == "cold observation" {
+					restarted, err := NewModelServingController(c.kubeClientSet, c.modelServingClient, nil, apiextfake.NewSimpleClientset())
+					require.NoError(t, err)
+					pods, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
+					require.NoError(t, err)
+					for i := range pods.Items {
+						pod := &pods.Items[i]
+						require.NoError(t, restarted.podsInformer.GetIndexer().Add(pod))
+						restarted.addServingGroupAndRoleFromPod(ms, pod.Labels[api.GroupNameLabelKey], pod)
+					}
+					c = restarted
+					t.Cleanup(c.workqueue.ShutDown)
+				} else if transition == "Ready then fault" {
+					replacement = replacement.DeepCopy()
+					replacement.Status.Conditions[0].Status = corev1.ConditionTrue
+					_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, replacement, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.podsInformer.GetIndexer().Update(replacement))
+					require.NoError(t, c.handleReadyPod(ms, replacement.Labels[api.GroupNameLabelKey], replacement))
+					actual, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, replacement.Name, metav1.GetOptions{})
+					require.NoError(t, err)
+					require.Empty(t, actual.Annotations[creationTargetAnnotation], "first complete Ready discharges historical creation")
+					actual.Status.Conditions[0].Status = corev1.ConditionFalse
+					_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, actual, metav1.UpdateOptions{})
+					require.NoError(t, err)
+					require.NoError(t, c.podsInformer.GetIndexer().Update(actual))
+					require.NoError(t, c.store.UpdateRoleStatus(key, actual.Labels[api.GroupNameLabelKey], "decode", "decode-0", datastore.RoleCreating))
+					require.NoError(t, c.store.UpdateServingGroupStatus(key, actual.Labels[api.GroupNameLabelKey], datastore.ServingGroupCreating))
+				} else if transition == "new target" {
+					ms = ms.DeepCopy()
+					ms.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "target-v3"
+					target = utils.ModelServingRevision(ms)
+					recordTestRevision(t, c.kubeClientSet, ms, target)
+				}
+				require.NoError(t, c.manageRollingUpdate(ctx, ms, target))
+				name := ms.Name + "-2-decode-0-0"
+				if mode == api.RoleRollingUpdate {
+					name = ms.Name + "-0-decode-2-0"
+				}
+				_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, name, metav1.GetOptions{})
+				if transition == "pending" || transition == "cold observation" {
+					require.NoError(t, err, "unfinished historical refill still spends the only cleanup allowance")
+				} else {
+					require.True(t, apierrors.IsNotFound(err), "old faults remain repairable after completion or target reclassification")
+				}
+			})
+		}
+	}
+}
+
+func TestHistoricalCreationOriginExcludesLocalPodRepair(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		for _, partial := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/partial=%t", mode, partial), func(t *testing.T) {
+				ms := semanticRevisionTestModelServing("creation-origin", "target")
+				ms.ResourceVersion, ms.Status.CurrentRevision = "1", "old"
+				ms.Spec.Template.Roles[0].WorkerReplicas = 1
+				ms.Spec.Template.Roles[0].WorkerTemplate = ms.Spec.Template.Roles[0].EntryTemplate.DeepCopy()
+				ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+				config := api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1)), Partition: ptr.To(intstr.FromInt(1))}
+				if mode == api.ServingGroupRollingUpdate {
+					ms.Spec.RolloutStrategy.RollingUpdateConfiguration = &config
+				} else {
+					ms.Spec.Template.Roles[0].RollingUpdateConfiguration = config
+				}
+				c := newRevisionTestController(t, ms)
+				old := ms.DeepCopy()
+				old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+				recordTestRevision(t, c.kubeClientSet, old, "old")
+				group, target := ms.Name+"-0", utils.ModelServingRevision(ms)
+				c.store.AddServingGroup(utils.GetNamespaceName(ms), 0, "old")
+				pods := addMergeReadyInstance(t, c, ms, group, old.Spec.Template.Roles[0], 0, "old", "old", utils.CalRoleTemplateHash(old.Spec.Template.Roles[0]))
+				for ordinal, pod := range pods {
+					if partial && ordinal == 0 {
+						continue
+					}
+					require.NoError(t, c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{}))
+					require.NoError(t, c.podsInformer.GetIndexer().Delete(pod))
+				}
+				require.NoError(t, c.syncRoleReplicas(context.Background(), ms, target, nil))
+				actual, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(context.Background(), pods[1].Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				if partial {
+					require.Empty(t, actual.Annotations[creationTargetAnnotation])
+				} else {
+					require.Equal(t, target, actual.Annotations[creationTargetAnnotation])
+				}
+			})
+		}
+	}
+}
+
+func TestServingGroupReplansAfterNewLowFault(t *testing.T) {
+	ms := semanticRevisionTestModelServing("action-order", "target")
+	ms.ResourceVersion, ms.Spec.Replicas = "1", ptr.To[int32](5)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(3))}}
+	c := newRevisionTestController(t, ms)
+	old := ms.DeepCopy()
+	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old-image"
+	recordTestRevision(t, c.kubeClientSet, old, "old")
+	ctx, key := context.Background(), utils.GetNamespaceName(ms)
+	var low *corev1.Pod
+	for ordinal := 0; ordinal < 5; ordinal++ {
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		seedAppliedRole(t, c, old, old.Spec.Template.Roles[0], ordinal, 0, "old", -1)
+		require.NoError(t, c.store.UpdateRoleStatus(key, group, "decode", "decode-0", datastore.RoleRunning))
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+		if ordinal == 0 {
+			var err error
+			low, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, group+"-decode-0-0", metav1.GetOptions{})
+			require.NoError(t, err)
+		}
+	}
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	var order []string
+	client.PrependReactor("delete", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		name := action.(clienttesting.DeleteAction).GetName()
+		order = append(order, name)
+		if name == ms.Name+"-4-decode-0-0" {
+			unready := low.DeepCopy()
+			unready.Status.Conditions[0].Status = corev1.ConditionFalse
+			require.NoError(t, client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), unready, ms.Namespace))
+		}
+		return false, nil, nil
+	})
+	require.NoError(t, c.manageRollingUpdate(ctx, ms, utils.ModelServingRevision(ms)))
+	require.Len(t, order, 1, "a health-class change returns to the queue before another healthy deletion")
+	require.NotZero(t, c.workqueue.Len())
+	require.NoError(t, c.manageRollingUpdate(ctx, ms, utils.ModelServingRevision(ms)))
+	require.GreaterOrEqual(t, len(order), 2)
+	require.Equal(t, ms.Name+"-0-decode-0-0", order[1], "fresh live budget observes a new low old NotReady; it must precede the next healthy old action")
 }

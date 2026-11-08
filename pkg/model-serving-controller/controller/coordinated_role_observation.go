@@ -179,6 +179,11 @@ func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, 
 			if complete {
 				group.Status = datastore.ServingGroupRunning
 			}
+			creating, err := c.creationTargetPending(ctx, ms, group.Name, "", "", revision, complete)
+			if err != nil {
+				return rolloutBudget{}, err
+			}
+			pending = pending || creating
 		}
 		if pending {
 			// A committed deletion still occupies capacity and its allowance.
@@ -247,11 +252,78 @@ func (c *ModelServingController) rolloutDeletionPending(ms *api.ModelServing, gr
 // A persisted origin distinguishes temporary capacity from unmarked sparse
 // binpack survivors. A marked instance inside the new desired range is formal.
 type coordinatedSurgeKey struct{}
+type creationTargetKey struct{}
 
 const (
-	surgeAnnotation = "modelserving.volcano.sh/surge"
-	surgeRole       = "role"
+	surgeAnnotation          = "modelserving.volcano.sh/surge"
+	surgeRole                = "role"
+	creationTargetAnnotation = "modelserving.volcano.sh/creation-target"
 )
+
+// Historical replacements retain the target that authorized their creation
+// until their complete unit first becomes Ready. This bounded Pod fact survives
+// a restart without confusing an ordinary old fault with an unfinished refill.
+func (c *ModelServingController) creationTargetPending(ctx context.Context, ms *api.ModelServing, group, role, id, target string, ready bool) (bool, error) {
+	if c.podsInformer == nil && ms.ResourceVersion == "" {
+		return false, nil
+	}
+	index, key := GroupNameKey, ms.Namespace+"/"+group
+	selector := labels.Set{api.GroupNameLabelKey: group}
+	if role != "" {
+		index, key = RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, group, role, id)
+		selector[api.RoleLabelKey], selector[api.RoleIDKey] = role, id
+	}
+	pods, err := c.getPodsByIndex(index, key)
+	if ms.ResourceVersion != "" {
+		pods, err = c.coordinatedPods(ctx, ms, selector.AsSelector())
+	}
+	if err != nil {
+		return false, err
+	}
+	if ready && role != "" {
+		instances, err := c.store.GetRoleList(utils.GetNamespaceName(ms), group, role)
+		if err != nil {
+			return false, err
+		}
+		ready = false
+		for _, instance := range instances {
+			if instance.Name == id && instance.Status != datastore.RoleDeleting {
+				applied, revision, _, err := c.appliedRoleTemplate(ctx, ms, group, role, instance)
+				if err != nil {
+					return false, err
+				}
+				ready = rolePodsComplete(ms, group, id, applied, revision, pods, true)
+			}
+		}
+	}
+	pending := false
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) || pod.Annotations[creationTargetAnnotation] == "" {
+			continue
+		}
+		if ready {
+			if err := c.clearPodAnnotation(ctx, ms, pod, creationTargetAnnotation); err != nil {
+				c.enqueueModelServingAfter(ms, enqueueAfter)
+				return true, err
+			}
+		} else if pod.Annotations[creationTargetAnnotation] == target {
+			pending = true
+		}
+	}
+	return pending, nil
+}
+
+func (c *ModelServingController) clearPodAnnotation(ctx context.Context, ms *api.ModelServing, pod *corev1.Pod, annotation string) error {
+	patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
+		"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
+		"annotations": map[string]interface{}{annotation: nil},
+	}})
+	if err != nil {
+		return err
+	}
+	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
+}
 
 func setSurgeScope(pod *corev1.Pod, scope string) {
 	if pod.Annotations == nil {
@@ -330,14 +402,7 @@ func (c *ModelServingController) adoptCoordinatedSurge(ctx context.Context, ms *
 		if ordinal < 0 || ordinal >= roleReplicas(role) || pod.DeletionTimestamp != nil {
 			continue
 		}
-		patch, err := json.Marshal(map[string]interface{}{"metadata": map[string]interface{}{
-			"uid": pod.UID, "resourceVersion": pod.ResourceVersion,
-			"annotations": map[string]interface{}{surgeAnnotation: nil},
-		}})
-		if err != nil {
-			return err
-		}
-		if _, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
+		if err := c.clearPodAnnotation(ctx, ms, pod, surgeAnnotation); err != nil {
 			return err
 		}
 	}
