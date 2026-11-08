@@ -85,14 +85,27 @@ type PodGroupManager interface {
 
 type podGracePeriodKey struct {
 	types.NamespacedName
-	UID types.UID
+	UID      types.UID
+	OwnerUID types.UID
+}
+
+type podRecoveryObservation struct {
+	firstSeen      time.Time
+	inPlaceTimeout bool
 }
 
 func getPodGracePeriodKey(pod *corev1.Pod) podGracePeriodKey {
-	return podGracePeriodKey{
+	key := podGracePeriodKey{
 		NamespacedName: utils.GetNamespaceName(pod),
 		UID:            pod.UID,
 	}
+	for _, owner := range pod.OwnerReferences {
+		if owner.APIVersion == workloadv1alpha1.SchemeGroupVersion.String() && owner.Kind == workloadv1alpha1.ModelServingKind.Kind {
+			key.OwnerUID = owner.UID
+			break
+		}
+	}
+	return key
 }
 
 type ModelServingController struct {
@@ -111,7 +124,7 @@ type ModelServingController struct {
 	// nolint
 	workqueue       workqueue.RateLimitingInterface
 	store           datastore.Store
-	graceMap        sync.Map    // key: podGracePeriodKey, value:time
+	graceMap        sync.Map    // key: podGracePeriodKey, value: podRecoveryObservation
 	initialSync     atomic.Bool // indicates whether the initial sync has been completed
 	pluginsRegistry *plugins.Registry
 	recorder        record.EventRecorder
@@ -291,6 +304,11 @@ func (c *ModelServingController) updateModelServing(old, cur interface{}) {
 		klog.V(4).InfoS("Spec has not changed, skipping update", "modelServing", klog.KObj(curms))
 		return
 	}
+	if recoverySuppressed(oldms) != recoverySuppressed(curms) {
+		// A disabled observation cannot authorize recovery after re-enabling it,
+		// even if both spec updates are coalesced into a single queue item.
+		c.clearRecoveryObservations(oldms.UID)
+	}
 
 	// If network topology is removed, we need to clean up the PodGroups.
 	// Because minRoleReplicas is not allowed to be updated, so we do not need to check it here.
@@ -321,6 +339,7 @@ func (c *ModelServingController) deleteModelServing(obj interface{}) {
 		}
 	}
 
+	c.clearRecoveryObservations(ms.UID)
 	c.roleCleanups.Range(func(key, _ any) bool {
 		if key.(auxiliaryCleanupKey).uid == ms.UID {
 			c.roleCleanups.Delete(key)
@@ -446,6 +465,7 @@ func (c *ModelServingController) deletePod(obj interface{}) {
 		}
 	}
 
+	c.graceMap.Delete(getPodGracePeriodKey(pod))
 	ms, servingGroupName, roleName, roleID := c.getModelServingAndResourceDetails(pod)
 	// ms is nil means the modelserving is deleted
 	// delete the pod
@@ -609,6 +629,9 @@ func (c *ModelServingController) syncModelServing(ctx context.Context, key strin
 	orphanErr := c.cleanupOrphanServices(ctx, ms)
 	defer func() { syncErr = errors.Join(syncErr, orphanErr) }()
 	if err := c.finishPendingDeletions(ctx, ms); err != nil {
+		return err
+	}
+	if err := c.syncPodRecovery(ctx, ms); err != nil {
 		return err
 	}
 	ctx = c.withRevisionHistory(ctx, ms)
@@ -2020,6 +2043,10 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	if c.handleDeletionInProgress(ms, servingGroupName, utils.GetRoleName(newPod), utils.GetRoleID(newPod)) {
 		return nil
 	}
+	key := getPodGracePeriodKey(newPod)
+	if observation, ok := c.graceMap.Load(key); ok && (!observation.(podRecoveryObservation).inPlaceTimeout || inplace.StateOf(newPod).Completed(newPod)) {
+		c.graceMap.Delete(key)
+	}
 	workload := ms
 	var revisionErr error
 	// Hooks for old Pods must use their historical plugin chain, not the new
@@ -2125,30 +2152,17 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 }
 
 func (c *ModelServingController) handleErrorPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, errPod *corev1.Pod) error {
-	// None: leave a restarted, still-alive pod to the kubelet (do not delete it),
-	// but mark it unavailable. A terminal PodFailed pod falls through to deletion.
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy && inplace.UnexpectedRestart(errPod) && !utils.IsPodFailed(errPod) {
-		if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
-			klog.Warningf("mark pod %s unavailable: %v", errPod.Name, err)
-		}
-		c.enqueueModelServing(ms)
-		return nil
-	}
-	// pod is already in the grace period and does not need to be processed for the time being.
 	key := getPodGracePeriodKey(errPod)
-	now := time.Now()
-	_, loaded := c.graceMap.LoadOrStore(key, now)
-	if loaded {
-		klog.V(4).Infof("Pod %v already in grace period", key)
-		return nil
+	if recoverySuppressed(ms) {
+		c.graceMap.Delete(key)
+	} else {
+		c.graceMap.LoadOrStore(key, podRecoveryObservation{firstSeen: time.Now()})
 	}
 	if err := c.markPodUnavailable(ms, servingGroupName, errPod); err != nil {
-		c.graceMap.Delete(key)
 		return err
 	}
-	// Wait for the grace period before processing
-	go c.handlePodAfterGraceTime(ms, errPod)
-	// ServingGroup status may change, needs reconcile
+	// Recovery runs in the workqueue, so delayed wakeups cannot retain old
+	// policy or grace settings and API failures are retried normally.
 	c.enqueueModelServing(ms)
 	return nil
 }
@@ -2186,48 +2200,132 @@ func (c *ModelServingController) markPodUnavailable(ms *workloadv1alpha1.ModelSe
 	return nil
 }
 
-func (c *ModelServingController) handlePodAfterGraceTime(ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod) {
-	if ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds > 0 {
-		// Wait for the grace period before making a decision
-		time.Sleep(time.Duration(*ms.Spec.Template.RestartGracePeriodSeconds) * time.Second)
-		klog.V(4).Infof("%s after grace time", errPod.Name)
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
+func recoverySuppressed(ms *workloadv1alpha1.ModelServing) bool {
+	return ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy ||
+		(ms.Spec.Template.RestartGracePeriodSeconds != nil && *ms.Spec.Template.RestartGracePeriodSeconds < 0)
+}
 
-		newPod, err := c.podsLister.Pods(ms.Namespace).Get(errPod.Name)
-		if err != nil {
-			if apierrors.IsNotFound(err) {
-				klog.V(4).Infof("pod %s has been deleted after grace time", errPod.Name)
-			} else {
-				klog.Errorf("cannot get pod %s after grace time, err: %v", errPod.Name, err)
-			}
-			return
+func (c *ModelServingController) clearRecoveryObservations(ownerUID types.UID) {
+	c.graceMap.Range(func(key, _ any) bool {
+		if key.(podGracePeriodKey).OwnerUID == ownerUID {
+			c.graceMap.Delete(key)
 		}
-		if newPod.UID != errPod.UID {
-			klog.V(4).Infof("pod %s has been replaced after grace time", errPod.Name)
-			return
-		}
+		return true
+	})
+}
 
-		if !utils.IsPodRunningAndReady(newPod) || inplace.Updating(newPod) {
-			// pod has not recovered after the grace period (an unfinished in-place update counts as not recovered), needs to be rebuilt
-			// After this pod has been deleted, we will rebuild the ServingGroup in deletePod function
-			err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), newPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-			if err != nil {
-				klog.Errorf("cannot delete pod %s after grace time, err: %v", newPod.Name, err)
-				return
-			}
-			klog.V(2).Infof("%s been deleted after grace time", errPod.Name)
-		}
-	} else {
-		// grace period is not set or the grace period is 0, the deletion will be executed immediately.
-		defer c.graceMap.Delete(getPodGracePeriodKey(errPod))
+func podNeedsRecovery(pod *corev1.Pod) bool {
+	state := inplace.StateOf(pod)
+	return utils.IsPodFailed(pod) ||
+		((state.InProgress() || !utils.IsPodRunningAndReady(pod)) && state.UnexpectedRestart(pod))
+}
 
-		err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Delete(context.TODO(), errPod.Name, *metav1.NewPreconditionDeleteOptions(string(errPod.UID)))
-		if err != nil {
-			klog.Errorf("cannot delete pod %s when it error, err: %v", errPod.Name, err)
-			return
-		}
-		klog.V(2).Infof("%s been deleted without grace time", errPod.Name)
+func (c *ModelServingController) syncPodRecovery(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
+	pods, err := c.podsLister.Pods(ms.Namespace).List(labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name}))
+	if err != nil {
+		return err
 	}
+	seen := map[podGracePeriodKey]bool{}
+	for _, pod := range pods {
+		if !utils.IsOwnedByModelServingWithUID(pod, ms.UID) {
+			continue
+		}
+		key := getPodGracePeriodKey(pod)
+		seen[key] = true
+		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if utils.IsPodTerminating(pod) || c.store.GetServingGroupStatus(utils.GetNamespaceName(ms), group) == datastore.ServingGroupDeleting ||
+			c.store.GetRoleStatus(utils.GetNamespaceName(ms), group, utils.GetRoleName(pod), utils.GetRoleID(pod)) == datastore.RoleDeleting {
+			c.graceMap.Delete(key)
+			continue
+		}
+		if !podNeedsRecovery(pod) {
+			// Deadline recovery is re-evaluated by completeInPlaceUpdates using
+			// the whole unit, including healthy members not patched yet.
+			if observation, ok := c.graceMap.Load(key); ok && !observation.(podRecoveryObservation).inPlaceTimeout {
+				c.graceMap.Delete(key)
+			}
+			continue
+		}
+		if err := c.markPodUnavailable(ms, group, pod); err != nil {
+			return err
+		}
+		if err := c.handlePodAfterGraceTime(ctx, ms, pod, nil, ""); err != nil {
+			return err
+		}
+	}
+	c.graceMap.Range(func(key, _ any) bool {
+		if key.(podGracePeriodKey).OwnerUID == ms.UID && !seen[key.(podGracePeriodKey)] {
+			c.graceMap.Delete(key)
+		}
+		return true
+	})
+	return nil
+}
+
+// handlePodAfterGraceTime rechecks live identity, health and policy. A delayed
+// queue item only wakes reconciliation; it never carries permission to delete.
+// unit is non-nil only after its in-place progress deadline has expired.
+func (c *ModelServingController) handlePodAfterGraceTime(ctx context.Context, ms *workloadv1alpha1.ModelServing, errPod *corev1.Pod, unit *inPlaceUnit, revision string) error {
+	key := getPodGracePeriodKey(errPod)
+	latestMS, err := c.modelServingClient.WorkloadV1alpha1().ModelServings(ms.Namespace).Get(ctx, ms.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) || (err == nil && (latestMS.UID != ms.UID || latestMS.DeletionTimestamp != nil || recoverySuppressed(latestMS))) {
+		c.graceMap.Delete(key)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	pod, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Get(ctx, errPod.Name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) || (err == nil && (pod.UID != errPod.UID || !utils.IsOwnedByModelServingWithUID(pod, latestMS.UID) || utils.IsPodTerminating(pod))) {
+		c.graceMap.Delete(key)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if unit != nil {
+		// A new template must first pass the normal history/retarget checks.
+		if utils.ModelServingRevision(latestMS) != utils.ModelServingRevision(ms) {
+			c.graceMap.Delete(key)
+			c.enqueueModelServing(latestMS)
+			return nil
+		}
+		due, err := c.inPlaceRecoveryDue(ctx, latestMS, pod, unit, revision)
+		if err != nil {
+			return err
+		}
+		if !due {
+			c.graceMap.Delete(key)
+			return nil
+		}
+	} else if !podNeedsRecovery(pod) {
+		c.graceMap.Delete(key)
+		return nil
+	}
+	observation := podRecoveryObservation{firstSeen: time.Now(), inPlaceTimeout: unit != nil}
+	if previous, ok := c.graceMap.Load(key); ok {
+		previous := previous.(podRecoveryObservation)
+		if previous.inPlaceTimeout == observation.inPlaceTimeout || podNeedsRecovery(pod) {
+			observation.firstSeen = previous.firstSeen
+		}
+	}
+	c.graceMap.Store(key, observation)
+	grace := int64(0)
+	if latestMS.Spec.Template.RestartGracePeriodSeconds != nil {
+		grace = *latestMS.Spec.Template.RestartGracePeriodSeconds
+	}
+	// Compare seconds before converting to Duration: grace may be MaxInt64.
+	remaining := grace - int64(max(time.Since(observation.firstSeen), 0)/time.Second)
+	if remaining > 0 {
+		c.enqueueModelServingAfter(latestMS, time.Duration(min(remaining, 60))*time.Second)
+		return nil
+	}
+	err = c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID)))
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+	c.graceMap.Delete(key)
+	return nil
 }
 
 func (c *ModelServingController) handleDeletedPod(ms *workloadv1alpha1.ModelServing, servingGroupName string, pod *corev1.Pod) error {

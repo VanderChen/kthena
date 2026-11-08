@@ -23,8 +23,8 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -502,13 +502,22 @@ func (c *ModelServingController) reconcileInPlaceUnit(ctx context.Context, ms *w
 			earliest = state.StartedAt.Time
 		}
 	}
+	_, remaining := inPlaceDeadline(ms, earliest)
+	if !inProgress || remaining > 0 || (!retargeted && unitSettled(ms, unit, revision)) {
+		for _, pod := range unit.pods {
+			key := getPodGracePeriodKey(pod)
+			if observation, ok := c.graceMap.Load(key); ok && observation.(podRecoveryObservation).inPlaceTimeout {
+				c.graceMap.Delete(key)
+			}
+		}
+	}
 	if !inProgress {
 		return c.repairInPlaceRevision(ctx, ms, unit, revision)
 	}
 
 	if !retargeted && hasUnpatchedOutdatedPod(unit, revision) {
 		// A patch that keeps failing must not leave the unit half updated forever.
-		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && ms.Spec.RecoveryPolicy != workloadv1alpha1.NoneRestartPolicy {
+		if deadline, remaining := inPlaceDeadline(ms, earliest); remaining <= 0 && !recoverySuppressed(ms) {
 			return c.handleInPlaceTimeout(ctx, ms, unit, revision, deadline)
 		} else if remaining > 0 {
 			c.enqueueModelServingAfter(ms, remaining)
@@ -638,7 +647,7 @@ func (c *ModelServingController) repairInPlaceRevision(ctx context.Context, ms *
 // podFinished tells whether the update of a Pod is done. With recoveryPolicy None a crash is
 // never recovered, so it must not keep a Pod that runs the target image from finishing.
 func podFinished(ms *workloadv1alpha1.ModelServing, state *inplace.State, pod *corev1.Pod) bool {
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoverySuppressed(ms) {
 		return state.OnTarget(pod)
 	}
 	return state.Completed(pod)
@@ -725,34 +734,84 @@ func (c *ModelServingController) enforceInPlaceDeadline(ctx context.Context, ms 
 
 // handleInPlaceTimeout treats the Pods that did not finish in time as error Pods, so the
 // recovery policy decides what happens: ServingGroupRecreate and RoleRecreate go through
-// handleErrorPod (grace period, deletion, then recreation of the Role or ServingGroup),
-// while None leaves the Pods alone like a plain Deployment would.
-// Pods of the unit that were never patched are deleted directly: they are healthy, so the
-// error path would keep them, and the unit cannot finish without them.
+// the same current-policy/grace check as ordinary faults. This includes healthy
+// members left unpatched by a partial update; they cannot finish the unit alone.
 func (c *ModelServingController) handleInPlaceTimeout(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string, deadline time.Duration) error {
 	c.emitRoleStatusEvent(ms, corev1.EventTypeWarning, "InPlaceUpdateTimeout",
 		fmt.Sprintf("In-place update of ServingGroup %s exceeded progress deadline %s, applying recovery policy %s", unit.groupName, deadline, ms.Spec.RecoveryPolicy))
-	if ms.Spec.RecoveryPolicy == workloadv1alpha1.NoneRestartPolicy {
+	if recoverySuppressed(ms) {
+		for _, pod := range unit.pods {
+			c.graceMap.Delete(getPodGracePeriodKey(pod))
+		}
 		return nil
 	}
 	for i, pod := range unit.pods {
 		if !unit.states[i].InProgress() {
-			if utils.ObjectRevision(pod) != revision && !utils.IsPodTerminating(pod) {
-				err := c.kubeClientSet.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, *metav1.NewPreconditionDeleteOptions(string(pod.UID)))
-				if err != nil && !apierrors.IsNotFound(err) {
-					return err
-				}
+			if utils.ObjectRevision(pod) == revision || utils.IsPodTerminating(pod) {
+				continue
 			}
+		} else if podFinished(ms, unit.states[i], pod) {
 			continue
 		}
-		if podFinished(ms, unit.states[i], pod) {
-			continue
+		if err := c.markPodUnavailable(ms, unit.groupName, pod); err != nil {
+			return err
 		}
-		if err := c.handleErrorPod(ms, unit.groupName, pod); err != nil {
+		if err := c.handlePodAfterGraceTime(ctx, ms, pod, unit, revision); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// inPlaceRecoveryDue verifies the current complete unit and latest deadline,
+// rather than converting an old ordinary-fault observation into a timeout.
+func (c *ModelServingController) inPlaceRecoveryDue(ctx context.Context, ms *workloadv1alpha1.ModelServing, pod *corev1.Pod, unit *inPlaceUnit, revision string) (bool, error) {
+	selector := labels.SelectorFromSet(labels.Set{
+		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
+		workloadv1alpha1.GroupNameLabelKey:        unit.groupName,
+	})
+	listed, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
+	if err != nil {
+		return false, err
+	}
+	pods := make([]*corev1.Pod, 0, len(listed.Items))
+	for i := range listed.Items {
+		pods = append(pods, &listed.Items[i])
+	}
+	roleMode := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
+	for _, current := range splitInPlaceUnits(ms, unit.groupName, pods, roleMode) {
+		if current.roleName != unit.roleName || current.roleID != unit.roleID {
+			continue
+		}
+		// Keep the original unit's start while this pass deletes its members;
+		// deleting the first patched Pod must not release its unpatched peers.
+		var earliest time.Time
+		for _, state := range unit.states {
+			if state.InProgress() && (earliest.IsZero() || state.StartedAt.Time.Before(earliest)) {
+				earliest = state.StartedAt.Time
+			}
+		}
+		for i, member := range current.pods {
+			if utils.IsPodTerminating(member) {
+				return false, nil
+			}
+			if state := current.states[i]; state.InProgress() && (earliest.IsZero() || state.StartedAt.Time.Before(earliest)) {
+				earliest = state.StartedAt.Time
+			}
+		}
+		if earliest.IsZero() || unitSettled(ms, current, revision) {
+			return false, nil
+		}
+		if state := inplace.StateOf(pod); (state.InProgress() && podFinished(ms, state, pod)) || (!state.InProgress() && utils.ObjectRevision(pod) == revision) {
+			return false, nil
+		}
+		if _, remaining := inPlaceDeadline(ms, earliest); remaining > 0 {
+			c.enqueueModelServingAfter(ms, remaining)
+			return false, nil
+		}
+		return true, nil
+	}
+	return false, nil
 }
 
 func (c *ModelServingController) resumeInPlaceUnit(ctx context.Context, ms *workloadv1alpha1.ModelServing, unit *inPlaceUnit, revision string) error {
