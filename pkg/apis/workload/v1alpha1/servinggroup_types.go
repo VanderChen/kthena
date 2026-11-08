@@ -116,6 +116,7 @@ type Metadata struct {
 type ServingGroup struct {
 	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
 	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
+	// +kubebuilder:validation:Minimum=-1
 	// +optional
 	// +kubebuilder:default=0
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`

@@ -19,6 +19,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -141,6 +142,9 @@ func modelServingValidationErrors(modelServing *workloadv1alpha1.ModelServing) f
 	allErrs = append(allErrs, validateWorkerReplicas(modelServing)...)
 	allErrs = append(allErrs, validateRecoveryPolicyAndRolloutStrategy(modelServing)...)
 	allErrs = append(allErrs, validateEvictionStrategy(modelServing)...)
+	if grace := modelServing.Spec.Template.RestartGracePeriodSeconds; grace != nil && *grace < -1 {
+		allErrs = append(allErrs, field.Invalid(field.NewPath("spec", "template", "restartGracePeriodSeconds"), *grace, "must be greater than or equal to -1"))
+	}
 
 	return allErrs
 }
@@ -200,140 +204,66 @@ func validateRoleNames(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	return allErrs
 }
 
-// validateRollingUpdateConfiguration validates the ServingGroup-level rolling
-// update configuration and rejects it for RoleRollingUpdate.
+// Inactive rollout settings retain their syntax constraints but do not constrain
+// the active granularity's replica counts or budgets.
 func validateRollingUpdateConfiguration(ms *workloadv1alpha1.ModelServing) field.ErrorList {
-	var allErrs field.ErrorList
 	if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.RollingUpdateConfiguration == nil {
-		return allErrs
+		return nil
 	}
-
-	rollingUpdateConfigurationPath := field.NewPath("spec").Child("rolloutStrategy").Child("rollingUpdateConfiguration")
-	if ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
-		allErrs = append(allErrs, field.Forbidden(rollingUpdateConfigurationPath, "rollingUpdateConfiguration is only valid when rolloutStrategy.type is ServingGroupRollingUpdate"))
-		return allErrs
-	}
-
-	maxUnavailable := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable
-	maxUnavailablePath := rollingUpdateConfigurationPath.Child("maxUnavailable")
-	allErrs = append(allErrs, validateIntOrPercent(maxUnavailable, maxUnavailablePath)...)
-	maxSurge := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge
-	maxSurgePath := rollingUpdateConfigurationPath.Child("maxSurge")
-	allErrs = append(allErrs, validateIntOrPercent(maxSurge, maxSurgePath)...)
-
-	// Validate partition field
-	if ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition != nil {
-		partitionPath := rollingUpdateConfigurationPath.Child("partition")
-		allErrs = append(allErrs, validateIntOrPercent(ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition, partitionPath)...)
-	}
-
-	if ms.Spec.Replicas != nil {
-		replicas := int(*ms.Spec.Replicas)
-		maxUnavailableValue := 1
-		maxSurgeValue := 0
-		budgetsValid := true
-		if maxUnavailable != nil {
-			var err error
-			maxUnavailableValue, err = intstr.GetScaledValueFromIntOrPercent(maxUnavailable, replicas, false)
-			if err != nil {
-				budgetsValid = false
-				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, maxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
-			}
-		}
-		if maxSurge != nil {
-			var err error
-			maxSurgeValue, err = intstr.GetScaledValueFromIntOrPercent(maxSurge, replicas, true)
-			if err != nil {
-				budgetsValid = false
-				allErrs = append(allErrs, field.Invalid(maxSurgePath, maxSurge, fmt.Sprintf("invalid maxSurge: %v", err)))
-			}
-		}
-
-		partition := 0
-		if configuredPartition := ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition; configuredPartition != nil {
-			resolvedPartition, err := intstr.GetScaledValueFromIntOrPercent(configuredPartition, replicas, true)
-			if err == nil {
-				partition = resolvedPartition
-			}
-		}
-		if budgetsValid && replicas > partition && maxUnavailableValue == 0 && maxSurgeValue == 0 {
-			allErrs = append(allErrs, field.Invalid(rollingUpdateConfigurationPath,
-				"",
-				"maxUnavailable and maxSurge cannot both resolve to 0"))
-		}
-	}
-	return allErrs
+	return validateRolloutBudget(*ms.Spec.RolloutStrategy.RollingUpdateConfiguration, replicasOrDefault(ms.Spec.Replicas),
+		ms.Spec.RolloutStrategy.Type != workloadv1alpha1.RoleRollingUpdate, field.NewPath("spec", "rolloutStrategy", "rollingUpdateConfiguration"))
 }
 
 func validateMaxUnavailableForRoles(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	var allErrs field.ErrorList
 	roleRollingUpdate := ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
 	for i, role := range ms.Spec.Template.Roles {
-		if role.Partition == nil && role.MaxUnavailable == nil && role.MaxSurge == nil {
+		allErrs = append(allErrs, validateRolloutBudget(role.RollingUpdateConfiguration, replicasOrDefault(role.Replicas),
+			roleRollingUpdate, field.NewPath("spec", "template", "roles").Index(i))...)
+	}
+	return allErrs
+}
+
+// Both rollout granularities use the same defaults, rounding and capacity limits.
+func validateRolloutBudget(config workloadv1alpha1.RollingUpdateConfiguration, replicas int32, active bool, path *field.Path) field.ErrorList {
+	var allErrs field.ErrorList
+	resolved := [3]int{1, 0, 0}
+	names := [3]string{"maxUnavailable", "maxSurge", "partition"}
+	for i, value := range []*intstr.IntOrString{config.MaxUnavailable, config.MaxSurge, config.Partition} {
+		if value == nil {
 			continue
 		}
-
-		rollingCfgPath := field.NewPath("spec").Child("template").Child("roles").Index(i)
-		maxSurgePath := rollingCfgPath.Child("maxSurge")
-		if role.MaxSurge != nil {
-			allErrs = append(allErrs, validateIntOrPercent(role.MaxSurge, maxSurgePath)...)
-			if !roleRollingUpdate {
-				allErrs = append(allErrs, field.Forbidden(maxSurgePath, "maxSurge is only valid when rolloutStrategy.type is RoleRollingUpdate"))
-			}
-		}
-
-		if role.Partition != nil {
-			fieldPath := rollingCfgPath.Child("partition")
-			allErrs = append(allErrs, validateIntOrPercent(role.Partition, fieldPath)...)
-			if !roleRollingUpdate {
-				allErrs = append(allErrs, field.Forbidden(fieldPath, "partition is only valid when rolloutStrategy.type is RoleRollingUpdate"))
-			}
-		}
-
-		if !roleRollingUpdate {
+		fieldPath := path.Child(names[i])
+		errs := validateIntOrPercent(value, fieldPath, i == 1)
+		allErrs = append(allErrs, errs...)
+		if len(errs) > 0 || !active || replicas < 0 {
 			continue
 		}
-
-		replicas := 1
-		if role.Replicas != nil {
-			replicas = int(*role.Replicas)
-		}
-		maxUnavailableValue := 1
-		maxSurgeValue := 0
-		budgetsValid := true
-		maxUnavailablePath := rollingCfgPath.Child("maxUnavailable")
-		if role.MaxUnavailable != nil {
-			allErrs = append(allErrs, validateIntOrPercent(role.MaxUnavailable, maxUnavailablePath)...)
-			maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
-			if err != nil {
-				budgetsValid = false
-				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, role.MaxUnavailable, fmt.Sprintf("invalid maxUnavailable: %v", err)))
-			} else if replicas > 0 && maxUnavailable > replicas {
-				allErrs = append(allErrs, field.Invalid(maxUnavailablePath, role.MaxUnavailable, fmt.Sprintf("maxUnavailable cannot be greater than replicas (%d)", replicas)))
-			} else {
-				maxUnavailableValue = maxUnavailable
+		// Bound a percentage before scaling it: a valid integer percentage can
+		// still overflow int when multiplied by the replica count.
+		if i == 1 && value.Type == intstr.String && replicas > 0 {
+			percent, _ := strconv.ParseInt(strings.TrimSuffix(value.StrVal, "%"), 10, 64)
+			if percent > int64(math.MaxInt32-replicas)*100/int64(replicas) {
+				allErrs = append(allErrs, field.Invalid(fieldPath, value, "replicas + maxSurge cannot exceed 2147483647"))
+				continue
 			}
 		}
-		if role.MaxSurge != nil {
-			maxSurge, err := intstr.GetScaledValueFromIntOrPercent(role.MaxSurge, replicas, true)
-			if err != nil {
-				budgetsValid = false
-				allErrs = append(allErrs, field.Invalid(maxSurgePath, role.MaxSurge, fmt.Sprintf("invalid maxSurge: %v", err)))
-			} else {
-				maxSurgeValue = maxSurge
+		count, err := intstr.GetScaledValueFromIntOrPercent(value, int(replicas), i != 0)
+		if err != nil {
+			allErrs = append(allErrs, field.Invalid(fieldPath, value, err.Error()))
+			continue
+		}
+		resolved[i] = count
+		if i == 1 {
+			if count > math.MaxInt32-int(replicas) {
+				allErrs = append(allErrs, field.Invalid(fieldPath, value, "replicas + maxSurge cannot exceed 2147483647"))
 			}
+		} else if count > int(replicas) && !(i == 0 && replicas == 0 && value.Type == intstr.Int && count == 1) {
+			allErrs = append(allErrs, field.Invalid(fieldPath, value, fmt.Sprintf("%s cannot be greater than replicas (%d)", names[i], replicas)))
 		}
-
-		partition := 0
-		if role.Partition != nil {
-			resolvedPartition, err := intstr.GetScaledValueFromIntOrPercent(role.Partition, replicas, true)
-			if err == nil {
-				partition = resolvedPartition
-			}
-		}
-		if budgetsValid && replicas > partition && maxUnavailableValue == 0 && maxSurgeValue == 0 {
-			allErrs = append(allErrs, field.Invalid(rollingCfgPath, "", "maxUnavailable and maxSurge cannot both resolve to 0"))
-		}
+	}
+	if active && replicas >= 0 && len(allErrs) == 0 && resolved[0] == 0 && resolved[1] == 0 {
+		allErrs = append(allErrs, field.Invalid(path, "", "maxUnavailable and maxSurge cannot both resolve to 0"))
 	}
 	return allErrs
 }
@@ -452,7 +382,7 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	return allErrs
 }
 
-func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path) field.ErrorList {
+func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path, allowOver100 bool) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if value == nil {
 		return allErrs
@@ -468,8 +398,12 @@ func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path) fiel
 		// Strip trailing '%' and parse; IsValidPercent already ensures the format is valid.
 		percentStr := strings.TrimSuffix(value.StrVal, "%")
 		percent, err := strconv.Atoi(percentStr)
-		if err != nil || percent < 0 || percent > 100 {
-			allErrs = append(allErrs, field.Invalid(fieldPath, value, "must be a valid percent value (0-100)"))
+		if err != nil || percent < 0 || (!allowOver100 && percent > 100) {
+			message := "must be a valid percent value (0-100)"
+			if allowOver100 {
+				message = "must be a non-negative integer percent"
+			}
+			allErrs = append(allErrs, field.Invalid(fieldPath, value, message))
 		}
 	case intstr.Int:
 		allErrs = append(allErrs, validateNonnegativeField(int64(value.IntValue()), fieldPath)...)
@@ -626,7 +560,7 @@ func validateServingGroupMinAvailable(ms *workloadv1alpha1.ModelServing, minAvai
 		return append(allErrs, field.Required(fldPath, "minAvailable is required when evictionStrategy.protectionLevel is ServingGroup"))
 	}
 
-	allErrs = append(allErrs, validateIntOrPercent(minAvailable, fldPath)...)
+	allErrs = append(allErrs, validateIntOrPercent(minAvailable, fldPath, false)...)
 	if len(allErrs) > 0 || ms.Spec.Replicas == nil || *ms.Spec.Replicas < 0 {
 		return allErrs
 	}
@@ -669,7 +603,7 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 		}
 
 		before := len(allErrs)
-		allErrs = append(allErrs, validateIntOrPercent(&minAvailable, rolePath)...)
+		allErrs = append(allErrs, validateIntOrPercent(&minAvailable, rolePath, false)...)
 		if len(allErrs) > before {
 			continue
 		}
