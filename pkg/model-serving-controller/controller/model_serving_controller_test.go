@@ -6712,14 +6712,18 @@ func TestRecoveryCancellationAndReadyStartNewObservation(t *testing.T) {
 
 func TestRecoveryDeleteFailureRetriesThroughQueue(t *testing.T) {
 	f := newInPlaceFixture(t, nil, func(pod *corev1.Pod) { pod.Status.Phase = corev1.PodFailed })
+	f.kubeClient.Lock()
 	f.kubeClient.PrependReactor("delete", "pods", func(kubetesting.Action) (bool, runtime.Object, error) {
 		return true, nil, fmt.Errorf("delete unavailable")
 	})
+	f.kubeClient.Unlock()
 	pod := f.syncPodFromAPI(t)
 	require.ErrorContains(t, f.controller.handlePodAfterGraceTime(context.Background(), f.newMS, pod, nil, ""), "delete unavailable")
 	_, exists := f.controller.graceMap.Load(getPodGracePeriodKey(pod))
 	require.True(t, exists)
+	f.kubeClient.Lock()
 	f.kubeClient.ReactionChain = f.kubeClient.ReactionChain[1:]
+	f.kubeClient.Unlock()
 	require.NoError(t, f.controller.handlePodAfterGraceTime(context.Background(), f.newMS, pod, nil, ""))
 	require.True(t, podDeleted(f))
 }
