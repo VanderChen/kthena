@@ -829,6 +829,9 @@ func (c *ModelServingController) hasUpdateableOutdatedServingGroup(
 	revision string,
 	partition int,
 ) bool {
+	if coordinatedRoundOf(ctx, ms) == nil {
+		ctx = withObservationRound(ctx, ms)
+	}
 	for _, group := range groups {
 		_, ordinal := utils.GetParentNameAndOrdinal(group.Name)
 		if ordinal >= partition && c.compareServingGroupTemplate(ctx, ms, group, revision) == templateDifferent {
@@ -1396,8 +1399,12 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 	liveRoleMode := ms.ResourceVersion != "" && ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
 	for _, roleObj := range roleList {
 		roleCtx := ctx
+		observationCtx := ctx
+		if liveRoleMode && coordinatedRoundOf(ctx, ms) == nil {
+			observationCtx = withObservationRound(ctx, ms)
+		}
 		if liveRoleMode {
-			live, _, err := c.coordinatedLiveRole(ctx, ms, groupName, targetRole.Name, roleObj)
+			live, _, err := c.coordinatedLiveRole(observationCtx, ms, groupName, targetRole.Name, roleObj)
 			if err != nil {
 				return err
 			}
@@ -1413,7 +1420,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			continue
 		}
 		if liveRoleMode {
-			pods, err = c.coordinatedPods(ctx, ms, labels.Set{workloadv1alpha1.GroupNameLabelKey: groupName, workloadv1alpha1.RoleLabelKey: targetRole.Name, workloadv1alpha1.RoleIDKey: roleObj.Name}.AsSelector())
+			pods, err = c.coordinatedPods(observationCtx, ms, labels.Set{workloadv1alpha1.GroupNameLabelKey: groupName, workloadv1alpha1.RoleLabelKey: targetRole.Name, workloadv1alpha1.RoleIDKey: roleObj.Name}.AsSelector())
 			if err != nil {
 				return err
 			}
@@ -1534,6 +1541,9 @@ func (c *ModelServingController) hasUpdateableOutdatedRoleInRound(ctx context.Co
 	targetRole workloadv1alpha1.Role,
 	roleList []datastore.Role,
 ) bool {
+	if coordinatedRoundOf(ctx, ms) == nil {
+		ctx = withObservationRound(ctx, ms)
+	}
 	partition, _, err := c.getPartition(rolePartition(ms, targetRole), roleReplicas(targetRole))
 	if err != nil {
 		klog.Errorf("hasUpdateableOutdatedRole: failed to calculate partition for role %s in ServingGroup %s: %v", targetRole.Name, groupName, err)
@@ -1993,6 +2003,9 @@ func (c *ModelServingController) rolesToDeleteForRoleRollingUpdateInRound(ctx co
 }
 
 func (c *ModelServingController) outdatedRolesInRound(ctx context.Context, ms *workloadv1alpha1.ModelServing, sg datastore.ServingGroup, roleSpec workloadv1alpha1.Role, roleList []datastore.Role) ([]datastore.Role, int) {
+	if coordinatedRoundOf(ctx, ms) == nil {
+		ctx = withObservationRound(ctx, ms)
+	}
 	outdatedRoles := make([]datastore.Role, 0, len(roleList))
 	// record the number of roles that is in rollingupdate but not ready yet.
 	newUnavailable := 0

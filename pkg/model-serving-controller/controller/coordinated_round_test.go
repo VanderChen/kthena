@@ -27,6 +27,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
@@ -487,6 +488,131 @@ func TestCoordinatedScaleDownRetainsHistorySafetyForTheSurvivingGroup(t *testing
 				deleted = true
 			}
 			require.True(t, deleted, "the same normal scale-down candidate must be removed in both history placements")
+		})
+	}
+}
+
+func TestManagedRoleObservationsRefreshForEachInstance(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("managed-observations", 1, 2)
+	ms.Spec.RolloutStrategy.RoleCoordination = nil
+	ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
+	role := &ms.Spec.Template.Roles[0]
+	role.WorkerReplicas = 1
+	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	c := newRevisionTestController(t, ms)
+	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, c.kubeClientSet, ms, revision)
+	c.store.AddServingGroup(key, 0, revision)
+	addMergeReadyInstance(t, c, ms, group, *role, 0, revision, revision, utils.CalRoleTemplateHash(*role))
+	worker := addMergeReadyInstance(t, c, ms, group, *role, 1, revision, revision, utils.CalRoleTemplateHash(*role))[1].DeepCopy()
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	lists := 0
+	injectLoss := true
+	client.PrependReactor("list", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		lists++
+		if !injectLoss || lists != 2 {
+			return false, nil, nil
+		}
+		// The first instance's snapshot is already taken. Change the next
+		// worker only in the API, leaving the informer and store Ready.
+		pods, err := client.Tracker().List(corev1.SchemeGroupVersion.WithResource("pods"), corev1.SchemeGroupVersion.WithKind("Pod"), ms.Namespace)
+		if err != nil {
+			return true, nil, err
+		}
+		worker.Status.Conditions[0].Status = corev1.ConditionFalse
+		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), worker, ms.Namespace); err != nil {
+			return true, nil, err
+		}
+		return true, pods, nil
+	})
+	client.ClearActions()
+	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-0"))
+	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"), "the second instance must observe the API-only Ready loss")
+	require.Equal(t, 3, lists, "one planning snapshot and one identity/member snapshot per instance")
+	requireNoMergeReadyPodMutations(t, client.Actions())
+
+	worker.Status.Conditions[0].Status = corev1.ConditionTrue
+	_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	lists = 0
+	// Stop injecting the loss; another invocation must observe recovery.
+	injectLoss = false
+	client.ClearActions()
+	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"))
+	requireNoMergeReadyPodMutations(t, client.Actions())
+}
+
+func TestIndependentRolePlanningObservationsRefreshBetweenCalls(t *testing.T) {
+	for _, entry := range []string{"groups", "role", "outdated"} {
+		t.Run(entry, func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("planning-observations", 3, 3)
+			ms.Spec.RolloutStrategy.RoleCoordination = nil
+			oldMS := ms.DeepCopy()
+			oldMS.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Image = "old"
+			revision, oldRevision, key := utils.ModelServingRevision(ms), utils.ModelServingRevision(oldMS), utils.GetNamespaceName(ms)
+			ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			recordTestRevision(t, c.kubeClientSet, oldMS, oldRevision)
+			role, group := ms.Spec.Template.Roles[0], ms.Name+"-0"
+			var first *corev1.Pod
+			for ordinal := 0; ordinal < 3; ordinal++ {
+				name := utils.GenerateServingGroupName(ms.Name, ordinal)
+				c.store.AddServingGroup(key, ordinal, revision)
+				for _, spec := range ms.Spec.Template.Roles {
+					for instance := 0; instance < 3; instance++ {
+						pod := addMergeReadyInstance(t, c, ms, name, spec, instance, revision, revision, utils.CalRoleTemplateHash(spec))[0]
+						if name == group && spec.Name == role.Name && instance == 0 {
+							first = pod.DeepCopy()
+						}
+					}
+				}
+			}
+			groups, err := c.store.GetServingGroupByModelServing(key)
+			require.NoError(t, err)
+			instances, err := c.store.GetRoleList(key, group, role.Name)
+			require.NoError(t, err)
+			observe := func() bool {
+				switch entry {
+				case "groups":
+					return c.hasUpdateableOutdatedServingGroup(ctx, ms, groups, revision, 0)
+				case "role":
+					return c.hasUpdateableOutdatedRoleInRound(ctx, ms, group, role, instances)
+				default:
+					outdated, _ := c.outdatedRolesInRound(ctx, ms, datastore.ServingGroup{Name: group, Revision: revision}, role, instances)
+					return len(outdated) > 0
+				}
+			}
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			for _, replaced := range []bool{false, true} {
+				if replaced {
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, first.Name, metav1.DeleteOptions{}))
+					first.UID += "-replacement"
+					first.Labels[api.RevisionLabelKey] = oldRevision
+					first.Labels[api.RoleTemplateHashLabelKey] = utils.CalRoleTemplateHash(oldMS.Spec.Template.Roles[0])
+					first.Spec.Containers[0].Image = "old"
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, first, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				// Cache identity and revision stay unchanged between calls.
+				client.ClearActions()
+				require.Equal(t, replaced, observe(), "each invocation must read the new owned identity and applied revision")
+				lists := 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+				}
+				require.Equal(t, 1, lists, "one read-only invocation shares its Pod observation")
+				requireNoMergeReadyPodMutations(t, client.Actions())
+			}
 		})
 	}
 }
