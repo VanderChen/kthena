@@ -9881,21 +9881,25 @@ func TestRoleTargetRejectsForeignSnapshotReuseRace(t *testing.T) {
 	require.NoError(t, kube.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, foreign.Name, metav1.DeleteOptions{}))
 	foreign.UID = "foreign-snapshot"
 	foreign.OwnerReferences[0].UID = "foreign-modelserving"
-	gets := 0
-	kube.PrependReactor("get", "controllerrevisions", func(kubetesting.Action) (bool, runtime.Object, error) {
-		gets++
-		if gets == 3 {
+	replaced := false
+	kube.PrependReactor("get", "controllerrevisions", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		get := action.(kubetesting.GetAction)
+		if get.GetName() != foreign.Name || replaced {
+			return false, nil, nil
+		}
+		if _, err := kube.Tracker().Get(get.GetResource(), ms.Namespace, foreign.Name); err == nil {
 			// Persistence has succeeded; replace that API incarnation before
 			// the subsequent historical-context read verifies its owner.
 			require.NoError(t, kube.Tracker().Delete(schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "controllerrevisions"}, ms.Namespace, foreign.Name))
 			require.NoError(t, kube.Tracker().Add(foreign))
+			replaced = true
 		}
 		return false, nil, nil
 	})
 	kube.ClearActions()
 	err = c.CreatePodsByRole(ctx, ms.Spec.Template.Roles[0], ms, 0, 0, revision, utils.CalRoleTemplateHash(ms.Spec.Template.Roles[0]))
 	require.ErrorContains(t, err, "not controlled")
-	require.Equal(t, 3, gets)
+	require.True(t, replaced, "the race must occur after persistence and before historical-context reuse")
 	for _, action := range kube.Actions() {
 		require.False(t, action.GetVerb() == "create" && action.GetResource().Resource == "pods", "foreign reuse must not authorize dependent Pods")
 	}
