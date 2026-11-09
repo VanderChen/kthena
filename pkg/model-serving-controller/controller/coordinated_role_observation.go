@@ -131,6 +131,13 @@ func (b *rolloutBudget) take(ready bool) bool {
 // surge. Refresh complete physical readiness before planning and each action;
 // the datastore can lag a readiness change or a replacement incarnation.
 func (c *ModelServingController) servingGroupRolloutBudget(ctx context.Context, ms *api.ModelServing, groups []datastore.ServingGroup, revision string) (rolloutBudget, error) {
+	if ms.ResourceVersion != "" {
+		// Share physical observations only within this calculation. Every
+		// action recalculates the budget with a fresh round, even without
+		// Role coordination, so it cannot reuse earlier Ready capacity.
+		ctx = context.WithValue(ctx, coordinatedRoundKey{}, &coordinatedRound{owner: ms.UID,
+			revisions: make(map[string]coordinatedRevision), snapshots: make(map[string]controllerRevisionObservation)})
+	}
 	u, err := utils.GetMaxUnavailable(ms)
 	if err != nil {
 		return rolloutBudget{}, err
@@ -312,7 +319,16 @@ func (c *ModelServingController) clearPodAnnotation(ctx context.Context, ms *api
 	if err != nil {
 		return err
 	}
-	_, err = c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	updated, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Patch(ctx, pod.Name, types.MergePatchType, patch, metav1.PatchOptions{})
+	if err == nil {
+		if round := coordinatedRoundOf(ctx, ms); round != nil {
+			for i, observed := range round.pods {
+				if observed.Name == pod.Name && observed.UID == pod.UID {
+					round.pods[i] = updated
+				}
+			}
+		}
+	}
 	return err
 }
 

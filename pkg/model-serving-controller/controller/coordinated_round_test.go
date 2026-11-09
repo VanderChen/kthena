@@ -28,9 +28,104 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	clienttesting "k8s.io/client-go/testing"
+	"k8s.io/utils/ptr"
 )
+
+func TestServingGroupBudgetReusesReadsOnlyWithinOneCalculation(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("group-budget-round", 3, 1)
+	ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: api.ServingGroupRollingUpdate,
+		RollingUpdateConfiguration: &api.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt(1))}}
+	for i := range ms.Spec.Template.Roles {
+		role := &ms.Spec.Template.Roles[i]
+		role.WorkerReplicas = 1
+		role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+	}
+	revision, key := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms)
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	c := newRevisionTestController(t, ms)
+	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+	recordTestRevision(t, c.kubeClientSet, ms, revision)
+	var worker *corev1.Pod
+	for ordinal := 0; ordinal < 3; ordinal++ {
+		group := utils.GenerateServingGroupName(ms.Name, ordinal)
+		c.store.AddServingGroup(key, ordinal, revision)
+		for _, role := range ms.Spec.Template.Roles {
+			pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+			worker = pods[1]
+		}
+		require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+	}
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	for _, ready := range []bool{true, false} {
+		if !ready {
+			unready := worker.DeepCopy()
+			unready.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, unready, metav1.UpdateOptions{})
+			require.NoError(t, err)
+		}
+		groups, err := c.store.GetServingGroupByModelServing(key)
+		require.NoError(t, err)
+		client.ClearActions()
+		budget, err := c.servingGroupRolloutBudget(ctx, ms, groups, revision)
+		require.NoError(t, err)
+		expected := rolloutBudget{total: 1, healthy: 1}
+		if !ready {
+			expected = rolloutBudget{}
+		}
+		require.Equal(t, expected, budget, "the next budget must observe API readiness loss without an informer update")
+		podLists, historyGets := 0, 0
+		for _, action := range client.Actions() {
+			if action.GetVerb() == "list" && action.GetResource().Resource == "pods" {
+				podLists++
+			}
+			if action.GetVerb() == "get" && action.GetResource().Resource == "controllerrevisions" {
+				historyGets++
+			}
+		}
+		require.Equal(t, 1, podLists, "all groups, Roles and workers share one fresh Pod observation per budget")
+		require.Equal(t, 1, historyGets, "one budget reuses the immutable applied history")
+	}
+}
+
+func TestCreationMarkerClearUpdatesTheRoundObservation(t *testing.T) {
+	ctx := context.Background()
+	ms := mergeReadyModelServing("creation-marker-round", 1, 1)
+	c := newRevisionTestController(t, ms)
+	key, group, revision := utils.GetNamespaceName(ms), ms.Name+"-0", utils.ModelServingRevision(ms)
+	c.store.AddServingGroup(key, 0, revision)
+	for _, role := range ms.Spec.Template.Roles {
+		pod := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))[0]
+		pod.Annotations = map[string]string{creationTargetAnnotation: revision}
+		_, err := c.kubeClientSet.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}
+	client := c.kubeClientSet.(*kubefake.Clientset)
+	client.ClearActions()
+	round := withCoordinatedRound(ctx, ms)
+	for i := 0; i < 2; i++ {
+		pending, err := c.creationTargetPending(round, ms, group, "", "", revision, true)
+		require.NoError(t, err)
+		require.False(t, pending)
+	}
+	patches, lists := 0, 0
+	for _, action := range client.Actions() {
+		if action.GetResource().Resource != "pods" {
+			continue
+		}
+		if action.GetVerb() == "patch" {
+			patches++
+		}
+		if action.GetVerb() == "list" {
+			lists++
+		}
+	}
+	require.Equal(t, len(ms.Spec.Template.Roles), patches, "cleared markers must not be patched again with a stale resourceVersion")
+	require.Equal(t, 1, lists, "the PATCH result updates the round without another LIST")
+}
 
 func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testing.T) {
 	ms := mergeReadyModelServing("round-facts", 1, 1)
