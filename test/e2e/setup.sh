@@ -62,7 +62,9 @@ case "${TEST_CATEGORY}" in
 esac
 
 echo "Start to install cert-manager"
-kubectl_from_url apply https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml
+helm upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+    --version v1.18.2 --namespace cert-manager --create-namespace \
+    --set crds.enabled=true --set startupapicheck.enabled=false
 echo "Waiting for cert-manager to be ready..."
 go install github.com/cert-manager/cmctl/v2@v2.2.0 && "$(go env GOPATH)/bin/cmctl" check api --wait=5m
 
