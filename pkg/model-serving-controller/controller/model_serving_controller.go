@@ -2710,7 +2710,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			}
 		}
 
-		// If CurrentRevision is not set (either not in status or invalid), compute it from current groups
+		// If CurrentRevision is absent, compute it from current groups.
 		if currentRevision == "" {
 			if rolloutComplete || len(revisionCount) == 0 {
 				// All groups are updated or no groups exist
@@ -3364,10 +3364,6 @@ func (c *ModelServingController) resolveRoleTemplateHashFromRevision(ms *workloa
 		return "", false
 	}
 
-	cr, err = utils.EnsureRevisionBaseline(ctx, c.kubeClientSet, ms, cr)
-	if err != nil {
-		return "", false
-	}
 	workload, err := utils.ModelServingForControllerRevision(ms, cr)
 	if err != nil {
 		klog.Warningf("failed to parse roles from ControllerRevision %s for ModelServing %s/%s: %v", revision, ms.Namespace, ms.Name, err)
