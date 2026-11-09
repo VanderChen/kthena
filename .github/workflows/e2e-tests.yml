@@ -56,6 +56,14 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
+      - name: Build pinned Kind
+        env:
+          GOBIN: ${{ runner.tool_cache }}/kind/v0.31.0/amd64/kind/bin
+          GOSUMDB: sum.golang.org
+        run: |
+          go install sigs.k8s.io/kind@v0.31.0
+          test "$("$GOBIN/kind" version -q)" = "0.31.0"
+
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1.15.2
         with:
