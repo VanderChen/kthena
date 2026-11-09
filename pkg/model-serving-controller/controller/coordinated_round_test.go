@@ -127,6 +127,151 @@ func TestCreationMarkerClearUpdatesTheRoundObservation(t *testing.T) {
 	require.Equal(t, 1, lists, "the PATCH result updates the round without another LIST")
 }
 
+func TestReadinessObservationsShareReadsAndRefreshBetweenCalls(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("readiness-facts", 1, 1)
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+			for i := range ms.Spec.Template.Roles {
+				role := &ms.Spec.Template.Roles[i]
+				role.WorkerReplicas = 1
+				role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			}
+			revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			c.store.AddServingGroup(key, 0, revision)
+			var worker *corev1.Pod
+			for _, role := range ms.Spec.Template.Roles {
+				worker = addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))[1]
+			}
+			require.NoError(t, c.store.UpdateServingGroupStatus(key, group, datastore.ServingGroupRunning))
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			for _, observation := range []string{"Ready", "worker NotReady", "foreign replacement", "owned replacement"} {
+				switch observation {
+				case "worker NotReady":
+					worker = worker.DeepCopy()
+					worker.Status.Conditions[0].Status = corev1.ConditionFalse
+					_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				case "foreign replacement":
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, worker.Name, metav1.DeleteOptions{}))
+					worker = worker.DeepCopy()
+					worker.UID += "-replacement"
+					worker.OwnerReferences[0].UID = "another-owner"
+					worker.Status.Conditions[0].Status = corev1.ConditionTrue
+					_, err := client.CoreV1().Pods(ms.Namespace).Create(ctx, worker, metav1.CreateOptions{})
+					require.NoError(t, err)
+				case "owned replacement":
+					worker.OwnerReferences[0].UID = ms.UID
+					_, err := client.CoreV1().Pods(ms.Namespace).Update(ctx, worker, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				}
+				// The informer and store retain their original Ready worker UID.
+				client.ClearActions()
+				ready, err := c.checkServingGroupReadyWithContext(ctx, ms, group)
+				require.NoError(t, err)
+				require.Equal(t, observation == "Ready" || observation == "owned replacement", ready, observation)
+				lists, gets := 0, 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+					if action.Matches("get", "controllerrevisions") {
+						gets++
+					}
+				}
+				require.Equal(t, 1, lists, "each readiness call shares one new Pod snapshot")
+				require.Equal(t, 1, gets, "Roles reuse their common immutable history")
+			}
+		})
+	}
+}
+
+func TestReadyEventSharesObservationAndClearsOnlyCompleteCreation(t *testing.T) {
+	for _, mode := range []api.RolloutStrategyType{api.ServingGroupRollingUpdate, api.RoleRollingUpdate} {
+		t.Run(string(mode), func(t *testing.T) {
+			ctx := context.Background()
+			ms := mergeReadyModelServing("ready-event-facts", 1, 1)
+			ms.Spec.RolloutStrategy = &api.RolloutStrategy{Type: mode}
+			for i := range ms.Spec.Template.Roles {
+				role := &ms.Spec.Template.Roles[i]
+				role.WorkerReplicas = 1
+				role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+			}
+			revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
+			c := newRevisionTestController(t, ms)
+			require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
+			recordTestRevision(t, c.kubeClientSet, ms, revision)
+			c.store.AddServingGroup(key, 0, revision)
+			client := c.kubeClientSet.(*kubefake.Clientset)
+			var entry, worker *corev1.Pod
+			for _, role := range ms.Spec.Template.Roles {
+				pods := addMergeReadyInstance(t, c, ms, group, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
+				for _, pod := range pods {
+					pod.Annotations = map[string]string{creationTargetAnnotation: revision}
+					_, err := client.CoreV1().Pods(ms.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
+					require.NoError(t, err)
+				}
+				if entry == nil {
+					entry, worker = pods[0], pods[1]
+				}
+			}
+			worker = worker.DeepCopy()
+			worker.Status.Conditions[0].Status = corev1.ConditionFalse
+			_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
+			require.NoError(t, err)
+			for _, complete := range []bool{false, true} {
+				if complete {
+					require.NoError(t, client.CoreV1().Pods(ms.Namespace).Delete(ctx, worker.Name, metav1.DeleteOptions{}))
+					worker = worker.DeepCopy()
+					worker.UID += "-replacement"
+					worker.Status.Conditions[0].Status = corev1.ConditionTrue
+					_, err = client.CoreV1().Pods(ms.Namespace).Create(ctx, worker, metav1.CreateOptions{})
+					require.NoError(t, err)
+				}
+				client.ClearActions()
+				require.NoError(t, c.handleReadyPod(ms, group, entry))
+				lists, gets, patches := 0, 0, 0
+				for _, action := range client.Actions() {
+					if action.Matches("list", "pods") {
+						lists++
+					}
+					if action.Matches("get", "controllerrevisions") {
+						gets++
+					}
+					if action.Matches("patch", "pods") {
+						patches++
+						if action.(clienttesting.PatchAction).GetName() == worker.Name {
+							require.Contains(t, string(action.(clienttesting.PatchAction).GetPatch()), string(worker.UID))
+						}
+					}
+				}
+				require.Equal(t, 1, lists, "one Ready event shares its live observation across all readiness and marker checks")
+				require.Equal(t, 1, gets, "hook, readiness and creation use the same immutable history")
+				wantPatches := 0
+				if complete {
+					wantPatches = 2
+					if mode == api.ServingGroupRollingUpdate {
+						wantPatches = 4
+					}
+				}
+				require.Equal(t, wantPatches, patches, "only a complete owned unit may clear its creation markers")
+				actual, err := client.CoreV1().Pods(ms.Namespace).Get(ctx, worker.Name, metav1.GetOptions{})
+				require.NoError(t, err)
+				require.Equal(t, worker.UID, actual.UID)
+				if complete {
+					require.Empty(t, actual.Annotations[creationTargetAnnotation])
+				} else {
+					require.Equal(t, revision, actual.Annotations[creationTargetAnnotation])
+				}
+			}
+		})
+	}
+}
+
 func TestCoordinatedRoundReusesReadsAndRefreshesLiveFactsBetweenRounds(t *testing.T) {
 	ms := mergeReadyModelServing("round-facts", 1, 1)
 	c := newRevisionTestController(t, ms)

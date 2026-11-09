@@ -32,8 +32,8 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
-// A round belongs to one sync and one owner, never to the controller or its
-// event handlers. Read errors are retained only until that sync ends.
+// A round belongs to one observation and one owner, never to the controller.
+// Read errors are retained only until that observation ends.
 type coordinatedRound struct {
 	history    *revisionHistory
 	owner      types.UID
@@ -58,6 +58,15 @@ type coordinatedRoundKey struct{}
 
 func withCoordinatedRound(ctx context.Context, ms *api.ModelServing) context.Context {
 	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
+		return ctx
+	}
+	return withObservationRound(ctx, ms)
+}
+
+// An observation is local to one readiness check or planning/action round.
+// Callers start a fresh round before using later live facts.
+func withObservationRound(ctx context.Context, ms *api.ModelServing) context.Context {
+	if ms.ResourceVersion == "" {
 		return ctx
 	}
 	return context.WithValue(ctx, coordinatedRoundKey{}, &coordinatedRound{owner: ms.UID, revisions: make(map[string]coordinatedRevision), snapshots: make(map[string]controllerRevisionObservation)})

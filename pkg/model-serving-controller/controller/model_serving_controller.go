@@ -2048,13 +2048,14 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	if observation, ok := c.graceMap.Load(key); ok && (!observation.(podRecoveryObservation).inPlaceTimeout || inplace.StateOf(newPod).Completed(newPod)) {
 		c.graceMap.Delete(key)
 	}
+	ctx := c.withRevisionHistory(context.Background(), ms)
 	workload := ms
 	var revisionErr error
 	// Hooks for old Pods must use their historical plugin chain, not the new
 	// desired chain during a partitioned rollout.
 	if len(ms.Spec.Plugins) > 0 || utils.ObjectRevision(newPod) != "" {
 		var err error
-		workload, err = c.revisionHistory(context.Background(), ms).workload(context.Background(), utils.ObjectRevision(newPod))
+		workload, err = c.revisionHistory(ctx, ms).workload(ctx, utils.ObjectRevision(newPod))
 		if err != nil {
 			revisionErr = fmt.Errorf("resolve ready Pod revision: %w", err)
 			c.enqueueModelServingAfter(ms, enqueueAfter)
@@ -2093,13 +2094,14 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 	}, servingGroupName, newPod.Name, utils.ObjectRevision(newPod), roleTemplateHash, roleName, roleID)
 
 	// Check and update role status to Running when all pods in the role are ready
+	ctx = withObservationRound(ctx, ms)
 	roleBecameRunning := false
-	roleReady, err := c.checkRoleReady(ms, servingGroupName, roleName, roleID)
+	roleReady, err := c.checkRoleReadyInRound(ctx, ms, servingGroupName, roleName, roleID)
 	if err != nil {
 		klog.Warningf("failed to check role %s/%s readiness, skipping role status update: %v", roleName, roleID, err)
 	} else if roleReady {
 		if ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate {
-			if _, err := c.creationTargetPending(context.Background(), ms, servingGroupName, roleName, roleID, c.revisionTarget(context.Background(), ms), true); err != nil {
+			if _, err := c.creationTargetPending(ctx, ms, servingGroupName, roleName, roleID, c.revisionTarget(ctx, ms), true); err != nil {
 				return err
 			}
 		}
@@ -2122,13 +2124,13 @@ func (c *ModelServingController) handleReadyPod(ms *workloadv1alpha1.ModelServin
 		}
 	}
 
-	ready, err := c.checkServingGroupReady(ms, servingGroupName)
+	ready, err := c.checkServingGroupReadyWithContext(ctx, ms, servingGroupName)
 	if err != nil {
 		return errors.Join(revisionErr, fmt.Errorf("failed to check ServingGroup status: %w", err))
 	}
 	if ready {
 		if ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate {
-			if _, err := c.creationTargetPending(context.Background(), ms, servingGroupName, "", "", c.revisionTarget(context.Background(), ms), true); err != nil {
+			if _, err := c.creationTargetPending(ctx, ms, servingGroupName, "", "", c.revisionTarget(ctx, ms), true); err != nil {
 				return err
 			}
 		}
@@ -2370,6 +2372,9 @@ func (c *ModelServingController) checkServingGroupReady(ms *workloadv1alpha1.Mod
 }
 
 func (c *ModelServingController) checkServingGroupReadyWithContext(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) (bool, error) {
+	if coordinatedRoundOf(ctx, ms) == nil {
+		ctx = withObservationRound(ctx, ms)
+	}
 	klog.V(4).Infof("checkServingGroupReady: modelServing=%s/%s, servingGroup=%s", ms.Namespace, ms.Name, servingGroupName)
 	roles, err := c.rolesForServingGroupReadinessWithContext(ctx, ms, servingGroupName)
 	if err != nil {
@@ -2402,6 +2407,9 @@ func (c *ModelServingController) checkServingGroupReadyWithContext(ctx context.C
 }
 
 func (c *ModelServingController) checkRoleReadyInRound(ctx context.Context, ms *workloadv1alpha1.ModelServing, groupName, roleName, roleID string) (bool, error) {
+	if coordinatedRoundOf(ctx, ms) == nil {
+		ctx = withObservationRound(ctx, ms)
+	}
 	pods, err := c.getPodsByIndex(RoleIDKey, fmt.Sprintf("%s/%s/%s/%s", ms.Namespace, groupName, roleName, roleID))
 	if err != nil {
 		return false, err
