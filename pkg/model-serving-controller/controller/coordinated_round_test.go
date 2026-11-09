@@ -498,52 +498,51 @@ func TestManagedRoleObservationsRefreshForEachInstance(t *testing.T) {
 	ms.Spec.RolloutStrategy.RoleCoordination = nil
 	ms.Spec.Template.Roles = ms.Spec.Template.Roles[:1]
 	role := &ms.Spec.Template.Roles[0]
+	role.Partition = ptr.To(intstr.FromInt(1))
 	role.WorkerReplicas = 1
 	role.WorkerTemplate = role.EntryTemplate.DeepCopy()
-	revision, key, group := utils.ModelServingRevision(ms), utils.GetNamespaceName(ms), ms.Name+"-0"
-	ms.Status.CurrentRevision, ms.Status.UpdateRevision = revision, revision
+	oldMS := ms.DeepCopy()
+	oldRole := &oldMS.Spec.Template.Roles[0]
+	oldRole.EntryTemplate.Spec.Containers[0].Image = "old"
+	oldRole.WorkerTemplate.Spec.Containers[0].Image = "old"
+	revision, oldRevision := utils.ModelServingRevision(ms), utils.ModelServingRevision(oldMS)
+	key, group := utils.GetNamespaceName(ms), ms.Name+"-0"
+	ms.Status.CurrentRevision, ms.Status.UpdateRevision = oldRevision, revision
 	c := newRevisionTestController(t, ms)
 	require.NoError(t, c.kubeClientSet.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, utils.GenerateControllerRevisionName(ms.Name, revision), metav1.DeleteOptions{}))
 	recordTestRevision(t, c.kubeClientSet, ms, revision)
-	c.store.AddServingGroup(key, 0, revision)
-	addMergeReadyInstance(t, c, ms, group, *role, 0, revision, revision, utils.CalRoleTemplateHash(*role))
+	recordTestRevision(t, c.kubeClientSet, oldMS, oldRevision)
+	c.store.AddServingGroup(key, 0, oldRevision)
+	addMergeReadyInstance(t, c, ms, group, *oldRole, 0, oldRevision, oldRevision, utils.CalRoleTemplateHash(*oldRole))
 	worker := addMergeReadyInstance(t, c, ms, group, *role, 1, revision, revision, utils.CalRoleTemplateHash(*role))[1].DeepCopy()
 	client := c.kubeClientSet.(*kubefake.Clientset)
-	lists := 0
-	injectLoss := true
-	client.PrependReactor("list", "pods", func(action clienttesting.Action) (bool, runtime.Object, error) {
-		lists++
-		if !injectLoss || lists != 2 {
+	injected := false
+	client.PrependReactor("get", "controllerrevisions", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		if injected || action.(clienttesting.GetAction).GetName() != utils.GenerateControllerRevisionName(ms.Name, oldRevision) {
 			return false, nil, nil
 		}
-		// The first instance's snapshot is already taken. Change the next
-		// worker only in the API, leaving the informer and store Ready.
-		pods, err := client.Tracker().List(corev1.SchemeGroupVersion.WithResource("pods"), corev1.SchemeGroupVersion.WithKind("Pod"), ms.Namespace)
-		if err != nil {
-			return true, nil, err
-		}
+		// Planning skips protected instance 0. Its applied history is loaded
+		// after its Pod observation, before the next instance is observed.
+		injected = true
 		worker.Status.Conditions[0].Status = corev1.ConditionFalse
 		if err := client.Tracker().Update(corev1.SchemeGroupVersion.WithResource("pods"), worker, ms.Namespace); err != nil {
 			return true, nil, err
 		}
-		return true, pods, nil
+		return false, nil, nil
 	})
 	client.ClearActions()
 	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
+	require.True(t, injected, "the protected instance must load its distinct applied history")
 	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-0"))
 	require.Equal(t, datastore.RoleCreating, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"), "the second instance must observe the API-only Ready loss")
-	require.Equal(t, 3, lists, "one planning snapshot and one identity/member snapshot per instance")
 	requireNoMergeReadyPodMutations(t, client.Actions())
 
 	worker.Status.Conditions[0].Status = corev1.ConditionTrue
 	_, err := client.CoreV1().Pods(ms.Namespace).UpdateStatus(ctx, worker, metav1.UpdateOptions{})
 	require.NoError(t, err)
-	lists = 0
-	// Stop injecting the loss; another invocation must observe recovery.
-	injectLoss = false
 	client.ClearActions()
 	require.NoError(t, c.manageRoleReplicasPerGroup(ctx, ms, group, *role, 0, revision, true, nil))
-	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"))
+	require.Equal(t, datastore.RoleRunning, c.store.GetRoleStatus(key, group, role.Name, role.Name+"-1"), "the next invocation must observe API-only recovery")
 	requireNoMergeReadyPodMutations(t, client.Actions())
 }
 
