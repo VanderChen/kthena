@@ -227,42 +227,59 @@ func validateMaxUnavailableForRoles(ms *workloadv1alpha1.ModelServing) field.Err
 // Both rollout granularities use the same defaults, rounding and capacity limits.
 func validateRolloutBudget(config workloadv1alpha1.RollingUpdateConfiguration, replicas int32, active bool, path *field.Path) field.ErrorList {
 	var allErrs field.ErrorList
-	resolved := [3]int{1, 0, 0}
-	names := [3]string{"maxUnavailable", "maxSurge", "partition"}
-	for i, value := range []*intstr.IntOrString{config.MaxUnavailable, config.MaxSurge, config.Partition} {
+	unavailable, surge := 1, 0
+	fields := []struct {
+		name         string
+		value        *intstr.IntOrString
+		roundUp      bool
+		allowOver100 bool
+		resolved     *int
+	}{
+		{name: "maxUnavailable", value: config.MaxUnavailable, resolved: &unavailable},
+		{name: "maxSurge", value: config.MaxSurge, roundUp: true, allowOver100: true, resolved: &surge},
+		{name: "partition", value: config.Partition, roundUp: true},
+	}
+	for _, setting := range fields {
+		value := setting.value
 		if value == nil {
 			continue
 		}
-		fieldPath := path.Child(names[i])
-		errs := validateIntOrPercent(value, fieldPath, i == 1)
+		fieldPath := path.Child(setting.name)
+		errs := validateIntOrPercent(value, fieldPath, intOrPercentOptions{allowOver100: setting.allowOver100})
 		allErrs = append(allErrs, errs...)
 		if len(errs) > 0 || !active || replicas < 0 {
 			continue
 		}
+		isSurge := setting.name == "maxSurge"
 		// Bound a percentage before scaling it: a valid integer percentage can
 		// still overflow int when multiplied by the replica count.
-		if i == 1 && value.Type == intstr.String && replicas > 0 {
+		if isSurge && value.Type == intstr.String && replicas > 0 {
 			percent, _ := strconv.ParseInt(strings.TrimSuffix(value.StrVal, "%"), 10, 64)
 			if percent > int64(math.MaxInt32-replicas)*100/int64(replicas) {
 				allErrs = append(allErrs, field.Invalid(fieldPath, value, "replicas + maxSurge cannot exceed 2147483647"))
 				continue
 			}
 		}
-		count, err := intstr.GetScaledValueFromIntOrPercent(value, int(replicas), i != 0)
+		count, err := intstr.GetScaledValueFromIntOrPercent(value, int(replicas), setting.roundUp)
 		if err != nil {
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, err.Error()))
 			continue
 		}
-		resolved[i] = count
-		if i == 1 {
+		if setting.resolved != nil {
+			*setting.resolved = count
+		}
+		if isSurge {
 			if count > math.MaxInt32-int(replicas) {
 				allErrs = append(allErrs, field.Invalid(fieldPath, value, "replicas + maxSurge cannot exceed 2147483647"))
 			}
-		} else if count > int(replicas) && !(i == 0 && replicas == 0 && value.Type == intstr.Int && count == 1) {
-			allErrs = append(allErrs, field.Invalid(fieldPath, value, fmt.Sprintf("%s cannot be greater than replicas (%d)", names[i], replicas)))
+			continue
+		}
+		defaultUnavailableAtZero := setting.name == "maxUnavailable" && replicas == 0 && value.Type == intstr.Int && count == 1
+		if count > int(replicas) && !defaultUnavailableAtZero {
+			allErrs = append(allErrs, field.Invalid(fieldPath, value, fmt.Sprintf("%s cannot be greater than replicas (%d)", setting.name, replicas)))
 		}
 	}
-	if active && replicas >= 0 && len(allErrs) == 0 && resolved[0] == 0 && resolved[1] == 0 {
+	if active && replicas >= 0 && len(allErrs) == 0 && unavailable == 0 && surge == 0 {
 		allErrs = append(allErrs, field.Invalid(path, "", "maxUnavailable and maxSurge cannot both resolve to 0"))
 	}
 	return allErrs
@@ -382,7 +399,11 @@ func validateWorkerReplicas(ms *workloadv1alpha1.ModelServing) field.ErrorList {
 	return allErrs
 }
 
-func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path, allowOver100 bool) field.ErrorList {
+type intOrPercentOptions struct {
+	allowOver100 bool
+}
+
+func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path, options intOrPercentOptions) field.ErrorList {
 	allErrs := field.ErrorList{}
 	if value == nil {
 		return allErrs
@@ -398,9 +419,9 @@ func validateIntOrPercent(value *intstr.IntOrString, fieldPath *field.Path, allo
 		// Strip trailing '%' and parse; IsValidPercent already ensures the format is valid.
 		percentStr := strings.TrimSuffix(value.StrVal, "%")
 		percent, err := strconv.Atoi(percentStr)
-		if err != nil || percent < 0 || (!allowOver100 && percent > 100) {
+		if err != nil || percent < 0 || (!options.allowOver100 && percent > 100) {
 			message := "must be a valid percent value (0-100)"
-			if allowOver100 {
+			if options.allowOver100 {
 				message = "must be a non-negative integer percent"
 			}
 			allErrs = append(allErrs, field.Invalid(fieldPath, value, message))
@@ -560,7 +581,7 @@ func validateServingGroupMinAvailable(ms *workloadv1alpha1.ModelServing, minAvai
 		return append(allErrs, field.Required(fldPath, "minAvailable is required when evictionStrategy.protectionLevel is ServingGroup"))
 	}
 
-	allErrs = append(allErrs, validateIntOrPercent(minAvailable, fldPath, false)...)
+	allErrs = append(allErrs, validateIntOrPercent(minAvailable, fldPath, intOrPercentOptions{})...)
 	if len(allErrs) > 0 || ms.Spec.Replicas == nil || *ms.Spec.Replicas < 0 {
 		return allErrs
 	}
@@ -603,7 +624,7 @@ func validateRoleMinAvailable(ms *workloadv1alpha1.ModelServing, roleMinAvailabl
 		}
 
 		before := len(allErrs)
-		allErrs = append(allErrs, validateIntOrPercent(&minAvailable, rolePath, false)...)
+		allErrs = append(allErrs, validateIntOrPercent(&minAvailable, rolePath, intOrPercentOptions{})...)
 		if len(allErrs) > before {
 			continue
 		}
