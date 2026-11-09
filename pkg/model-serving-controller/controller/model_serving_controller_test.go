@@ -4306,8 +4306,8 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 	assert.Equal(t, int32(3), updated.Status.Replicas)
 	assert.Equal(t, int32(3), updated.Status.AvailableReplicas)
 	assert.Equal(t, int32(3), updated.Status.UpdatedReplicas)
-	assert.Equal(t, int32(3), updated.Status.CurrentReplicas)
-	assert.Equal(t, "new-revision", updated.Status.CurrentRevision)
+	assert.Zero(t, updated.Status.CurrentReplicas)
+	assert.Equal(t, "old-revision", updated.Status.CurrentRevision, "temporary capacity must drain before the baseline advances")
 	assert.Equal(t, "new-revision", updated.Status.UpdateRevision)
 	require.NotEmpty(t, updated.Status.Conditions)
 	assert.Equal(t, string(workloadv1alpha1.ModelServingProgressing), updated.Status.Conditions[len(updated.Status.Conditions)-1].Type)
@@ -4430,11 +4430,11 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				1: "revision-v2",
 				2: "revision-v2",
 			},
-			statusCurrentRevision:   "revision-v1", // Invalid, not used by any group
+			statusCurrentRevision:   "revision-v1", // Completed baseline no longer used by a live group.
 			newRevision:             "revision-v2",
 			expectedCurrentRevision: "revision-v2", // Should equal UpdateRevision when all updated
 			expectedUpdateRevision:  "revision-v2",
-			description:             "When all groups are updated, CurrentRevision should equal UpdateRevision (invalid CurrentRevision should be recomputed)",
+			description:             "Complete Ready target capacity advances the prior completed baseline",
 		},
 		{
 			name: "multiple old revisions, should use most common",
@@ -4476,6 +4476,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace: "default",
 					Name:      msName,
+					UID:       types.UID(msName + "-owner"),
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To(int32(len(tt.existingGroups))),
@@ -4513,11 +4514,15 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 			err = controller.modelServingsInformer.GetIndexer().Add(ms)
 			assert.NoError(t, err)
 
+			_, err = utils.CreateControllerRevision(context.Background(), kubeClient, ms, tt.newRevision, ms.Spec.Template.Roles)
+			require.NoError(t, err)
 			// Create servingGroups with specified revisions
 			for ordinal, revision := range tt.existingGroups {
 				controller.store.AddServingGroup(utils.GetNamespaceName(ms), ordinal, revision)
 				// Mark groups as Running to simulate real scenario
 				groupName := utils.GenerateServingGroupName(msName, ordinal)
+				role := ms.Spec.Template.Roles[0]
+				addMergeReadyInstance(t, controller, ms, groupName, role, 0, revision, revision, utils.CalRoleTemplateHash(role))
 				controller.store.UpdateServingGroupStatus(utils.GetNamespaceName(ms), groupName, datastore.ServingGroupRunning)
 			}
 
