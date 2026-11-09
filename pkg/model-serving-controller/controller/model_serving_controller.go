@@ -2624,6 +2624,7 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		// Track revision counts to determine the most common non-updated revision (CurrentRevision)
 		revisionCount := make(map[string]int)
 		referencedRevisions := make([]string, 0, len(groups))
+		roleCountsComplete := true
 		rolloutActive := c.hasUpdateableOutdatedServingGroup(ctx, latestMS, groups, revision, partition)
 		for index := range groups {
 			group := groups[index]
@@ -2635,6 +2636,11 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 			roles, err := c.store.GetRolesByGroup(utils.GetNamespaceName(latestMS), group.Name)
 			if err != nil {
 				return fmt.Errorf("collect Role revision references for %s: %w", group.Name, err)
+			}
+			for _, desired := range latestMS.Spec.Template.Roles {
+				if len(roles[desired.Name]) != roleReplicas(desired) {
+					roleCountsComplete = false
+				}
 			}
 			for _, instances := range roles {
 				for _, role := range instances {
@@ -2692,33 +2698,15 @@ func (c *ModelServingController) updateModelServingStatusInRound(ctx context.Con
 		coordinationConditionChanged, coordinationCondition := rolloutPolicy.setCondition(copy)
 		shouldUpdate = shouldUpdate || coordinationConditionChanged
 
-		// Update revision fields following StatefulSet's logic:
-		// 1. UpdateRevision is always the new revision being applied
-		// 2. CurrentRevision is read from Status.CurrentRevision if it exists and is still valid
-		// 3. If Status.CurrentRevision doesn't exist or is invalid, compute from current groups
-		// 4. When all groups are updated, CurrentRevision = UpdateRevision
+		// A replacement gap must not discard the baseline used by protected slots.
 		updateRevision := revision
 		var currentRevision string
-		rolloutComplete := updated == replicas && available == replicas && len(groups) == replicas
+		rolloutComplete := roleCountsComplete && updated == replicas && available == replicas && len(groups) == replicas
 
-		// First, try to use existing CurrentRevision from status if it's still valid
 		if copy.Status.CurrentRevision != "" {
-			// Check if CurrentRevision is still valid (exists in non-updated groups)
-			if len(revisionCount) > 0 {
-				// Check if the existing CurrentRevision is still used by some groups
-				if count, exists := revisionCount[copy.Status.CurrentRevision]; exists && count > 0 {
-					currentRevision = copy.Status.CurrentRevision
-				}
-			}
-			// Promote only after every desired ServingGroup is updated and ready
-			// and temporary capacity has been fully removed.
+			currentRevision = copy.Status.CurrentRevision
 			if rolloutComplete {
 				currentRevision = updateRevision
-			} else if currentRevision == "" && rolloutActive {
-				// Desired replicas may all be updated while temporary capacity is
-				// still draining. Keep the previous CurrentRevision until the total
-				// ServingGroup count has converged.
-				currentRevision = copy.Status.CurrentRevision
 			}
 		}
 
