@@ -94,6 +94,9 @@ func TestCoordinatedHistoryFormatsAndOwnerIdentity(t *testing.T) {
 					require.ErrorContains(t, readErr, "is not controlled by ModelServing")
 					require.ErrorContains(t, persistErr, "is not controlled by ModelServing")
 					for _, action := range client.Actions() {
+						if action.GetResource().Resource == "events" {
+							continue // Diagnostic Events are delivered asynchronously.
+						}
 						require.Equal(t, "get", action.GetVerb(), "foreign history must have no metadata or workload writes")
 					}
 				}
