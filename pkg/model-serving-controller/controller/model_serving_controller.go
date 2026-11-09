@@ -1393,9 +1393,10 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			return err
 		}
 	}
+	liveRoleMode := ms.ResourceVersion != "" && ms.Spec.RolloutStrategy != nil && ms.Spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
 	for _, roleObj := range roleList {
 		roleCtx := ctx
-		if roleCoordination(ms) != nil {
+		if liveRoleMode {
 			live, _, err := c.coordinatedLiveRole(ctx, ms, groupName, targetRole.Name, roleObj)
 			if err != nil {
 				return err
@@ -1411,7 +1412,7 @@ func (c *ModelServingController) manageRoleReplicasPerGroup(
 			klog.Warningf("manageRoleReplicasPerGroup: failed to list pods for role %s/%s in ServingGroup %s: %v", targetRole.Name, roleObj.Name, groupName, err)
 			continue
 		}
-		if roleCoordination(ms) != nil && ms.ResourceVersion != "" {
+		if liveRoleMode {
 			pods, err = c.coordinatedPods(ctx, ms, labels.Set{workloadv1alpha1.GroupNameLabelKey: groupName, workloadv1alpha1.RoleLabelKey: targetRole.Name, workloadv1alpha1.RoleIDKey: roleObj.Name}.AsSelector())
 			if err != nil {
 				return err

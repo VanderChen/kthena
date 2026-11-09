@@ -63,7 +63,7 @@ func (c *ModelServingController) coordinatedLiveRole(ctx context.Context, ms *ap
 }
 
 func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx context.Context, ms *api.ModelServing) error {
-	if roleCoordination(ms) == nil || ms.ResourceVersion == "" {
+	if ms.ResourceVersion == "" || ms.Spec.RolloutStrategy == nil || ms.Spec.RolloutStrategy.Type != api.RoleRollingUpdate {
 		return nil
 	}
 	groups, err := c.store.GetServingGroupByModelServing(utils.GetNamespaceName(ms))
@@ -88,7 +88,12 @@ func (c *ModelServingController) refreshCoordinatedAvailabilityInRound(ctx conte
 				}
 				ready, err := c.checkRoleReadyInRound(ctx, ms, group.Name, name, instance.Name)
 				if err != nil {
-					return err
+					if roleCoordination(ms) != nil || !onlyRevisionErrors(err) {
+						return err
+					}
+					// An independent unit's unknown history must not block explicit
+					// shrink or other Roles. Retain its unavailable state and retry.
+					c.revisionHistory(ctx, ms).recordComparisonError(group.Name+"/"+instance.Name, err)
 				}
 				status := datastore.RoleCreating
 				if ready {
