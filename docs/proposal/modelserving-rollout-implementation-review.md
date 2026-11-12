@@ -4,7 +4,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 状态 | 草案，待评审。本文只记录检视结论，没有修改任何代码 |
+| 状态 | 草案。行为规范的 D1（转正并清除标记）、D2（目前保持占用）、D3（立即应用）已由维护者在 2026-11-12 决定，本文按这三项对照。本文只记录检视结论，没有修改任何代码 |
 | 检视对象 | `volcano-sh/kthena` `main` @ `b4e536bb`，`pkg/model-serving-controller/` 下的 controller、datastore、utils，以及 webhook 中与滚动预算有关的部分。plugin 的实现不在范围内 |
 | 对照的规范 | 现规范：`kthena-rollout-runner` `main` @ `3929bf5` 的契约 2.7。修订规则：[行为规范修订草案](modelserving-rollout-behavior-spec.md)的 R1～R38 |
 | 配套文档 | [状态设计](modelserving-rollout-state-design.md) |
@@ -39,8 +39,8 @@
 | 标注 | 含义 |
 | --- | --- |
 | 两者 | 现规范和修订规则都不允许这个行为 |
-| 仅修订 | 符合现规范，只和修订规则不同。采纳修订规则才需要改 |
-| 分歧 | 实现是有意这样做的，和规范的口径不同，需要先定口径 |
+| 分歧 | 实现是有意这样做的，和规范的口径不同。口径已经定下来的，在意见里写明 |
+| 符合 | 只用在 ORD-3 上：它记录的是一处符合规范的行为，不是缺陷 |
 | 缺口 | 规范没有覆盖，或规范自己有问题 |
 
 文中的代码位置沿用状态设计文档的缩写：`msc.go`、`surge.go`、`obs.go`、`coord.go`、`ipu.go`、`aux.go`、`store.go`，都在 `pkg/model-serving-controller/` 下。
@@ -51,15 +51,15 @@
 
 问题集中在五处。
 
-1. **SG 模式的预算只有一个额度。** 它没有「删除健康单元后 Ready 不得低于底线」这一道检查，受 partition 保护的 NotReady 组也不计入不可用。两个探针里 Ready 都被滚动压到了 `N − U` 以下（BG-1、BG-2）。其中 BG-1 是有意的设计，有单测断言，需要先定口径。
+1. **SG 模式的预算只有一个额度。** 它没有「删除健康单元后 Ready 不得低于底线」这一道检查，受 partition 保护的 NotReady 组也不计入不可用。两个探针里 Ready 都被滚动压到了 `N − U` 以下（BG-1、BG-2）。其中 BG-1 是有意的设计，有单测断言。D2 已定为目前保持占用，按这个口径它需要改。
 2. **阶段没有显式表达，组合场景因此出错。** 缩容没结束就开始替换（BG-3）；稀疏布局下 surge 容量落进低位洞，滚动结束后空洞从高位移到了 0 号（ORD-1）；滚动途中缩容先删 surge（ORD-2）。
 3. **基线版本推进得太早。** 缩容删掉全部旧版本单元后，基线被推进到还没全量完成的目标版本，之后受保护的槽位按新版本重建（VER-1）。
 4. **协调模式有四个会走偏或卡住的路径**（CO-1～CO-4）。CO-1、CO-2、CO-4 有探针。CO-3 是规范自己的缺口，结论来自对限额函数的推演，没有在完整的 reconcile 路径上复现。
 5. **故障恢复和 InPlace 依赖进程内状态和特定事件**，重启、配置变更、事件乱序时会出错。REC-1～REC-3 是走读结论，IP-1～IP-3 有探针；REC-4、REC-5 走读认为成立，还没有验证。
 
-35 个组合场景的结果取决于 D1。按行为规范建议的口径（转正），当前实现有 26 个符合、7 个部分符合、2 个不符合（SG-C12、SG-P09）。按草案正文的 R3（不转正），是 23 个符合、7 个部分符合、5 个不符合：多出来的 3 个是 SG-C03、SG-P08、SG-P10，它们符合现规范。逐场景的结果见 [2.2](#22-场景对照)，都是单元级探针的结论。
+35 个组合场景里，当前实现有 26 个符合修订规则，7 个部分符合，2 个不符合（SG-C12、SG-P09）。逐场景的结果见 [2.2](#22-场景对照)，都是单元级探针的结论。
 
-带严重度的意见共 49 条：P0 2 条，P1 18 条，P2 16 条，P3 13 条。另有 2 条不定级（ORD-3 只与修订规则不同，CO-5 是规范没有覆盖的地方），以及 4 条关于测试的意见。
+带严重度的意见共 49 条：P0 2 条，P1 18 条，P2 16 条，P3 13 条。另有 2 条不定级（ORD-3 记录的是一处符合规范的行为，CO-5 是规范没有覆盖的地方），以及 4 条关于测试的意见。
 
 建议的处理顺序见[第 5 节](#5-建议的整改顺序)。
 
@@ -73,7 +73,7 @@
 | --- | --- | --- | --- | --- | --- |
 | R1 | 正式单元取 `[0, N)` 最低空闲序号 | 部分 | 部分 | 符合 | ORD-1 |
 | R2 | surge 只建在 ≥ N 并带标记 | 部分 | 部分 | 符合 | ORD-1 |
-| R3 | surge 不转正 | 不符合 | 不符合 | 不符合 | ORD-3（仅修订） |
+| R3 | 被 N 覆盖的 surge 清除标记并转正 | 符合 | 符合 | 符合 | ORD-3（符合） |
 | R4 | 只有显式缩容产生空洞 | 不符合 | 不符合 | 符合 | ORD-1、ORD-4 |
 | R5 | 不为整理序号重建健康单元 | 符合 | 符合 | 符合 | — |
 | R6 | 基数、取整、拒绝 U 和 S 同时为 0 | 部分 | 部分 | 部分 | BG-5、EV-3。取整符合；全部受保护时拒绝，零副本时不检查；运行中解析成双零时不报告 |
@@ -114,7 +114,7 @@
 | SG-S05、S06、S07 | 无 | 符合 | — |
 | SG-C01 | 无 | 符合 | — |
 | SG-C02 | 缩容对象 `sg-2` 和滚动对象 `sg-1` 在同一轮进入删除。Ready 降到 1，等于底线 | 部分符合 | BG-3 |
-| SG-C03 | `sg-3` 转正，标记被清除，UID 不变，5 次创建、4 次删除。与现规范相同 | 不转正时不符合；转正时符合 | ORD-3 |
+| SG-C03 | `sg-3` 转正，标记被清除，UID 不变，5 次创建、4 次删除。与现规范相同 | 符合 | ORD-3 |
 | SG-C04 | 无 | 符合 | — |
 | SG-C05 | 新版本到来的那一轮就删 `sg-2`，此时 `sg-3`、`sg-4` 还在删除 | 部分符合 | BG-3 |
 | SG-C06 | 无 | 符合 | — |
@@ -129,18 +129,13 @@
 | SG-P04 | 无 | 符合 | — |
 | SG-P05 | `sg-3`、`sg-4` 还在删除时就删 `sg-2` | 部分符合 | BG-3 |
 | SG-P06、P07 | 无 | 符合 | — |
-| SG-P08 | `sg-3` 转正，只建 `sg-4`，1 次创建。与现规范相同 | 不转正时不符合；转正时符合 | ORD-3 |
+| SG-P08 | `sg-3` 转正，只建 `sg-4`，1 次创建。与现规范相同 | 符合 | ORD-3 |
 | SG-P09 | 删除健康的 `sg-2`，Ready 降到 1，底线是 2 | **不符合** | BG-1 |
-| SG-P10 | `sg-3` 转正，3 次创建、3 次删除。与现规范相同 | 不转正时不符合；转正时符合 | ORD-3 |
+| SG-P10 | `sg-3` 转正，3 次创建、3 次删除。与现规范相同 | 符合 | ORD-3 |
 | SG-P11 | 无。停点的 `currentRevision`、`updatedReplicas` 也一致 | 符合 | — |
 | SG-R01 | 无。一轮里三个组同时增员，`availableReplicas` 从 3 降到 0；受保护的组用旧模板。这与现规范不同，与修订规则 R22 相同 | 符合 | — |
 
-合计：
-
-| D1 | 符合 | 部分符合 | 不符合 |
-| --- | --- | --- | --- |
-| 转正 | 26 | 7 | 2 |
-| 不转正 | 23 | 7 | 5 |
+合计：26 个符合，7 个部分符合，2 个不符合。
 
 Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏布局的探针（ORD-1），协调模式的 surge 走的是另一段代码，没有覆盖。
 
@@ -148,7 +143,7 @@ Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏
 
 ### 3.1 预算与可用性
 
-#### BG-1 SG 模式下受保护的 NotReady 组不占预算，健康删除没有底线检查（P0，分歧）
+#### BG-1 SG 模式下受保护的 NotReady 组不占预算，健康删除没有底线检查（P0，分歧，D2 已定为保持占用）
 
 - **位置**：`msc.go:1765-1783`（不可用计数）、`msc.go:1822-1827`（额度）、`msc.go:1858-1878`（删除循环）。
 - **现象**：`maxScaleDown = 组数 − (N − U) − unavailable`。受保护的组只有在「非 Running 且模板未知」时才计入 `unavailable`；非 Running 但历史已知的受保护组不计。删除循环只看 `maxScaleDown`，没有 `Running 数 − minAvailable` 这道上限。
@@ -159,8 +154,8 @@ Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏
   - 开发者文档写的是 `N_available ≥ replicas − maxUnavailable`（`docs/kthena/docs/developer-guide/model-serving-rolling-update.md`），实现不满足自己的文档。
   - 实现内部不一致。这个函数调用的 surge 回收函数里专门取了 `min(budget, Running 数 − minAvailable)`，注释写着「The budget does not see unready groups protected by partition」（`surge.go:209-216`）；Role 模式的预算有健康额度（`obs.go:112-127`）。只有 SG 模式删旧组这一条路径没有。
   - 重启收敛用例 RC-01、RC-02 预计因此不通过：低位受保护组补齐之前，高位健康组就会被滚动，Ready 从 1 降到 0（走读推演，未在 Kind 上验证）。
-- **口径**：这是行为规范的待决策项 D2。Kubernetes StatefulSet 主干最近也改成了不计 partition 以下的不可用 Pod，但它同时把预算基数改成了 `replicas − partition`。当前实现只做了前一半。
-- **建议**：先定 D2。如果维持「占用」，在删除循环里加健康额度 `Running 数 − minAvailable`，和 Role 模式、surge 回收保持一致，并改写上面那条单测。如果改为「不占用」，需要把基数换成滚动区的单元数，并处理 BG-2。
+- **口径**：这是行为规范的 D2，已定为目前保持占用，所以这一条按缺陷处理。Kubernetes StatefulSet 在 2026-10-30 改成了不计 partition 以下的不可用 Pod（[kubernetes/kubernetes#143042](https://github.com/kubernetes/kubernetes/issues/143042)、[#143114](https://github.com/kubernetes/kubernetes/pull/143114)，里程碑 v1.38），同时把百分比的基数改成了 `replicas − partition`。当前实现只做了前一半，基数仍是 N，所以它和上游改完之后的做法也不一样。上游的理由和以后重新评估的条件记在行为规范 D2 里。
+- **建议**：在删除循环里加健康额度 `Running 数 − minAvailable`，和 Role 模式、surge 回收保持一致；改写上面那条单测。受保护的 NotReady 组因此占用健康删除额度。它仍然不计入 `unavailable`，滚动区里 NotReady 的旧单元可以照常在 `maxScaleDown` 内替换（现规范 RU-B06：`maxScaleDown=1`、`maxHealthyScaleDown=0`）。保护区的故障会因此卡住灰度，要同时给出看得见的阻塞原因（EV-3）。
 
 #### BG-2 受保护的组被缩容选中后，预算多算一个（P0，两者）
 
@@ -226,12 +221,12 @@ Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏
 - **探针**（`TestProbe005_C12_ScaleDownWithSurge`）：N 从 4 缩到 3，U=0，S=1，sg-0～3 旧版本 Running，sg-4 是带标记的新版本 Running。数量同步删的是 sg-4。
 - **规范**：R20；现规范 SG-C12 期望删 sg-3，保留已经 Ready 的 surge。
 - **影响**：只是浪费。完整的一轮里 `sg-4` 被缩容选中、`sg-3` 被滚动选中，Ready 从 5 降到 3（等于底线，没有突破）；之后在 3 号新建一个 surge，终态仍是 `{0, 1, 2}`，多一次创建和一次删除（`TestProbe005BR_C12`）。开发者文档写明了「may remove a surge group」。
-- **建议**：缩容只在不带标记的单元里选。
+- **建议**：缩容只在正式单元里选。
 
-#### ORD-3 N 扩大覆盖 surge 时清除标记并转正（不算缺陷，仅修订）
+#### ORD-3 N 扩大覆盖 surge 时清除标记并转正（符合，不是缺陷）
 
 - **位置**：`surge.go:135-186`；Role 模式 `surge.go:150-162`、`obs.go:251-273`。
-- 这符合现规范的 SG-C03、SG-P08、SG-P10。LWS、RBG 读代码也是保留被 N 覆盖的 surge，没有找到文档或测试说明。修订规则的草案 R3 写的是不转正，这是待决策项 D1；行为规范里给的建议是保持转正并清除标记，也就是当前实现的做法。只有 D1 最终选择不转正才需要改。
+- 这符合修订规则 R3（D1 已定为转正并清除标记），也符合现规范的 SG-C03、SG-P08、SG-P10。LWS、RBG 读代码也是保留被 N 覆盖的 surge，没有找到文档或测试说明。这里记一笔，是因为它是 D1 比较过的三种做法之一，不需要改。
 - 探针 `TestProbe005BR_X6_ScaleDownAfterPromotion` 是当前实现的对照：N 扩大覆盖 surge 之后再缩容、另有一个故障单元时，当前实现删的是故障单元，转正过的单元保留。如果转正时不清除标记，这里会删错对象，这一点来自参考模型的「转正但保留标记」变体，不是探针，见行为规范 D1。
 
 #### ORD-4 surge 单元的 Pod 被重建后不带标记（P2，两者）
@@ -522,7 +517,7 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 
 | 编号 | 问题 |
 | --- | --- |
-| TS-1 | 有现有单测断言了与规范不符的行为。改代码时需要一起改：`TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups`（BG-1）、`TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry`（REC-7）、`TestSurgeDisabledWhileUpdatingInPlace`（IP-5，取决于 D6）；如果 D1 选择不转正，还有 `TestScaleUpAdoptsSurge`、`TestScaleUpDuringRolloutCreatesNewSurge`、`TestAdoptionFailureDoesNotBlockScaleUp` |
+| TS-1 | 有现有单测断言了与规范不符的行为。改代码时需要一起改：`TestServingGroupRollingUpdateIgnoresUnavailableProtectedGroups`（BG-1）、`TestReplacementPodIsPreservedAndDiagnosedDuringCleanupRetry`（REC-7）、`TestSurgeDisabledWhileUpdatingInPlace`（IP-5，取决于 D6） |
 | TS-2 | 协调器的主要单测不走生产分支（CO-7） |
 | TS-3 | 没有组合场景层面的单测。`surge_rollout_test.go` 的 `TestServingGroupRolloutRestoresOrdinals` 覆盖了从 `[0, N)` 和三种稀疏布局出发的 surge 滚动，并断言了终态序号；但稀疏用例里范围外的单元都是旧版本，会被替换掉。没有「范围外的单元已经是目标版本」的用例，所以 ORD-1 没有被发现。缩容与滚动交错、受保护单元 NotReady、滚动途中缩容都没有用例 |
 | TS-4 | 35 个组合场景在 main 上没有在 Kind 上跑过。已有的 Kind 结果来自 release-1.1（6 个简单组合用例）和 PR #2016 合入前后的提交（基础矩阵），与 `b4e536bb` 都不是同一个 commit。建议先在 `b4e536bb` 上跑一遍 RUN-618～652，把 2.2 的探针结论换成 Kind 证据。按探针推断，RUN-636（SG-C12）和 RUN-649（SG-P09）不会通过 |
@@ -547,11 +542,11 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 
 ## 5. 建议的整改顺序
 
-下表按建议的先后排列。最后一列是它对应[状态设计第 6 节](modelserving-rollout-state-design.md#6-迁移路径)迁移路径里的哪一步。第 2、3、4、6 组都是在现有结构里做的局部修改，合起来是迁移路径的步骤 1，彼此之间没有依赖；第 2 组要等 D2 定下来。
+下表按建议的先后排列。最后一列是它对应[状态设计第 6 节](modelserving-rollout-state-design.md#6-迁移路径)迁移路径里的哪一步。第 2、3、4、6 组都是在现有结构里做的局部修改，合起来是迁移路径的步骤 1，彼此之间没有依赖。D2 已经定下来，第 2 组可以开始。
 
 | 顺序 | 内容 | 意见 | 前置 | 迁移步骤 |
 | --- | --- | --- | --- | --- |
-| 1 | 定口径：D2（受保护单元的故障是否占预算）、D1（surge 是否转正） | BG-1、ORD-3 | 维护者决定 | — |
+| 1 | 口径已定（2026-11-12）：D2 目前保持占用，BG-1 按缺陷改；D1 转正并清除标记，当前实现已经符合，不用改 | BG-1、ORD-3 | 已完成 | — |
 | 2 | SG 模式补健康额度；缩容没结束不替换；基线只在 P 为 0 时推进 | BG-1、BG-2、BG-3、VER-1 | 1 | 1 |
 | 3 | 正式单元和 surge 分开创建；缩容只选正式单元；缩容前先刷新状态；重建的 Pod 继承标记；Role 模式新建组按 Role 的 partition 选版本 | ORD-1、ORD-2、ORD-4、ORD-5、ORD-6 | — | 1 |
 | 4 | 协调：按实例实际版本判断是否有工作；依赖门控不看无关的删除。`maxSkew` 走不通的配置另行立项 | CO-1、CO-2、CO-4；CO-3 | CO-3 要等 D7、D8 | 1；CO-3 不在迁移路径里 |
