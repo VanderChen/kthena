@@ -10,6 +10,8 @@
 | 配套文档 | [状态设计](modelserving-rollout-state-design.md) |
 | 复评基线 | 2026-11-14 复核 `28c98eb8` 的评审意见。控制器仍取 `b4e536bb`。正文中的「现规范」指原审使用的 runner 2.7，落地建议另按工作区规范 2.12 核对，见[复评补充](#复评补充) |
 
+**2026-11-14 终稿说明。** 第二轮的结论在 [`modelserving-rollout-final/`](modelserving-rollout-final/README.md)。「复评补充」一节的逐项复核和需要更正的陈述见[复评结论](modelserving-rollout-final/01-rereview-disposition.md)；新增的 8 条意见（PL-1～PL-8）、改判的几条和更新后的统计（57 条）见 [Pod 状态入口的检视](modelserving-rollout-final/02-pod-state-entry-review.md)；第 5 节的整改顺序由[重构方案](modelserving-rollout-final/05-refactoring-plan.md)取代。第 2～4 节的意见明细仍然有效。
+
 ### 0.1 方法
 
 白盒走读，加单元级探针。走读分四块：ServingGroup 路径与事件队列；Role 路径与 roleCoordination；InPlace；故障恢复、重启与 revision 历史。后三块由 subagent 完成。另有一个 subagent 把 35 个组合场景逐个在真实的 `syncModelServing` 上跑了一遍（47 个探针）。报告都在任务目录 `issues/features/005-modelserving-rollout-spec-state-review-IP/subagents/` 下。

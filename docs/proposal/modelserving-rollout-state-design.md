@@ -24,6 +24,8 @@
 
 第 3 节是从代码读出来的现状，不是设计意图。第 4 节是按修订规则给出的目标设计，还没有实现。
 
+**2026-11-14 终稿说明。** 第 4、5 节由[状态机改进方案](modelserving-rollout-final/04-state-machine.md)取代，第 6 节由[重构方案](modelserving-rollout-final/05-refactoring-plan.md)取代。第 3 节（当前状态机）仍然有效，从 Pod 状态变化看到的现状补充在 [Pod 状态入口的检视](modelserving-rollout-final/02-pod-state-entry-review.md)。文中引用的契约 2.12 不在工作区里，见[复评结论](modelserving-rollout-final/01-rereview-disposition.md)。
+
 ## 1. 结论
 
 **当前实现**是事件驱动和水平触发的混合体。
