@@ -8,6 +8,7 @@
 | 检视对象 | `volcano-sh/kthena` `main` @ `b4e536bb`，`pkg/model-serving-controller/` 下的 controller、datastore、utils，以及 webhook 中与滚动预算有关的部分。plugin 的实现不在范围内 |
 | 对照的规范 | 现规范：`kthena-rollout-runner` `main` @ `3929bf5` 的契约 2.7。修订规则：[行为规范修订草案](modelserving-rollout-behavior-spec.md)的 R1～R38 |
 | 配套文档 | [状态设计](modelserving-rollout-state-design.md) |
+| 复评基线 | 2026-11-14 复核 `28c98eb8` 的评审意见。控制器仍取 `b4e536bb`。正文中的「现规范」指原审使用的 runner 2.7，落地建议另按工作区规范 2.12 核对，见[复评补充](#复评补充) |
 
 ### 0.1 方法
 
@@ -40,7 +41,7 @@
 | --- | --- |
 | 两者 | 现规范和修订规则都不允许这个行为 |
 | 分歧 | 实现是有意这样做的，和规范的口径不同。口径已经定下来的，在意见里写明 |
-| 符合 | 只用在 ORD-3 上：它记录的是一处符合规范的行为，不是缺陷 |
+| 符合 | ORD-3 的正常转正路径符合 D1，清标后立即缩容的时序另见复评补充 |
 | 缺口 | 规范没有覆盖，或规范自己有问题 |
 
 文中的代码位置沿用状态设计文档的缩写：`msc.go`、`surge.go`、`obs.go`、`coord.go`、`ipu.go`、`aux.go`、`store.go`，都在 `pkg/model-serving-controller/` 下。
@@ -59,9 +60,26 @@
 
 35 个组合场景里，当前实现有 26 个符合修订规则，7 个部分符合，2 个不符合（SG-C12、SG-P09）。逐场景的结果见 [2.2](#22-场景对照)，都是单元级探针的结论。
 
-带严重度的意见共 49 条：P0 2 条，P1 18 条，P2 16 条，P3 13 条。另有 2 条不定级（ORD-3 记录的是一处符合规范的行为，CO-5 是规范没有覆盖的地方），以及 4 条关于测试的意见。
+原审带严重度的意见共 49 条：P0 2 条，P1 18 条，P2 16 条，P3 13 条。另有 ORD-3、CO-5 两条未定级和四条测试意见。上述数字保留原审口径。
 
 建议的处理顺序见[第 5 节](#5-建议的整改顺序)。
+
+### 复评补充
+
+**统一动作入口。** 建议按 ModelServing key 让同一个 reconcile worker 决定创建、删除、InPlace PATCH 和 status 更新。当前 Pod 回调能直接启动恢复删除，grace goroutine 到期也能直接删 Pod。同一个 Role 因而可能一边被 worker 补建，一边被迟到的删除回调选作恢复对象。回调应保留这次删除的 Pod UID、owner UID、所属组和实例，并入队。worker 再根据最新 spec、实际成员和已有删除标记判断恢复范围。这样，同名新 UID 出现后，旧事件仍可识别；连续运行期间真正的外部删除也保留了触发整组或整实例恢复所需的信息。[现有事件与删除路径](../../pkg/model-serving-controller/controller/model_serving_controller.go)
+
+**计划给出候选，执行时复核动作。** 例如，计划选中了 `prefill-1`，发出 DELETE 或原地更新 PATCH 前，依赖的 worker 或同 Role 的兄弟实例失去 Ready，或者候选被同名目标 UID 替代。执行者须用当下的身份、依赖及剩余预算重新判断，撤销已失效的动作。协调模式还要从完整候选集合取合法的高序号前缀。若健康额度为零、最高位健康而低位故障，协调 Role 等待，独立 Role 可以在总额度内先修低位。回收旧 surge 也须确认旧调用方仍有必要的旧依赖。现有测试已覆盖这些区别，优化 CO-8 的重复读取时应保留这些断言。[动作前事实变化测试](../../pkg/model-serving-controller/controller/coordinated_round_test.go) · [候选顺序和依赖保留测试](../../pkg/model-serving-controller/controller/role_rolling_update_coordinator_test.go)
+
+| 意见 | 为什么需要补充 | 实现或回归应检查什么 |
+| --- | --- | --- |
+| D1 / ORD-3、ORD-4：转正与回收 | fake client 探针中 `N: 3→4→3`、`U=1`，正式组 `sg-1` 故障。两次实验里 API 都已清掉健康 `sg-3` 的 surge 标记。缩容前交付清标更新时，进入 Deleting 的是 `sg-1`；仅延迟这条更新，进入 Deleting 的就变成 `sg-3`。两者都在预算内，保留的 UID 却不同 | 回收前确认该 UID 仍有本层临时来源，覆盖多成员部分清标、PATCH 成功但缓存滞后、再次缩容。显式缩容也可留下高位正式组，单凭序号无法证明它应被回收 |
+| D2 / BG-1、BG-2：健康删除额度 | `N=3,U=0,S=1,P=2` 时四组中只有三组 Running。既有单测仍选中健康的 `sg-2`，删除后只剩两组，低于底线 3。若同轮缩容先选中受保护组，后面的滚动还可能再次使用这份容量 | 分别断言旧 NotReady 单元的清理额度、健康候选删除后的 Ready 下限，以及已承诺删除的容量只扣一次。记录每个删除动作前后的 Ready 数。[已有行为单测](../../pkg/model-serving-controller/controller/model_serving_controller_test.go) |
+| D3 / SG-R01：Role 数量变更 | SG 模式下三个组同时增员，新增成员 Ready 前，三个组都可能暂时 NotReady。工作区规范自 2.8 起已允许所有非删除组独立应用数量变更 | 断言每组采用最新数量、保护组新增成员使用适用历史模板，后续健康模板替换仍检查预算。第 2 节及行为草案中关于修改 RUN-652 的结论仅适用于从 2.7 迁移 |
+| VER-1 / EV-3：混合版本和空组 | 只升级 prefill 时，decode 可保留旧 UID 和 revision，整个组仍可达到目标。另一个边界是 SG 期望数为 2、所有 Role 期望数为零且物理 Pod 已消失，按 Pod 数会反复得到两个“缺失组” | 按 Role 的实际模板与完整 Ready 判定完成，保留修复旧成员所需的历史。全零时按 spec 派生逻辑规模、保留历史基线。单列仍有 Terminating Pod 和本应非空却缺员的情形。[混合版本与历史 GC 单测](../../pkg/model-serving-controller/controller/model_serving_controller_test.go) |
+| BG-6 / IP-5：原地更新中再换目标 | v1→v2 的 PATCH 尚未完成，用户已提交 v3 或回滚 v1；仅有“正在更新”的布尔值会把该单元继续算作最新目标。插件能力、Pod 和容器 restart policy 也会影响更新方式 | 比较 InPlace 注解的目的 revision 与最新目标，按 R37 草案重新分类并核算预算。区分全局回退到 Recreate 和单元级回退。后者能否借用 surge 是 D6 的待决事项。[InPlace 门控](../../pkg/model-serving-controller/controller/inplace_update.go) |
+| REC-1～3 / EV-5：故障计时、失主和删除恢复 | 工作区 2.12 API §6.2 延续 2.9 的计时规则。grace 为 60 秒，t=40 停机、t=50 新 leader 重新观察，持续故障要等到 t=110。旧 leader 醒来时，原 UID 可能已经恢复 Ready 或策略已改为 None，UID 前置条件仍会匹配 | 定时到期只唤醒 worker。动作前核对 leader 上下文、owner/Pod UID、最新策略和健康；Ready 结束本次计时。按 API §6.1，自 2.11 起，重启先续删带 deletion-scope 标记的原 UID，再按最新数量与适用模板补建；无标记的离线缺员按缺口修复，同名替代成员保留 |
+
+**验证边界。** D1 的对照使用真实控制器函数和 fake client，观察到的是哪个组进入 Deleting。原审的 26/7/2 是 35 个 SG 场景的探针分类。SG-S04 的原始轨迹没有形成规定的、已标记的 `sg-4` 初态，仍须从该初态验证 `sg-4` 的 UID 和正式槽 `sg-2` 的补建。上述结果尚无同一源码提交的 Kind 时序验证。后续先固定动作对象、Ready 下限和重启恢复范围的断言，再迁移写操作入口。
 
 ## 2. 规范符合度
 
@@ -73,7 +91,7 @@
 | --- | --- | --- | --- | --- | --- |
 | R1 | 正式单元取 `[0, N)` 最低空闲序号 | 部分 | 部分 | 符合 | ORD-1 |
 | R2 | surge 只建在 ≥ N 并带标记 | 部分 | 部分 | 符合 | ORD-1 |
-| R3 | 被 N 覆盖的 surge 清除标记并转正 | 符合 | 符合 | 符合 | ORD-3（符合） |
+| R3 | 被 N 覆盖的 surge 清除标记并转正 | 正常路径符合；缓存滞后后缩容可误回收 | 正常路径符合 | 正常路径符合 | ORD-3；Role 两条路径未重跑 SG 的缓存时序探针 |
 | R4 | 只有显式缩容产生空洞 | 不符合 | 不符合 | 符合 | ORD-1、ORD-4 |
 | R5 | 不为整理序号重建健康单元 | 符合 | 符合 | 符合 | — |
 | R6 | 基数、取整、拒绝 U 和 S 同时为 0 | 部分 | 部分 | 部分 | BG-5、EV-3。取整符合；全部受保护时拒绝，零副本时不检查；运行中解析成双零时不报告 |
@@ -95,7 +113,7 @@
 | R28、R29 | 完成与阻塞的判定和报告 | 部分 | 部分 | 部分 | EV-3 |
 | R30、R31 | Role 同构与协调 | — | 符合 | 部分 | CO-1～CO-6 |
 | R32～R34 | 恢复与重启 | 部分 | 部分 | 部分 | REC-1～REC-7 |
-| R35 | 原地更新的适用条件 | 符合 | 符合 | 符合 | IP-1 |
+| R35 | 原地更新的适用条件 | 另有插件和运行条件 | 同左 | 同左 | IP-1、IP-5 |
 | R36 | 原地更新中的单元计入 `notReadyTarget` | 部分（隐式） | 部分（隐式） | 符合 | BG-4 |
 | R37 | 原地更新中重建用目标版本、仍受预算约束 | 不符合 | 不符合 | 未验证 | IP-2、BG-6 |
 | R38 | 回退为重建时照常用 surge | 不符合 | 不符合 | 未验证 | IP-5（分歧） |
@@ -223,10 +241,10 @@ Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏
 - **影响**：只是浪费。完整的一轮里 `sg-4` 被缩容选中、`sg-3` 被滚动选中，Ready 从 5 降到 3（等于底线，没有突破）；之后在 3 号新建一个 surge，终态仍是 `{0, 1, 2}`，多一次创建和一次删除（`TestProbe005BR_C12`）。开发者文档写明了「may remove a surge group」。
 - **建议**：缩容只在正式单元里选。
 
-#### ORD-3 N 扩大覆盖 surge 时清除标记并转正（符合，不是缺陷）
+#### ORD-3 N 扩大覆盖 surge 时清除标记并转正（正常路径符合，回收时序有缺口）
 
 - **位置**：`surge.go:135-186`；Role 模式 `surge.go:150-162`、`obs.go:251-273`。
-- 这符合修订规则 R3（D1 已定为转正并清除标记），也符合现规范的 SG-C03、SG-P08、SG-P10。LWS、RBG 读代码也是保留被 N 覆盖的 surge，没有找到文档或测试说明。这里记一笔，是因为它是 D1 比较过的三种做法之一，不需要改。
+- 清标被观察到后的转正符合 R3 和 SG-C03、SG-P08、SG-P10。清标已成功而缓存未更新时，后续缩容仍可能回收已转正的组。[复评反例](#复评补充)
 - 探针 `TestProbe005BR_X6_ScaleDownAfterPromotion` 是当前实现的对照：N 扩大覆盖 surge 之后再缩容、另有一个故障单元时，当前实现删的是故障单元，转正过的单元保留。如果转正时不清除标记，这里会删错对象，这一点来自参考模型的「转正但保留标记」变体，不是探针，见行为规范 D1。
 
 #### ORD-4 surge 单元的 Pod 被重建后不带标记（P2，两者）
@@ -234,7 +252,7 @@ Role 模式下的同构场景没有逐个跑。独立 Role 模式有一个稀疏
 - **现象**：`RoleRecreate` 或 `None` 策略下，surge 组丢了全部 Pod 但组本身还在时，重建的 Pod 不带标记。滚动结束时它不会被当作 surge 回收，终态是 `{1, 2, 3}`。
 - **证据**：开发者文档把它列为已知限制。任务 `issues/bugs/003` 在 PR #2016 的验证记录里有 Kind 观察（「M2 单独」一行，commit `cbf37e4a`）。本次没有重跑。
 - **规范**：R4。按修订规则，单元内后来补建的 Pod 继承单元的标记（行为规范第 3 节），整个单元消失后由 R25 重新按 surge 创建，不会出现这种情况。
-- **建议**：局部重建 Pod 时继承同一单元其他 Pod 的标记；单元没有任何 Pod 时按「序号 ≥ N」重新判定。
+- 局部补建时可按同一 owner、同一单元、本层的有效标记判断来源。成员已全部消失时，应按最新期望重新计算缺少的正式容量与临时容量。显式缩容留下的高位正式组也可能满足 `ordinal ≥ N`。
 
 #### ORD-5 缩容按刷新之前的状态选对象（P2，两者）
 
@@ -365,12 +383,12 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 
 本节除特别注明外都是走读结论，详细推演见 `subagents/whitebox-recovery-restart.md`。
 
-#### REC-1 故障起点不跨重启（P1，两者）
+#### REC-1 故障起点不跨重启（原审按 2.7 定为 P1）
 
 - **位置**：`msc.go:2257-2271`、`msc.go:2309-2313`、`msc.go:767-776`。
 - 起点只在内存的 `graceMap` 里，而且它的值从来没有被读过。重启后 `syncAll` 重新登记，从重启时刻起计满一个 grace。
 - **规范**：R32；现规范 API §6.2 的例子：grace=60 秒，t=0 故障，t=40 controller 退出，t=50 重新运行，应当在 t≈60 处理，代码在 t≈110。
-- **建议**：起点写到 Pod 注解。见状态设计 4.7。
+- 2.12 要求新 leader 从重新观察时计满 grace，例中的 t≈110 符合该要求。跟进 REC-2、REC-3 时按本次故障和最新配置计时。[复评补充](#复评补充)
 
 #### REC-2 grace 到期时不读最新配置（P1，两者）
 
@@ -451,7 +469,7 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 
 #### IP-4 见 BG-6
 
-#### IP-5 启用 InPlace 时 `maxSurge` 整体不生效（P2，分歧）
+#### IP-5 InPlace 全局门控开启后，单元回退重建时仍禁用 surge（P2，分歧）
 
 - **位置**：`msc.go:819-823`、`msc.go:1408-1416`。开关是 ModelServing 级和 Role 级的，不看这次变更是否满足原地条件。
 - 一次不满足原地条件的变更会在没有 surge 的情况下按 U 重建。用户文档写明了这一点（`docs/kthena/docs/user-guide/multi-node-inference.md:432-433`），有单测 `TestSurgeDisabledWhileUpdatingInPlace`。见行为规范 D6。
@@ -484,7 +502,7 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 - `UpdateInProgress` 和 `Progressing` 之间不互斥，切换时旧的那个保持 True（SG-P08、SG-P09 的探针里两者同时为 True）；condition 已经是 True 时不刷新 message，里面的序号列表会过期（`utils/utils.go:437-500`）。
 - `status.replicas` 是 datastore 里的组数，包含 surge 和正在删除的组，滚动期间会大于 `spec.replicas`（探针 `TestProbe005BR_X4_StatusDuringSurgeRollout`）。
 - Role 模式下，组的 Ready 要求每个 Role 的实例数恰好等于 `replicas`（`msc.go:2403-2407`）。surge 实例存在期间组不是 Running，所以 U=0、S=1 的 Role 滚动全程容量不降，`status.availableReplicas` 却会下降。
-- datastore 里没有该 ModelServing 的记录时（例如 N=0 且刚重启），`status` 只更新 revision 和 selector，不更新计数、condition 和 `observedGeneration`（`msc.go:2693-2733`）。未验证。
+- 无组记录时，非协调路径可能保留旧计数和 `observedGeneration`。协调模式在 N=0 时有专用分支清零计数、刷新代数并处理 condition（`msc.go:2707-2719`）。[缩到零的回归测试](../../pkg/model-serving-controller/controller/merge_ready_regression_test.go)
 - **规范**：R28、R29。
 
 #### EV-4 等待和出错的处理不统一（P3）
@@ -492,9 +510,9 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 - 等 Pod 消失、等单元 Ready 返回 nil；历史读不到返回错误并限速重试；同名 Pod 身份不符既返回错误又自己设 1 秒定时。协调路径上有十余处固定 1 秒的重入队。
 - 提前返回会跳过 `status` 更新，包括 `observedGeneration`。
 
-#### EV-5 grace goroutine 的几个细节（P3）
+#### EV-5 失主后的延迟删除和清理重试（原审 P3，失主风险按 REC-2 跟踪）
 
-- goroutine 不接收 context，不可取消，leader 切换后继续运行。靠 UID 前置条件保证不误删。
+- grace goroutine 未绑定 leader 的 context。失主后若旧缓存仍显示故障，旧任务可能删除已恢复的同一 UID。此项按 REC-2 同级恢复风险跟踪；目前依据为源码走读，尚需失主后到期的验证。[失主回调](../../pkg/controller/controller.go)
 - `deleteServingGroup` 里 `replacements()` 的 LIST 出错时，错误没有赋给 defer 检查的那个变量，不会触发补偿入队（`msc.go:3362-3364`）。
 
 ### 3.8 可读性与结构
@@ -546,11 +564,11 @@ P1、P2、P11 构造的 ModelServing 没有 `resourceVersion`，走的是 CO-7 �
 
 | 顺序 | 内容 | 意见 | 前置 | 迁移步骤 |
 | --- | --- | --- | --- | --- |
-| 1 | 口径已定（2026-11-12）：D2 目前保持占用，BG-1 按缺陷改；D1 转正并清除标记，当前实现已经符合，不用改 | BG-1、ORD-3 | 已完成 | — |
+| 1 | D2 保持占用，BG-1 按缺陷改；D1 正常转正成立，补清标与下一轮缩容交错的回归 | BG-1、ORD-3 | 决议已定 | — |
 | 2 | SG 模式补健康额度；缩容没结束不替换；基线只在 P 为 0 时推进 | BG-1、BG-2、BG-3、VER-1 | 1 | 1 |
 | 3 | 正式单元和 surge 分开创建；缩容只选正式单元；缩容前先刷新状态；重建的 Pod 继承标记；Role 模式新建组按 Role 的 partition 选版本 | ORD-1、ORD-2、ORD-4、ORD-5、ORD-6 | — | 1 |
 | 4 | 协调：按实例实际版本判断是否有工作；依赖门控不看无关的删除。`maxSkew` 走不通的配置另行立项 | CO-1、CO-2、CO-4；CO-3 | CO-3 要等 D7、D8 | 1；CO-3 不在迁移路径里 |
-| 5 | grace 改为注解加定时入队；Ready 时清除计时；恢复动作移出 informer 回调 | REC-1～REC-3、REC-6、EV-2 | — | 4 |
+| 5 | grace 到期入队，Ready 结束本次计时；恢复动作移到 worker，按当前契约处理失主和已标记原 UID | REC-2、REC-3、REC-6、EV-2、EV-5 | 2.12 API §6 | 4 |
 | 6 | InPlace：重启次数基准覆盖全部容器；重建用目标版本；回退走预算；完成步骤放到 Role 同步之前 | IP-1～IP-3、BG-6 | — | 1 |
 | 7 | 把决定抽成纯函数，SG 层和 Role 层共用；合并两套 surge 和两套预算；补组合场景单测 | RD-1～RD-5、TS-2、TS-3 | 2、3 | 2、3 |
 | 8 | 任何 Pod 变化都入队；周期 resync；condition 增加阶段和阻塞原因；用观察替换 datastore 状态 | EV-1、EV-3、REC-4、REC-5、REC-7 | 5、7 | 5 |
