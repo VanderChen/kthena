@@ -25,7 +25,7 @@
 4. **`None` 或 grace 为 `-1` 时，`Failed` 的 Pod 永久留在原位**（PL-4）。这符合现在的契约，但后果比字面上大：它占着滚动预算和驱逐预算，autoscaler 的指标采集被跳过，原地更新永久卡住，而且没有任何事件指出是哪个 Pod。PodGC 只在集群里终态 Pod 超过阈值（默认 12500）时才清理，所以「别人删了才补」在健康的集群里等于永远不补。
 5. **一个身份不符的同名 Pod 会让整个 ModelServing 停摆，`status` 也不再更新**（PL-3）。它是检视意见 REC-4、REC-5 背后的共同机制，另有两种新的触发方式。
 6. **启用 leader election 时，失主的进程不退出，也不再参选**（PL-2，新）。存活探针发现不了。默认配置不启用 leader election，不受影响。
-7. **恢复没有任何退避**（PL-8）。`RoleRecreate`、grace 为 0、替代 Pod 一出现就失败时，探针在 50 毫秒里完成了 8 轮删除重建。
+7. **恢复没有任何退避**（PL-8）。`RoleRecreate`、grace 为 0、替代 Pod 一出现就失败时，探针在 50 毫秒里完成了 8 轮删除重建（fake client 的节奏，不是真实集群上的耗时）。
 8. **原来标为「未验证」或只有走读的七条意见有了探针结论，都成立**：REC-3、REC-4、REC-5、REC-6、REC-8、EV-5、IP-6 第三条。REC-7 的触发路径在默认配置下复现。ORD-4 的触发条件比原来写的常见，建议从 P2 改为 P1。
 9. 带严重度的意见从 49 条变成 57 条，见 [6.3](#63-更新后的意见统计)。
 
@@ -181,7 +181,7 @@ stateDiagram-v2
 - **现象**：`None` 或 `-1` 下 `Failed` 的 Pod 不被删除。所在单元是目标版本时计入不可用，U=1 时其余旧组永远不被选中。
 - **证据**：探针 `R1a`、`BN-A1`：之后的 reconcile 创建数和删除数都是 0，没有 Warning 事件；人工删除后只补这一个 Pod，滚动继续。
 - **连带的后果**（走读）：驱逐 webhook 把带 `Failed` Pod 的组算作未就绪，对其他健康组的驱逐可能被拒绝（`webhook/eviction_handler.go:490-514`）；autoscaler 采集指标时遇到 `Failed` 的 Pod 就跳过这一组（`pkg/autoscaler/autoscaler/metric_collector.go:136-139`）；原地更新中的 Pod 变成 `Failed` 后更新永久卡住，每轮发一条超时事件（探针 `I1`）。
-- **规范**：符合契约 2.7。D10 已决定 `None` 下重建终态 Pod，这一条在 `None` 下随之消失；`-1` 下是否保留见待决项 O1，保留的话需要一个 condition 说明原因。
+- **规范**：符合契约 2.7。D10 已决定 `None` 下重建终态 Pod，D13（2026-11-15）决定 `-1` 下也照样处理，这一条随之消失。
 
 #### PL-5 摘掉 ownerReference 会触发恢复，并让实例永久 `Deleting`（P2）
 
@@ -207,9 +207,9 @@ stateDiagram-v2
 #### PL-8 恢复没有退避（P2）
 
 - **现象**：`RoleRecreate` 或 `ServingGroupRecreate`、grace 为 0，替代 Pod 一出现就失败。每一轮都是删除整个范围再重建，controller 一侧没有任何延迟。
-- **证据**：探针 `BN-L1`：50 毫秒里完成 8 轮（探针每 5 毫秒轮询一次，只跑 8 轮）。上游 PR #2006 在 Kind 上记录过 `None` 旧行为下约 22 秒一轮，其中 20 秒是容器自己的存活时间。
+- **证据**：探针 `BN-L1`：50 毫秒里完成 8 轮（fake client，没有 kubelet；探针每 5 毫秒轮询一次，只跑 8 轮）。上游 PR #2006 在 Kind 上记录过 `None` 旧行为下约 22 秒一轮，其中 20 秒是容器自己的存活时间。
 - **先例**：DaemonSet 为同样的问题加了 `failedPodsBackoff`；LeaderWorkerSet 和 RoleBasedGroup 给整组重建加了退避。见 [03](03-fault-pod-handling-comparison.md)。
-- **建议**：见[状态机改进方案](04-state-machine.md) 6.4 和待决项 O3。
+- **建议**：见[状态机改进方案](04-state-machine.md) 6.4。2026-11-15 的决定是按不做退避设计（D14），这一条留作待讨论项 O3，不在本方案里解决。
 
 ### 6.2 已有意见的新证据
 

@@ -15,7 +15,7 @@
 
 **2026-11-14 复评口径。** 这里的「现规范」特指原审冻结的 2.7。工作区 2.12 已包含后续决议：2.8 起 SG 内 Role 数量独立应用，2.9 起新 leader 重新观察后计满故障宽限，2.11 起重启须续删已标记的原 UID。下文 R32～R34、D9 和第 9 节保留与 2.7 的历史对照；按 2.12 实施时采用更新后的恢复与验收边界。[复评示例](modelserving-rollout-implementation-review.md#复评补充)
 
-**2026-11-14 终稿说明。** 第二轮的结论在 [`modelserving-rollout-final/`](modelserving-rollout-final/README.md)。上一段引用的契约 2.8～2.12 不在工作区里，无法核实；相关的口径以维护者的决定为准：D3（2026-11-12），D9、D10、D11（2026-11-14）。本文的 R32～R34、4.10 末尾的「三处做不到」和 D9 由[状态机改进方案](modelserving-rollout-final/04-state-machine.md)第 6、10、14 节取代；需要更正的陈述列在[复评结论](modelserving-rollout-final/01-rereview-disposition.md)第 4 节。R1～R31、R35～R38 仍然有效；其中 R37 有一处收窄，待批准，见状态机改进方案第 14 节。
+**2026-11-14 终稿说明。** 第二轮的结论在 [`modelserving-rollout-final/`](modelserving-rollout-final/README.md)。上一段引用的契约 2.8～2.12 不在工作区里，无法核实；相关的口径以维护者的决定为准：D3（2026-11-12），D9、D10、D11（2026-11-14）。本文的 R32～R34、4.10 末尾的「三处做不到」和 D9 由[状态机改进方案](modelserving-rollout-final/04-state-machine.md)第 6、10、14 节取代；需要更正的陈述列在[复评结论](modelserving-rollout-final/01-rereview-disposition.md)第 4 节。R1～R31、R35～R38 仍然有效；其中 R37 有一处收窄，2026-11-15 已批准（D12），见状态机改进方案第 14 节。2026-11-15 另外定了 D13（`Failed`、`Succeeded` 的 Pod 在所有策略、所有 grace 下等同于被删除的 Pod）、D14（不做退避，待讨论）和 D15（范围恢复保持两步删除），都在状态机改进方案里。
 
 ## 1. 结论
 
