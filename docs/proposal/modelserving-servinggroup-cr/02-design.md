@@ -47,7 +47,7 @@ metadata:
   labels:
     modelserving.volcano.sh/name: llama
   annotations:
-    modelserving.volcano.sh/legacy-ordinal: "2"   # 只有从旧版本接管来的组有，见 06
+    modelserving.volcano.sh/adopt-members: "true" # 只有为了接管现成的 Pod 而建的组有（06 的 T3、5.5）；创建时写
   ownerReferences:                      # ModelServing，controller=true，blockOwnerDeletion=true
 spec:
   revision: llama-6b7f9                 # ServingGroupRollingUpdate：这个组的版本
@@ -63,15 +63,20 @@ spec:
 status:
   observedGeneration: 3
   conditions:
-  - type: Ready                         # 全部期望的实例已建成并且就绪
+  - type: Ready                         # 全部期望的实例已建成并且就绪。空组（没有期望的实例）是假
   - type: Failed                        # 不可逆。真 = 请求整组替换
   - type: Drained                       # 只在 Failed 为真时有意义：没有故障成员，没有正在终止的 Pod
   - type: Adopted                       # 只有接管来的组有：成员全部换了 owner
+  - type: RecreateRequired              # 只在配了原地更新时有：这个组不能原地更新，只能重建（第 9 节）
+  - type: DrainBlocked                  # OnRoleDelete 一直不成功，有实例停在清空中（第 7 节）
+  - type: ReconcileFailed               # 这一轮出错（例如引用的 ControllerRevision 不在）。Ready 仍然按看到的成员照实写
+  - type: CoordinatedRoleRolloutBlocked # 含义不变，按组报告，ModelServing controller 汇总
   revision: llama-6b7f9                 # 全部实例已经应用的版本；不一致时为空
   referencedRevisions: [llama-6b7f9]    # 名下 Pod 引用到的全部版本，包括正在终止的
   deletionCost: 0                       # 名下 Pod 的 deletion cost 之和
   faultyMembers: 0                      # 给人看的；判断只用 condition
   terminatingPods: 0
+  pods: 6                               # 名下现有的 Pod 数，含终止中的。scale 子资源的 status 和空组的判定用它
   roleInstances:                        # 账本，见 5.2
   - role: prefill
     index: 0
@@ -85,16 +90,16 @@ Go 里已经有一个同名的模板类型 `ServingGroup`（走读，`pkg/apis/w
 
 ### 2.2 名字
 
-名字由 ModelServing controller 在客户端生成，不用 `metadata.generateName`：请求超时之后要能按名字查。分配方式是 controller 内部的策略，不是用户字段。
+名字由 ModelServing controller 在客户端生成，不用 `metadata.generateName`：请求超时之后要能按名字查。分配方式是 controller 内部的策略，不是用户字段，也不记在 ModelServing 上：建一个组的那一刻，owner 是 LeaderWorkerSet 或者回退窗口开着就用序号，否则用随机。回退窗口是 controller 的一个集群级的设置，默认关，从旧版本升级时打开，由人关闭（[06](06-live-upgrade.md) 第 8 节）。
 
 | 策略 | 名字 | 用在 | 次序键 |
 | --- | --- | --- | --- |
-| 随机 | `<ModelServing 名>-<5 位后缀>`。后缀取自不含元音和易混字符的字母数字表，并且至少含一个字母 | 新建的 ModelServing。默认 | 创建时间，再按名字 |
-| 序号 | `<ModelServing 名>-<最小的空闲序号>` | owner 是 LeaderWorkerSet 的 ModelServing（一直用）；从旧版本接管来的 ModelServing 在回退窗口之内（[06](06-live-upgrade.md)） | 序号 |
+| 随机 | `<ModelServing 名>-<5 位后缀>`。后缀取自不含元音和易混字符的字母数字表，并且至少含一个字母 | 默认 | 创建时间，再按名字 |
+| 序号 | `<ModelServing 名>-<最小的空闲序号>` | owner 是 LeaderWorkerSet 的 ModelServing（一直用）；**回退窗口开着的时候**，全部 ModelServing（[06](06-live-upgrade.md) 第 8 节） | 序号 |
 
 - 后缀至少含一个字母，是为了和序号名字分得开：`<名>-<纯数字>` 一定是序号名字。
 - 序号策略下名字的唯一性就是序号的唯一性。LWS 的 plugin 照旧从组名里取 `group-index`、hostname 和 DNS 名（走读，`plugins/lws_labels_plugin.go:61-95`）；两个活着的组不可能同序号，仍然是名字在保证。007 的待决项 K3 这样定。
-- **序号只是名字。**组一级的算法在两种策略下相同，都按数量。序号策略下的两处限制：组一级的 S 取 0（LWS 的转换本来就不映射滚动配置，走读，`controller/lws_controller.go` 里没有 `maxSurge`、`partition`）；这样替换出来的组拿回原来的序号，缩容删最大的序号，集合保持 `[0, N)`。接管来的 ModelServing 在回退窗口内不受 S 的限制，序号集合可以有洞。
+- **序号只是名字。**组一级的算法在两种策略下相同，都按数量。序号策略下的一处限制：owner 是 LWS 的，组一级的 S 取 0（LWS 的转换本来就不映射滚动配置，走读，`controller/lws_controller.go` 里没有 `maxSurge`、`partition`），这样替换出来的组拿回原来的序号。序号集合不保证是 `[0, N)`：缩容按 4.4 的次序选，未就绪的、deletion cost 低的先删，会留下洞，`group-index` 因此可以不连续。今天也是这样。接管来的 ModelServing 在回退窗口内不受 S 的限制，序号集合同样可以有洞。
 - Pod 名的前缀跟着组名：`<组名>-<role>-<实例序号>-<worker 序号>`。Role 实例的序号和 `WORKER_INDEX` 保留。
 - 标签 `modelserving.volcano.sh/group-name` 的值是组名。
 
@@ -103,7 +108,7 @@ Go 里已经有一个同名的模板类型 `ServingGroup`（走读，`pkg/apis/w
 | 项 | 内容 |
 | --- | --- |
 | controller owner | ServingGroup（`controller: true`、`blockOwnerDeletion: true`）。PodGroup、headless Service 相同；PodGroup 今天没有 `blockOwnerDeletion`（走读，`podgroupmanager/manager.go:340-350`），要补上，否则前台级联不等它 |
-| 标签 `modelserving.volcano.sh/instance-generation` | 所在 Role 实例的代际号（5.2）。没有这个标签的 Pod 按 0 |
+| 标签 `modelserving.volcano.sh/instance-generation` | 所在 Role 实例的代际号（5.2）。没有这个标签的 Pod 按 0。升级接管换 owner 时给存量的 Pod 补上（值是 0），所以 ServingGroup controller 管过的 Pod 都带着它 |
 | 不再使用的 | 组一级的 surge 注解。Role 一级的 surge 注解、原地更新的进度注解、revision 和 role-template-hash 标签原样使用 |
 
 没有 Pod finalizer，没有组的 finalizer。
@@ -119,9 +124,15 @@ Go 里已经有一个同名的模板类型 `ServingGroup`（走读，`pkg/apis/w
 | `ServingGroup.status` | ServingGroup controller | UPDATE，带 resourceVersion |
 | Pod、PodGroup、Service | ServingGroup controller | 创建按确定的名字；删除带 UID |
 | `ModelServing.status` | ModelServing controller | 不变 |
+| ModelServing 上的接管注解（进度） | ModelServing controller | PATCH；内容见 [06](06-live-upgrade.md) |
 | ControllerRevision | ModelServing controller | 不变。清理时保留的集合见 8.6 |
 
-ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」。ModelServing controller 不读写 Pod；唯一的例外是升级接管期间读存量的 Pod（[06](06-live-upgrade.md)）。
+ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」。ModelServing controller 不读写 Pod，例外有两处：
+
+- 升级接管期间（接管注解不是 `Done`）：直读存量的 Pod、PodGroup、Service，并按 UID 删掉带着旧版本删除标记的 Pod 和没有活 Pod 的组留下的 PodGroup、Service（[06](06-live-upgrade.md) 的 T1、T2、T2′）。
+- 任何时候，由无主的成员 Pod 的事件触发（[5.5](#55-有人直接删了一个组)）：直读这些 Pod，为它们重建同名的组。只读，不写 Pod。
+
+ModelServing controller 按 controller ownerReference 的 UID 认自己的组，不按标签。没有 owner 的 ServingGroup（用 orphan 方式删 ModelServing 留下的）不会被同名重建的 ModelServing 收养：发事件报告，由人删除。
 
 用户直接改组的 `spec`，等于改 Deployment 名下的 ReplicaSet：ModelServing controller 下一轮写回去。用户直接删组：见 [5.5](#55-有人直接删了一个组)。
 
@@ -137,7 +148,7 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 
 | # | 约定 | 为什么 |
 | --- | --- | --- |
-| A1 | **`observedGeneration`。**`status.observedGeneration` 小于 `metadata.generation` 的组，ModelServing controller 按「未观测」计：占位置，不算就绪。ServingGroup controller 在「这一轮的决定是按这份 `spec` 做的」时推进它，不等动作做完 | 新 `spec` 刚写进去时 `status` 还是上一份的结论 |
+| A1 | **`observedGeneration`。**`status.observedGeneration` 小于 `metadata.generation` 的组，ModelServing controller 按「未观测」计：占位置，不算确认的就绪（4.1）。ServingGroup controller 在「这一轮的决定是按这份 `spec` 做的」时推进它，不等动作做完。**出错的轮次也写**：只要读到了成员，`observedGeneration` 照样推进，Ready 按看到的成员照实算（期望的实例数在组自己的 `spec` 里，不需要模板），另带 `ReconcileFailed` | 新 `spec` 刚写进去时 `status` 还是上一份的结论。出错时如果不写，这个组会一直是「未观测」（不能被替换），或者一直带着上一次的 Ready。出错时也不能把 Ready 一律写成假：成员其实在服务的组会被当成未就绪的组优先删掉 |
 | A2 | **`sourceGeneration`。**下发的 `spec` 带着来源的 ModelServing `generation`。ModelServing controller 不下发比组上已有的更小的；看到更大的就重新入队 | 缓存旧的进程不会把旧的 `spec` 再写回去 |
 | A3 | **失败和已清空是两个 condition。**Failed 为真是请求删除；Drained 为真是「故障成员和正在终止的 Pod 都没有了」。ModelServing controller 只在两个都为真时删 | 判断不依赖计数字段的零值。`status` 被旧客户端整体改写、计数丢失时，不会把「没有清空」读成「已清空」 |
 | A4 | **基线的副本。**每个组的 `spec.baselineRevision` 由 ModelServing controller 写 | `ModelServing.status` 被清空时基线可以读回来（4.8） |
@@ -164,9 +175,14 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 | --- | --- |
 | 终止中 | `deletionTimestamp` 非空 |
 | 失败 | Failed 为真 |
+| 过期（只能重建） | `RecreateRequired` 为真。不论 `spec.revision` 是什么，也不参加受保护的集合 |
 | 目标 | 组的版本等于 T |
-| 受保护 | B ≠ T，并且它在「按次序最靠前的 min(P, 非目标组的个数) 个非目标组」之内。**不问它是不是 B 那个版本** |
+| 受保护 | B ≠ T，并且它在受保护的集合里：非目标的组，**先取版本等于 B 的、再取别的版本的**，各自按次序，取前 min(P, 非目标组的个数) 个 |
 | 过期 | 其余 |
+
+**组的版本**取 `spec.revision`。新建的目标组在 `status.revision` 还空着的时候就是目标。两个例外：`RoleRollingUpdate` 下不做版本分类（4.6）；从 Role 模式切到 ServingGroup 模式之后，`spec.revision` 为空的组取 `status.revision`，仍然为空（组内的版本不齐）算过期（4.7）。`RecreateRequired` 是 ServingGroup controller 报告的「这个组不能原地更新，只能重建」（第 9 节）。
+
+受保护的名额先给基线版本的组，是为了让「留在旧版本的」确实是用户以为的那个旧版本：一个受保护的基线组被整组恢复之后，按基线补出来的组创建得最晚；只按次序的话，下一次提交新版本时留下的会是一个中间版本的老组，刚补出来的基线组反而被换掉（EX-4）。基线版本的组不够 P 个时，别的非目标的组照样受保护，不会被换回基线（EX-1）。
 
 「版本等于」指 ControllerRevision 的名字相同，或者经 ControllerRevision 解出的模板在语义上相同；目标版本的解析先沿用已有的身份。这是今天已有的机制，本设计不改算法。
 
@@ -174,13 +190,22 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 | --- | --- |
 | `active` | 全部组对象，包括终止中的和失败的 |
 | `live` | 目标、受保护、过期三类 |
-| `ready` | `live` 里 Ready 为真并且已观测的 |
+| `ready` | `live` 里**确认就绪**的 |
 | `good` | 目标 + 受保护 |
 | `notReadyTarget` | 目标里没有就绪的 |
 | `minAvailable` | max(0, N − U) |
 | `maxScaleDown` | max(0, `live` − `minAvailable` − `notReadyTarget`) |
 | `maxHealthyScaleDown` | max(0, `ready` − `minAvailable`) |
 | `cap` | 还有过期的组时是 N + S，否则是 N |
+
+**两种就绪。**
+
+| | 定义 | 用在 |
+| --- | --- | --- |
+| 确认的就绪 | Ready 为真，并且已观测（A1） | 两个额度、`notReadyTarget`、G6。未观测的组按未就绪算，是保守的一侧 |
+| 报告的就绪 | 最后一次写上的 Ready，不问是否已观测 | 缩容的次序（4.4）、`status.availableReplicas` 和三个 condition（[03](03-state-machine.md) 第 6 节）。次序是偏好，可以晚一跳；对外的可用数不应当因为 `spec` 下发而抖动 |
+
+报告的就绪至多晚一跳，前提是 ServingGroup controller 写得出 `status`；它出错的轮次也照实写（A1）。`status` 写不出来的组保持原样：未观测，或者带着上一次的 Ready。一次冲突下一轮就过去了；一直写不出来时，这个组的 Ready 可能一直偏大，6.5 说的「窗口没有上界」就是这种情形。它持续超过期限时报 `RolloutBlocked`，reason 是 `GroupNotObserved`（[03](03-state-machine.md) 第 6 节）。
 
 算式与契约附录 B 相同。契约里的「在途额度」在这里不需要单独记：发出的删除立刻表现为组进入终止中，它已经不在 `live` 里。
 
@@ -194,18 +219,20 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 | --- | --- | --- |
 | G1 删失败的组 | Failed 和 Drained 都为真 | 前台级联删除。不重新判断，策略中途改了也删 |
 | G2 缩容 | `live` > `cap` | 按 [4.4](#44-次序) 的缩容次序删一个，重复到 `live` = `cap`。不占滚动预算 |
-| G3 替换 | 有过期的组；`active` ≤ `cap`；只在 `ServingGroupRollingUpdate` 下 | 未就绪的过期组：`maxScaleDown` > 0 时删一个。没有未就绪的了，再看健康的：`maxScaleDown` 和 `maxHealthyScaleDown` 都大于 0 时删一个。每删一个重新算。未观测的组不是候选 |
+| G3 替换 | 只在 `ServingGroupRollingUpdate` 下 | 先处理空组（定义见下面的说明）：它的版本按新建的规则重新指派，只改 `spec.revision`，不删对象，不占预算。其余的要求有过期的组并且 `active` ≤ `cap`：未就绪的过期组，`maxScaleDown` > 0 时删一个。没有未就绪的了，再看健康的：`maxScaleDown` 和 `maxHealthyScaleDown` 都大于 0 时删一个。每删一个重新算。未观测的组不是候选 |
 | G4 创建 | min(N − `good`, `cap` − `active`) > 0 | 建一个，重复。版本：B ≠ T 并且非目标的组少于 P 时用 B，否则用 T |
 | G5 下发 | 组的 `spec` 与期望不同 | PATCH（A2） |
 | G6 推进基线 | P = 0，N > 0，`active` = N，全部组是目标、已观测、就绪；全部 Role 的 replicas 都是 0 的组不算就绪 | `status.currentRevision` := T |
 
 几点说明。
 
-- **G3 要求 `active` ≤ `cap`。**缩容删掉的组在消失之前还占着位置，`active` 大于 `cap`，这期间不开始替换。对应契约 A.4 第 2 条「先执行缩容选择并等待本轮计划删除完成」。它是对象上的事实，不需要记住哪些终止中的组是缩容删的。正常滚动时 `active` 不超过 N + S，不受影响。
-- **未观测的组**（A1）占位置、不算就绪，这是保守的一侧。但它也不能被当成「未就绪的过期组」优先替换，缩容时也不排在「未就绪的先」里：`spec` 刚下发的那一刻全部组都是未观测，其中多数其实是健康的（EX-3）。
+- **G3 要求 `active` ≤ `cap`。**缩容删掉的组在消失之前还占着位置，`active` 大于 `cap`，这期间不开始替换。对应契约 A.4 第 2 条「先执行缩容选择并等待本轮计划删除完成」。它是对象上的事实，不需要记住哪些终止中的组是缩容删的。正常滚动时 `active` 不超过 N + S，不受影响。runner 的五个停点用例在这条规则下与期望相同，去掉之后都出不来（[05](05-inference-verification.md) 第 2 节）。代价：正因为不区分，N 调小之后任何卡住的终止中的组、清不空的失败组都起「缩容没做完」的作用，滚动停下，直到它消失；这时报 `RolloutBlocked`，reason 是 `WaitingForDeletion`（[03](03-state-machine.md) 第 6 节）。
+- **未观测的组**（A1）占位置、不算确认的就绪，这是保守的一侧。但它不能被当成「未就绪的过期组」优先替换：`spec` 刚下发的那一刻全部组都是未观测，其中多数其实是健康的（EX-3）。缩容不等观测，次序按报告的就绪排：上一次报告未就绪的组仍然先删。一个组刚变坏、`status` 还没写出来时会选错，与健康额度晚一跳是同一个窗口（6.5）。
+- **空组**的判定只用组对象上的字段：组自己的 `spec` 里每个 Role 的 `replicas` 都是 0，已观测，并且 `status.pods` 是 0（终止中的 Pod 也算在里面）。副本数刚调成 0、Pod 还在终止的组不是空组。取的是这一轮 G5 下发之前的 `spec`：G3 的改版本先于 G5，所以「把副本数调回来」和「改模板」在同一次请求里时，组先被改版本，再拿到新的副本数，Pod 直接按新版本建。空组没有 Pod 可扰动，它的版本只决定下一次建 Pod 时用什么，所以按 G4 给新建的组选版本的规则重新指派：B ≠ T 时，P 个名额先扣掉有 Pod 的非目标组，剩下的名额给空组，已经是基线版本的在前、再按次序，这些空组的版本是 B；其余的空组是 T。B 读不到时，该给 B 的空组保持原样。这样「把各 Role 的副本数缩到 0、改模板、再扩回来」时不会先按旧版本把 Pod 建出来再滚动替换一遍，扩回来之后各版本的个数与契约「视为新建」的结果相同（NEW-6、NEW-9、NEW-10）。有 Pod 的目标组不会这样被改回基线（4.3 的「不回退」）。SG 模式下各组的 Role 副本数来自同一份 `spec`，所以空组通常是全部一起空。
 - **G4 的容量按 `active` 算**：终止中的和失败的组在消失之前占着位置。所以没有滚动在进行时（`cap` = N），失败的组消失之前不会建替换的（007 的 K6，默认不做）。滚动在进行时 surge 的名额照常使用，不专门留给恢复，也不专门躲开恢复。
 - **G6 是 v2 的 R17**，不变。灰度停点上基线不推进。
-- **配了原地更新时**（`ServingGroupRollingUpdate` 加 `updateMethod: InPlace`），G3 的「删一个」换成「把这个组的 `spec.revision` 改成 T」，由 ServingGroup controller 在组内原地更新。候选、次序和两个额度都不变：被改的组成为未就绪的目标组，占着 `notReadyTarget`，直到它就绪。能不能原地更新是配置上的事实（007 的 05），ModelServing controller 不去问 plugin。
+- **配了原地更新时**（`ServingGroupRollingUpdate` 加 `updateMethod: InPlace`），G3 的「删一个」换成「把这个组的 `spec.revision` 改成 T」，由 ServingGroup controller 在组内原地更新。候选、次序和两个额度都不变：被改的组成为未就绪的目标组，占着 `notReadyTarget`，直到它就绪。ModelServing controller 不读 Pod、不问 plugin；这个组能不能原地更新由 ServingGroup controller 判断。不能的时候（plugin 不支持、组里有终态成员、超期、被作废）它把 `RecreateRequired` 写成真：这样的组不论 `spec.revision` 是什么都算过期，G3 对它只删除，不再改版本（第 9 节）。
+- **一轮可以发多个创建和多个删除。**计划在工作副本上得出一批写，逐个发出；创建全部先登记（4.5）。
 - 没有稳定的中间态要记：任何一步停下，下一轮按当时的对象重新得出同一份或更保守的计划。
 
 ### 4.3 按数量的 partition
@@ -214,7 +241,7 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 
 | 定义 | 内容 |
 | --- | --- |
-| 保护什么 | 至多 P 个**非目标**的组，取次序最靠前的。它们不因目标模板变化而被替换 |
+| 保护什么 | 至多 P 个**非目标**的组：基线版本的在前，别的版本的在后，各自取次序最靠前的（4.1）。它们不因目标模板变化而被替换 |
 | 新建的组用哪个版本 | 非目标的组少于 P（并且 B ≠ T）时用 B，否则用 T |
 | 目标回到基线（B = T） | 没有受保护的组。全部非目标的组都要替换。回滚因此生效 |
 | 缩容 | 受保护的排在后面（4.4） |
@@ -227,24 +254,28 @@ ServingGroup controller 不创建、不删除 ServingGroup，只写「失败」�
 | N=3、P=1，三个 v1，提交 v2 | sg-2、sg-1 换成 v2 | 次序靠后的两个换成 v2。相同 |
 | 灰度停点上扩容，P 是整数 | 新序号都不小于 P，用 v2 | 非目标的组已经有 P 个，用 v2。相同 |
 | 同上，P 是百分比、随 N 变大 | 新序号都不小于新的 P，用 v2 | 非目标的组少于新的 P：不足的部分用 B。**不同**（SG-P04） |
-| P 调小 | 解除保护的序号被替换 | 次序最靠后的非目标组被替换。相同 |
+| P 调小 | 解除保护的序号被替换 | 受保护的都是基线版本时：次序最靠后的那个被替换，相同。受保护的里有别的版本时：先解除它们的保护，不论次序。例如 `{0: v2, 1: v1, 2: v1}`、基线 v1、目标 v3，P 从 3 调到 2：被替换的是序号 0 上的 v2，按序号是序号 2。**不同** |
 | P 调大 | 现存的 v2 不回退；之后落在保护序号上的重建用 B | 现存的 v2 不回退；之后非目标的组少于 P 时，不论哪个组重建、或者扩容，都用 B |
-| 受保护的是第三个版本（上一轮没滚完又提交新版本） | 序号小于 P 的不动 | 次序最靠前的 P 个非目标组不动。相同（EX-1） |
-| 想让指定的某几个组留在旧版本 | 可以，按序号 | 不可以。只能指定数量，留下的是次序最靠前的 |
+| 受保护的是第三个版本（上一轮没滚完又提交新版本） | 序号小于 P 的不动 | 基线版本的组不够 P 个时，次序最靠前的非目标组补足，不动。相同（EX-1） |
+| 受保护的基线组被整组恢复过，再提交第三个版本 | 序号没变，那个序号上的基线组不动 | 基线版本的组先受保护，不论它创建得多晚。相同（EX-4） |
+| 低序号上是中间版本、高序号上是基线版本，例如 `{0: v1, 1: v2, 2: v1}`、P=2，提交 v3 | 留下序号 0、1：一个 v1、一个 v2 | 留下两个 v1。**不同** |
+| 灰度还没滚完时受保护的组失败，例如 P=1、`{v1 受保护, v1, v2}` | 原序号按 v1 重建；另一个 v1 随后滚成 v2 | 另一个 v1 成为受保护的那一个；替换的组用 v2。留在旧版本的个数相同，**是哪一个不同**，少建一个（NEW-7） |
+| P = N 冻结现状之后把模板改回基线 | 序号小于 P 的不动，中间版本的组留着 | 目标等于基线，没有受保护的组：中间版本的组按预算换回基线。**不同**（NEW-8） |
+| 想让指定的某几个组留在旧版本 | 可以，按序号 | 不可以。只能指定数量 |
 
-Role 一级的 partition 仍然按序号，同一个 API 里有两种语义。API 注释、用户文档里「按序号保护」的说法，对组一级要改。`kubectl get servinggroup` 要有一列显示版本和是否受保护。
+Role 一级的 partition 仍然按序号，同一个 API 里有两种语义。API 注释、用户文档里「按序号保护」的说法，对组一级要改。`kubectl get servinggroup` 有一列显示版本。「受保护」是 ModelServing controller 对全部组分类的结果，会随别的组出现和消失而变，组对象上没有能放它的字段（放 `spec` 会让组变成未观测，标签和注解创建之后不变）；受保护的是哪几个组，写在 ModelServing 的 condition 的 message 里（[03](03-state-machine.md) 第 6 节）。
 
-先例：OpenKruise CloneSet 的 partition 就是「保留在旧版本的 Pod 的数量」，扩容时旧版本不足 partition 的部分按旧版本创建。LeaderWorkerSet 的 `groupIdentity: Hash` 去掉组序号之后直接拒绝 `partition`。来源见 [01](01-design-rationale.md) 第 6 节。
+先例：OpenKruise CloneSet 的 partition 就是「保留在旧版本的 Pod 的数量」，扩容时旧版本不足 partition 的部分按旧版本创建。LeaderWorkerSet 的 `groupIdentity: Hash` 去掉组序号之后直接拒绝 `partition`。来源见 [01](01-design-rationale.md) 第 5 节。
 
 ### 4.4 次序
 
-**次序键**是全序：存量接管来的组在前，彼此按存量序号；其余按创建时间，再按名字。序号命名策略下按序号。「最靠前」对应今天的低序号，「最靠后」对应高序号。同一秒建出来的组靠名字分先后。
+**次序键**是全序，只看名字和创建时间：名字是 `<ModelServing 名>-<纯数字>` 的组在前，彼此按序号；其余按创建时间，再按名字。存量接管来的组、回退窗口之内建的组、LWS 名下的组都是序号名字。「最靠前」对应今天的低序号，「最靠后」对应高序号。同一秒建出来的组靠名字分先后。
 
 | 选择 | 次序（先满足的先被选中） |
 | --- | --- |
-| 缩容删谁（G2） | 已观测并且未就绪的；过期的；不受保护的；deletion cost 低的；次序最靠后的 |
+| 缩容删谁（G2） | 报告的就绪为假的；过期的；不受保护的；deletion cost 低的；次序最靠后的 |
 | 替换删谁（G3） | 已观测并且未就绪的过期组；健康的过期组。同类里次序最靠后的 |
-| 受保护的是谁 | 非目标的组里次序最靠前的 |
+| 受保护的是谁 | 非目标的组里，基线版本的在前；同一类里次序最靠前的 |
 
 与今天的差别：
 
@@ -259,25 +290,28 @@ Pod 的名字是确定的，重复创建会撞名字。随机名字的组没有�
 | 规则 | 内容 |
 | --- | --- |
 | 在途登记 | 发创建请求之前把名字记在内存里。计划时，登记了而缓存里还没有的组算存在、未就绪。`spec` 的下发同样登记：刚 PATCH 过的组，在缓存显示出新的 `generation` 之前按未观测计。否则缓存里那个旧对象的 `observedGeneration` 等于它自己的 `generation`，看起来是「已观测、就绪」 |
-| 在途屏障 | 有在途的创建时，这个 ModelServing 的组一级不发别的写。登记带期限（沿用 v2 的 30 秒）；到期按名字直读，不存在就去掉 |
+| 在途屏障 | 有在途的创建时，这个 ModelServing 的组一级不发别的写。一轮算出的一批创建全部先登记再逐个发出，缓存看到这一批之前下一轮不做组一级的事。登记带期限（沿用 v2 的 30 秒）；到期按名字直读，不存在就去掉 |
 | 接管屏障 | 新进程从一次一致性的 LIST 开始（6.3） |
 
-三条都在时，单个进程不会多建。会多建的只剩一种情形：两个进程同时在写（失主的进程还没退出）。这时多出来的组是最新的、多半未就绪，下一轮按缩容的次序删掉，健康的老组不动；它带着自己的 PodGroup 进过调度队列，资源紧张时可能挤掉别的作业（推断）。
+三条都在时，单个进程不会多建。会多建的只剩两种情形：两个进程同时在写（失主的进程还没退出）；原进程已经退出，而它发出的创建请求在新进程的一致性 LIST 之后才落到 apiserver（6.4）。这时多出来的组是最新的、多半未就绪，下一轮按缩容的次序删掉，健康的老组不动；它带着自己的 PodGroup 进过调度队列，资源紧张时可能挤掉别的作业（推断）。
 
-所以「活动的组不超过 N + S」在单进程下每一步成立，在两个进程并存时最终成立。007 的 K4。
+所以「活动的组不超过 N + S」在单进程下每一步成立，在上面两种情形下最终成立。另有一种与 controller 无关的超出：用户用后台方式直接删一个组（5.5）。007 的 K4。
+
+扩容很大时（例如 N 从 3 到 100），创建是一批发出的，不是一个一个等缓存；之后的一轮要等这一批都出现在缓存里。
 
 ### 4.6 `RoleRollingUpdate` 下的组一级
 
 顶层的 `maxUnavailable`、`maxSurge`、`partition` 在这个模式下不生效（契约 0.2）。组一级：
 
 - 不做版本分类，每个 `live` 的组都是目标，`cap` = N。只走 G1、G2、G4、G5、G6。
+- 期望的 `spec` 里没有 `revision`：G5 把它清空。这样切回 ServingGroup 模式时不会拿着一个早就过时的 `spec.revision` 去分类（4.7）。
 - 新组的 `spec` 带目标和基线两个版本。受 Role partition 保护的实例按基线建。
 - 模板变化通过 G5 写进每个组的 `spec.targetRevision`，由 ServingGroup controller 在组内按 Role 一级的规则滚动。
 - G6 的条件按各组报告的 `status.revision` 写：全部组的 `status.revision` 等于 T、已观测、就绪，并且每个 Role 的 partition 都是 0。推进之后 G5 把新的基线写回每个组。
 
 ### 4.7 运行中切换滚动模式
 
-契约 2.12：合法的运行中切换只保证最终收敛，不保证过渡过程的预算。本设计里切换就是「分类规则换了一套」：切到 Role 模式，过期的组不再被整组替换，改由组内滚动；切到 ServingGroup 模式，组的版本取 `status.revision`，不一致的组（组内滚到一半）是过期的，按预算替换。没有需要迁移的中间状态。
+契约 2.12：合法的运行中切换只保证最终收敛，不保证过渡过程的预算。本设计里切换就是「分类规则换了一套」：切到 Role 模式，过期的组不再被整组替换，改由组内滚动；切到 ServingGroup 模式：Role 模式下的组 `spec.revision` 是空的（新建的本来就没有，原先在 ServingGroup 模式下建的被 G5 清空了），这样的组取 `status.revision` 作版本；`status.revision` 也为空（组内滚到一半，版本不齐）的是过期的，按预算替换。G5 把非空的 `status.revision` 填进 `spec.revision`，之后按一般情形处理。没有需要迁移的中间状态。
 
 ### 4.8 基线
 
@@ -298,8 +332,8 @@ B 未知时不猜成最新版本，这是契约 A.4 的「历史模板不可确�
 
 ServingGroup controller 在一个组里面做的事，规则沿用 v2，没有变：
 
-- Role 实例按序号。Role 一级的 N、U、S、P、surge 标记、转正、回收、候选次序（04 第 5 节的 A2–A8）。
-- roleCoordination（04 第 8 节）。
+- Role 实例按序号。Role 一级的 N、U、S、P、surge 标记、转正、回收、候选次序（v2 的 04 第 5 节的 A2–A8；v2 指 `docs/proposal/modelserving-rollout-final/`）。
+- roleCoordination（v2 的 04 第 8 节）。
 - 原地更新和它的接口点（007 的 05 第 4 节）。
 - 成员状态的判定（终态、重启故障、grace、`-1`）和 D9、D10、D13、D14。
 
@@ -369,7 +403,34 @@ L4 和 L5 是 007 里「没有模型证据」的两条。这次各有一个小�
 | --- | --- |
 | `kubectl delete servinggroup`（后台，默认） | 组对象立刻消失，垃圾回收器随后删它的 Pod。ModelServing controller 看到少了一个组，按数量补一个新的。旧组的 Pod 还在终止时新组可能已经在创建：容量短暂超过 N + S |
 | 同上，`--cascade=foreground` | 与 G1、G2 的删除相同 |
-| `--cascade=orphan` | Pod 留下，没有 controller owner。它们带着 ModelServing 和组名的标签，按 [06](06-live-upgrade.md) 的规则被收养：ModelServing controller 重建同名的组，ServingGroup controller 换回 owner |
+| `--cascade=orphan` | Pod 留下，没有 controller owner，成为**无主的成员 Pod**。按下面的规则被收养 |
+
+**无主的成员 Pod**：带这个 ModelServing 的标签和代际号标签，没有 controller owner，不在终止中，名字是它的 `group-name` 标签那个组的一个期望成员的名字（[06](06-live-upgrade.md) 的 5.1）。代际号标签是 ServingGroup controller 管过它的痕迹：随手建一个带标签的 Pod 不算。ModelServing controller 通过 Pod 缓存上的一个索引（带它的标签、没有 controller owner）知道名下有没有这样的 Pod；这是缓存，不是记忆，动手之前直读。
+
+1. ServingGroup controller 的 Pod 事件处理看到这样的 Pod，把所属的 ModelServing 入队（两个 controller 在同一个进程里）。
+2. ModelServing controller 直读确认。组名对应的 ServingGroup 不存在，并且 Pod 的版本读得到：按 [06](06-live-upgrade.md) 的 T3 建同名的组，带 `adopt-members` 注解，版本取 Pod 的标签。
+3. ServingGroup controller 换回 owner、起账本，写 Adopted（06 的 T4 到 T6）。
+
+收养期间**只有 G4 不放行**：名下有接管中的组、或者有还没建出组的无主成员 Pod 时，这个 ModelServing 不按数量新建组；G1、G2、G3 和 `status` 照常。接管注解不动。接管中的组占一个位置，不是缩容和替换的候选。
+
+收养有出口，不会一直挡着 G4：
+
+| 情形 | 处理 |
+| --- | --- |
+| Pod 的版本指向的 ControllerRevision 已经不在（组被删之后它不再被引用，可能已经清理） | 不建组，不接管。发事件，由人处理 |
+| 名字对不上任何期望成员，或者不带代际号标签（例如 `kubectl debug --copy-to` 的副本、手工建的 Pod） | 同上 |
+| 接管中的组超过一个可配的期限还有换不了 owner 的 Pod | ServingGroup controller 照样写 Adopted，并发事件；换不了的 Pod 之后对这个组是外来的 |
+
+这三种 Pod 都不再算无主的成员 Pod，不再挡 G4。
+
+有一个竞态：ModelServing controller 可能先看到「少了一个组」并按数量建了一个新组，之后才收到无主 Pod 的事件。
+
+- 新组的名字不同（随机名字）：收养完成之后多出一个组，按缩容的次序删掉一个。
+- 新组的名字相同（序号名字，取到了同一个序号）：它建不出自己的成员，名字被无主的 Pod 占着。它的版本和这些 Pod 相同时，Pod 直接是它的待接管成员。版本不同时，这些 Pod 对它是外来的。ModelServing controller 直读确认这个同名的组是刚按数量建出来的（没有任何 Established 的实例，没有就绪的成员，不带 `adopt-members`），才把它前台删除，再用 Pod 的版本建同名的组并接管。确认不了的不删：无主的 Pod 按上表第二行处理。
+
+无主的 PodGroup、Service 同理：不带 `adopt-members` 的组不把同名的无主对象收为己有，创建撞名字时报告并等待。所以删掉那个同名的新组时，被 orphan 留下的 PodGroup、Service 和 Pod 一样不受影响。
+
+整条路是推演，没有验证。
 
 ### 5.6 PodGroup 和 Service
 
@@ -407,11 +468,15 @@ L4 和 L5 是 007 里「没有模型证据」的两条。这次各有一个小�
 
 新进程（重启、换主、升级）开始写之前：
 
-1. 对 ModelServing、ServingGroup、Pod 各做一次一致性的 LIST，等缓存追上这次 LIST 的版本。
-2. ServingGroup controller 先把每个组处理一遍，写出当前的 `status`。
-3. 之后 ModelServing controller 才发组的删除和创建。
+1. 对 ModelServing、ServingGroup、Pod 各做一次一致性的 LIST，等缓存追上。「追上」逐对象判断：LIST 返回的每个对象，缓存里有它，并且 resourceVersion 相同或者是之后的事件带来的；LIST 里没有而缓存里有的对象，等到缓存里也没有。不依赖 bookmark 什么时候到。
+2. ServingGroup controller 对每个组**尝试**一遍。尝试成功的写出当前的 `status`。
+3. 一个 ModelServing 名下的组都被尝试过之后，ModelServing controller 才对这个 ModelServing 发组的删除和创建。
 
-第 1 步挡住「缓存里缺最新的组，于是再建一批」和「缓存里的组是旧的，于是删错一个」。第 2 步挡住「停机期间 Pod 坏了，`status` 里 Ready 还是真」。屏障是进程内的一个信号，只扣留动作。
+第 1 步挡住「缓存里缺最新的组，于是再建一批」和「缓存里的组是旧的，于是删错一个」。第 2 步挡住「停机期间 Pod 坏了，`status` 里 Ready 还是真」。屏障是进程内的信号，只扣留动作。
+
+- **屏障按 ModelServing 设。**一个 ModelServing 的组没过完，不挡别的 ModelServing。
+- **尝试出错的组不挡路。**这一遍出错的组（引用的 ControllerRevision 不在、plugin 报错）照样写 `status`：已观测，Ready 按看到的成员照实算，带 `ReconcileFailed`（A1）。成员都在服务的，它是一个健康的组，过期的话按健康额度替换；成员不齐或不就绪的，它是未就绪的组。`status` 写不出来的组保持原样，仍然是未观测，不是替换候选；它持续挡住滚动时报 `GroupNotObserved`。两种都不挡同一个 ModelServing 的其余动作。
+- **耗时随组数增长。**每次重启、换主之后要等全部组各过一遍，组很多时由客户端限流决定。没有估算，留给真实验证。
 
 ### 6.4 两个进程同时在写
 
@@ -429,12 +494,16 @@ L4 和 L5 是 007 里「没有模型证据」的两条。这次各有一个小�
 | plugin 钩子 | 重复调用 |
 | 缩容、替换 | 两边可能各选一个，一个额度删两个 |
 
+**原进程已经退出，它发出的请求还在路上。**请求可以在 apiserver 的优先级与公平队列里排队，原进程优雅退出时请求已经发出。它在新进程的一致性 LIST 之后才落地的话，后果与上表相同（多建一个组；替换的删除晚到时一个额度删两个），而这时并没有两个进程。部署前提（选主、失主退出、接管屏障）排除不了它；能做的是让请求带较短的超时。这一条是按 Kubernetes API 的行为推出来的，没有在集群上验证。
+
 模型里还有一种形态：旧的一边以为实例在创建中、把刚清空的 Pod 又建出来，新的一边再删掉；它持续到旧的一边退出为止，不产生错误的终局（[05](05-inference-verification.md) 第 4 节）。
 
 ### 6.5 没有解决的
 
 - **预算是对多个对象求和。**删一个组可以带上它自己的 resourceVersion；别的组在观察之后变了，挡不住。
-- **健康额度按晚一跳的 `status` 算。**Pod 变化，组的 `status` 才变，ModelServing controller 才看到。一个组刚丢了就绪、`status` 还没更新的那一小段时间里，ModelServing controller 可能多删一个健康的组。今天单个 controller 直接读 Pod 的缓存，也有这种滞后，只是少一跳。模型里这一条可达（[05](05-inference-verification.md) 的 L1）。
+- **健康额度按晚一跳的 `status` 算。**Pod 变化，组的 `status` 才变，ModelServing controller 才看到。一个组刚丢了就绪、`status` 还没更新的那一小段时间里，ModelServing controller 可能多删健康的组。界是瞬时的：任一时刻真实就绪的组数不低于 N − U − 状态还没写出来的组数；一轮里多删的不超过 U + S。它不是累计的界：同一个组一直落后时，每建好一个新组就会按旧的就绪数再删一个旧组。所以「一小段时间」靠的是 ServingGroup controller 写得出 `status`，出错的轮次也写（A1）；`status` 写不出来时这个窗口没有上界。今天单个 controller 直接读 Pod 的缓存，也有滞后，只是少一跳，也没有「写不出来」这一种。模型里这一条可达，瞬时的界在模型里成立（[05](05-inference-verification.md) 的 L1、L2）。
+- **缩容的次序同样晚一跳。**它按报告的就绪排。一个组刚变坏而 `status` 还没写，缩容可能删掉一个健康的组而留下它；一个新组刚就绪而 `status` 还没写，缩容可能把它当成未就绪的先删。缩容不占预算，所以这不算越界，但结果比直接读 Pod 时差。
+- **Drained 也晚一跳。**Drained 写成真之后又有成员出故障、而 ServingGroup controller 还没把它写回假的那一小段时间里，组的 DELETE 的 resourceVersion 条件是满足的：组被前台删除，新出故障的成员和健康的成员一起删。结果仍然是「故障成员先停下、再删其余的」里的一种，只是新出故障的那个成员没有被单独等。新进程接管之后，对一个失败的组的第一次尝试出错时也是这样：Drained 是上一个进程写的。三个模型都没有这个窗口。
 - **并行度的上限在限流上。**不同的组并行，但每个生命周期步骤的写也多了。没有测量。
 
 ## 7. plugin 调用点
@@ -443,17 +512,23 @@ L4 和 L5 是 007 里「没有模型证据」的两条。这次各有一个小�
 
 | 钩子 | 今天（走读） | 本设计 | plugin 作者要核对的 |
 | --- | --- | --- | --- |
-| `OnPodCreate` | 创建 Pod 之前，`model_serving_controller.go:3242` | ServingGroup controller，创建 Pod 之前。位置不变 | `HookRequest.ServingGroup` 是组名，随机后缀时不能再解析出序号；需要序号的 plugin 只能用在序号命名的 ModelServing 上 |
+| `OnPodCreate` | 创建 Pod 之前，`model_serving_controller.go:3242` | ServingGroup controller，创建 Pod 之前。位置不变 | `HookRequest.ServingGroup` 是组名，随机后缀时不能再解析出序号；需要序号的 plugin 只能用在 owner 是 LeaderWorkerSet 的 ModelServing 上（它一直是序号名字）。别的 ModelServing 在回退窗口关上之后新建的组没有序号 |
 | `OnPodReady` | Pod 就绪时，`:2156` | ServingGroup controller，同一个时机 | 接管之后可能对已经就绪的 Pod 再调一次 |
 | `OnRoleSync` | 每轮同步一个 Role 实例时，`:1547` | ServingGroup controller，每轮 | 传入的 owner：plugin 创建的对象挂在 ServingGroup 名下 |
-| `OnRoleDelete` | 删除一个 Role 实例时，`:3118`；删除整个组时对每个实例调（`:3369-3375`） | **实例被清空**：写 Draining 之后、删 Pod 之前调；离开 Draining 的那次 status 写之前，本进程必须成功调过一次。**整个组被删**：ServingGroup controller 看到 `deletionTimestamp` 时尽力调一次，不保证 | 幂等。**组被删时不保证调到**：plugin 的集群内资源要挂在 ServingGroup 名下，靠垃圾回收清理。在钩子里清理集群外资源的 plugin 要另想办法 |
+| `OnRoleDelete` | 删除一个 Role 实例时，`:3118`；删除整个组时对每个实例调（`:3369-3375`） | **实例被清空**：写 Draining 之后、删 Pod 之前调；调之前直读这个组的 `status`，账本仍是 Draining(g) 才调；离开 Draining 的那次 status 写之前，本进程必须成功调过一次（接管到一个已经清空的 Draining 时先补调）。**整个组被删**：ServingGroup controller 看到 `deletionTimestamp` 时尽力调一次，不保证 | 幂等。**组被删时不保证调到**：plugin 的集群内资源要挂在 ServingGroup 名下，靠垃圾回收清理。在钩子里清理集群外资源的 plugin 要另想办法 |
 | 原地更新的 plugin 接口 | 打补丁时 | ServingGroup controller | 无变化 |
 
-`HookRequest` 另带上实例的代际号，plugin 可以用它分辨同一个序号上的新旧两批。
+`HookRequest` 另带上实例的代际号 g，plugin 可以用它分辨同一个序号上的新旧两批。调用之前的直读挡住「拿着过期的 Draining 的进程对新一批实例调删除钩子」的大部分情形，挡不住直读之后才发生的变化，所以 plugin 自己也要按 g 核对。内置的 headless Service plugin 今天靠进程内的一份记忆防止把旧的删除决定用到新对象上（走读，`plugins/headless_service_plugin.go:109-181`）；接管之后这份记忆没有了，要改成按对象上的事实核对：Service 创建时写上实例的代际号，删除之前比对。
+
+**钩子一直失败的后果。**今天钩子在 Pod 的 DELETE 之后调，失败不挡删除。本设计里 `OnRoleDelete` 不成功，实例就停在清空中：不删 Pod，不重建。一个出故障的 plugin 因此会挡住按范围的恢复、Role 的缩容和按重建的 Role 滚动。组上用 `DrainBlocked` condition 报告，并发事件。
+
+**`ServingGroupRollingUpdate` 下不要依赖 `OnRoleDelete`。**这个模式下滚动、缩容、整组恢复全是整组删除，钩子只是尽力调一次；它不是偶尔调不到，是从来不保证。
 
 `OnRoleDelete` 在组删除时不再有保证，是本设计对 plugin 作者唯一收紧的地方。它是「组没有 finalizer」的直接后果。两个没选的做法：给组加 finalizer（kthena 不在时组、namespace、CRD 删不掉）；删组之前加一段由 `spec` 触发的清空协议（有保证，多一跳，controller 不在时组删不掉）。
 
 内置的 headless Service plugin 创建的 Service 挂在 ServingGroup 名下，随组级联删除，不依赖钩子。
+
+在网版本的 plugin 框架比上游多三个钩子：Pod 运行、Pod 删除、整组删除。目标版本要带上它们（[06](06-live-upgrade.md) 的 P1），调用者同样是 ServingGroup controller：前两个在对应的 Pod 事件上调；整组删除的钩子与组被删时的 `OnRoleDelete` 是同一个时机，同样只尽力调一次。
 
 ## 8. 周边组件
 
@@ -478,7 +553,7 @@ autoscaler 仍然改 ModelServing 的副本数和 Role 的 replicas；到 Pod �
 用 `maxUnavailable` 或百分比的 PDB，要通过 Pod 的 controller owner 的 `scale` 子资源取期望数（按 Kubernetes 的 disruption controller 的源码，没有在集群上验证）。今天 owner 是 ModelServing，它有 `scale` 子资源，`specReplicasPath` 是 `.spec.replicas`，也就是组的个数，不是 Pod 的个数。owner 换成 ServingGroup 之后：
 
 - ServingGroup 没有 `scale` 子资源时，这类 PDB 解不出期望数，驱逐全部被拒。
-- 所以 ServingGroup 要有 `scale` 子资源。`spec` 里加一个由 ModelServing controller 写的 `expectedPods`（这个组期望的 Pod 数），`specReplicasPath` 指向它；`status` 里对应的是现有的 Pod 数。它只给 PDB 读；有人通过 `scale` 改它，下一轮被写回。
+- 所以 ServingGroup 要有 `scale` 子资源。`spec` 里加一个由 ModelServing controller 写的 `expectedPods`（这个组期望的 Pod 数），`specReplicasPath` 指向它；`status` 里对应的是现有的 Pod 数。它只给 PDB 读；有人通过 `scale` 改它，下一轮被写回。它随 Role 的副本数变，和 Role 副本数的下发是同一次 `spec` 写。
 
 这样 PDB 的百分比第一次是按 Pod 数算的。用整数 `minAvailable` 的 PDB 不受影响。
 
@@ -488,13 +563,41 @@ autoscaler 仍然改 ModelServing 的副本数和 Role 的 replicas；到 Pod �
 
 ### 8.7 协调模式的基线
 
-roleCoordination 今天把滚动的基线写在 ControllerRevision 的注解上。ServingGroup controller 不写 ControllerRevision；这份基线由 ModelServing controller 通过 G5 下发到组的 `spec`。
+roleCoordination 今天把滚动的基线写在 ControllerRevision 的注解上。ServingGroup controller 不写 ControllerRevision；这份基线由 ModelServing controller 通过 G5 下发到组的 `spec`。ControllerRevision 上的那个注解仍然由 ModelServing controller 写，回退窗口之内旧版本读得到；新版本自己不读它。
+
+### 8.8 事件
+
+今天全部事件都记在 ModelServing 上。两个 controller 之后：
+
+| 事件 | 记在哪个对象上 | 谁发 |
+| --- | --- | --- |
+| Role 实例和 Pod 一级的（实例在创建、在删除、已运行；plugin 报错；原地更新；删除时身份变了） | ServingGroup | ServingGroup controller |
+| 组一级的（建了哪个组、删了哪个组、原因是缩容、替换还是失败；版本解析不出来；不接管的无主 Pod） | ModelServing，message 带组名 | ModelServing controller |
+
+`kubectl describe modelserving` 里看得到每个组的来去，看不到组里面的细节；细节在 `kubectl describe servinggroup`。组被删掉之后，它的事件在保留期之内仍然可以按 `involvedObject.name` 查。组名每次都换，同一个 reason 的事件不再按名字聚合。
+
+### 8.9 拓扑和亲和
+
+`groupPolicy` 和按 Role 的网络拓扑今天写进每个组的 PodGroup。本设计不变：值经 G5 进到组的 `spec`，由 ServingGroup controller 写进 PodGroup。PodGroup 的 owner 是 ServingGroup，名字跟着组名。两个进程并存时多建的组也带一个 PodGroup。Volcano 对 PodGroup 的 owner 变化、对短暂多出来的 PodGroup 的反应没有验证。
+
+### 8.10 RBAC
+
+chart 里：
+
+| 权限 | 给谁 |
+| --- | --- |
+| `servinggroups` 的 get、list、watch | 聚合进内置的 view、edit、admin |
+| `servinggroups` 的 delete | 聚合进 edit、admin。删一个组等于重建一个副本；能删 Pod 的人本来就能触发恢复 |
+| `servinggroups` 的 create、update、patch；`servinggroups/status` 的任何写 | 只给 controller。手工建一个带正确 owner 的组会被当成多出来的组参加缩容，老组里有 deletion cost 更低的时候被删的是老组；`status` 是恢复的输入 |
 
 ## 9. 原地更新
 
 原地更新整个在 ServingGroup controller 里面，接口点沿用 007 的 05 第 4 节。相对 007 多出一处：
 
-- `ServingGroupRollingUpdate` 配原地更新时，组不被替换，组的版本原地变。所以 `spec.revision` 在这种配置下可以被 G5 改写；组的版本以 `status.revision` 为准，更新途中的组按「目标、未就绪」计。成员分类先看原地更新的进度注解，再看重启故障：正在按预期重启的容器不是故障。
+- `ServingGroupRollingUpdate` 配原地更新时，组不被替换，组的版本原地变。所以 `spec.revision` 在这种配置下可以被 G3 改写（4.2）；更新途中的组 `spec.revision` 已经是 T，`status.revision` 还不是，按「目标、未就绪」计。成员分类先看原地更新的进度注解，再看重启故障：正在按预期重启的容器不是故障。
+- **回到重建。**007 的 05 的接口点里，「有终态成员按重建」「超期」「被作废」「plugin 不支持」这几个结果都要求放弃原地更新。ServingGroup controller 遇到其中任何一个，就把组的 `RecreateRequired` condition 写成真，并停下组内的原地更新。ModelServing controller 把这样的组按过期的、不可原地更新的处理：在预算之内删除它，建一个目标版本的新组。`RecreateRequired` 只增不减，随组一起消失。今天「有一个 plugin 不支持就整体回退成重建」的行为由此保留，只是判断从 ModelServing controller 挪到了 ServingGroup controller，并且按组进行。
+
+原地更新没有模型，上面两条是推演。
 
 007 的 05 里要裁定的限制（T17–T21、T26）不因本设计改变，仍然等裁定。
 
@@ -528,7 +631,7 @@ roleCoordination 今天把滚动的基线写在 ControllerRevision 的注解上�
 | 007 的 04 | 这里 | 原因 |
 | --- | --- | --- |
 | 第 6 节是「规则的轮廓」 | 4.1–4.8，一套完整的算式和次序 | 终稿 |
-| 6.3：保护版本等于基线的组 | 保护非目标的组，不问版本 | 基线没有推进时，现存的第三个版本的组会被换回基线（EX-1） |
+| 6.3：保护版本等于基线的组 | 保护非目标的组，基线版本的优先 | 基线没有推进时，现存的第三个版本的组会被换回基线（EX-1）；只按次序时，补出来的基线组会被换掉（EX-4） |
 | 6.4：缩容时「既不是基线也不是目标的先」，deletion cost 在「基线后」前面 | 「过期的先」；「受保护的后」在 deletion cost 前面 | SG-C12 会删掉最新的目标组；多出一个组时调大 P 会删掉受保护的组（EX-2） |
 | 6.4：失败的组在缩容次序里排第一 | 失败的组只由 G1 删 | 否则缩容绕过 D15 |
 | 7.1：等两个计数为 0 | Drained condition | 计数的零值正好是「可以删」 |

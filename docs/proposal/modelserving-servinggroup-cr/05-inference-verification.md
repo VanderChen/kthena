@@ -8,13 +8,14 @@
 | 模型在哪 | 任务目录 `issues/features/008-modelserving-servinggroup-cr-design-IP/model/`，不在本仓库里。只用 Python 标准库，`uv` 运行 |
 | 状态 | **没有在集群上运行任何东西。**模型检查的是规则，不是实现 |
 
-## 1. 三类结论
+## 1. 结论的类别
 
 | 类 | 含义 | 有哪些 |
 | --- | --- | --- |
-| 模型穷举过的 | 在小规模上把全部交错走了一遍，性质没有被违反；并且去掉对应的规则之后性质会被违反 | 组一级的预算、次序、上限、保护；ModelServing controller 在任何一次写之后被接管；在途屏障、接管屏障、升级闸门；失败的组等清空再删；账本的直读和代际号；Role 实例的账本在任何两次写之间停下 |
-| 脚本重放的 | 一条确定的执行过程，由规则函数算出，和契约的过程表比可观察量 | 契约 2.12 的 35 个组合场景、RC-01、附录 B 的查表行 |
-| 推演 | 按规则写出来的论证，没有机器检查 | Role 一级与账本的衔接；plugin 钩子的次序；condition；`status` 被改写；升级接管里成员一级的步骤；两个 controller 之间除了「就绪晚一跳」之外的滞后 |
+| 模型穷举过的 | 在小规模上把全部交错走了一遍，性质没有被违反；并且去掉对应的规则之后性质会被违反 | 组一级的两个额度、上限、缩容时过期的先、受保护的集合；ModelServing controller 在任何一次写之后被接管；在途登记、在途屏障、接管屏障；账本的直读（把缺失当证据的那一半）和代际号（删除时的比较）；Role 实例的账本在任何两次写之间停下 |
+| 模型里按构造成立的 | 模型的控制流本身不允许违反，所以「没有违反」不是检查出来的；能说明的只是去掉规则会出事 | 升级闸门（放行之前只走接管这一条边）；失败的组等清空再删（计划只在已清空时删） |
+| 脚本重放的 | 一条确定的执行过程，由规则函数算出，和契约的过程表比可观察量 | 契约 2.12 的 35 个组合场景、RC-01、附录 B 的查表行；五个 runner 停点；缩容时受保护的排在 deletion cost 前面（EX-2）；未观测的组不是替换候选（EX-3）；空组改版本（NEW-6、NEW-9、NEW-10） |
+| 推演 | 按规则写出来的论证，没有机器检查 | 第 6 节 |
 | 留给真实验证 | 依赖 Kubernetes 或别的组件的实际行为 | 第 7 节的清单 |
 
 ## 2. 场景重放
@@ -22,10 +23,11 @@
 `grouplevel.py` 是组一级的规则函数：输入是 `spec` 和一组 ServingGroup 的状态，输出是这一轮的写。它是纯函数，在工作副本上迭代（02 的 4.2）。`sim.py` 用它驱动一个确定的模拟器：脚本里写用户改了什么、哪个组就绪了、哪个组消失了，模拟器记下每个阶段的状态，生成过程表。`scenarios.py` 把契约的每个场景写成这样一段脚本，并且把契约的过程表里读出来的可观察量（创建几个组、删除几个组、哪些原有的组保住身份、终态各版本的个数、终态就绪数）写在旁边。
 
 - 结论不是手写的：`run_scenarios.py` 比较两边的可观察量，相同是「一致」，不同是「有意变化」；不同而没有写原因、或者写了原因而没有不同，脚本报错。
-- 每次健康的组被替换，脚本检查 Ready 没有低于 `minAvailable`；每次替换，检查被替换的是过期的组。全部场景里这两项都是 0。
+- 每次健康的组被替换，脚本检查 Ready 没有低于 `minAvailable`。全部场景里是 0。（脚本另记一项「被替换的是过期的组」，它用的是规则自己的分类，按构造恒为 0，不算证据。）
+- 比较的只有这五个可观察量。过程中停在哪里不在比较里；停点另有下面的重放。两个场景的删除次序与契约的表不同而观察不到：SG-P03 上半三个删除是同一轮发出的；SG-C15 最后三个旧组契约的表是一次一个，这里是先两个再一个，契约自己的预算允许。
 - 04 第 3 节的汇总表和 04a 的全部过程表由脚本写入；`build_docs.py --check` 校验文档里的表和模型的输出相同。
 
-结果：42 段脚本（35 个场景拆成 38 段，加 RC-01 和 3 个按契约规则补的场景），31 个一致，11 个有意变化；附录 B 的 14 行全部相同。
+结果：43 段脚本（35 个场景拆成 38 段，加 RC-01 和 4 个按契约的规则补的场景 EX-1 到 EX-4），32 段一致，11 段有意变化；附录 B 的 14 行全部相同。另有 10 个契约里没有的场景（NEW-1 到 NEW-10），只生成过程表，不比较。
 
 **每条规则是不是都有用。**把规则函数里的规则一次去掉一条，全部脚本重放一遍，看哪些场景的可观察量变了：
 
@@ -34,15 +36,28 @@
 | --- | --- | --- |
 | 缩容时过期的组不优先（007 的次序） | 2：SG-C12、SG-P05 | SG-C12：creates 2 → 3；deletes 4 → 5；survivors g4 → 无 |
 | cap 恒为 N（没有 surge） | 7：SG-S04、SG-C03、SG-C12、SG-C16、SG-C13、SG-C14、SG-P10 | SG-S04：creates 2 → 0；deletes 2 → 0；survivors g3、g4 → g0、g1、g3、g4 |
-| 容量只数 live（终止中和失败的不占位） | 26：SG-S02、SG-S03、SG-S04、SG-S05、SG-S06、SG-S07、SG-C01、SG-C03 等 | SG-S02：max_active 2 → 3 |
+| 容量只数 live（终止中和失败的不占位） | 27：SG-S02、SG-S03、SG-S04、SG-S05、SG-S06、SG-S07、SG-C01、SG-C03 等 | SG-S02：max_active 2 → 3 |
 | 健康的候选不受 maxHealthyScaleDown 限制 | 1：SG-P09 | SG-P09：min_ready 2 → 1；min_real_ready 2 → 1；breach 0 → 2 |
 | 只保护版本等于基线的组 | 1：EX-1 | EX-1：creates 1 → 3；deletes 1 → 3；survivors g0、g1 → 无 |
+| 受保护的名额不先给基线版本的组 | 1：EX-4 | EX-4：survivors g0 → g1；final v1×1、v3×2 → v2×1、v3×2 |
 | 缩容时 deletion cost 排在受保护之前 | 1：EX-2 | EX-2：survivors g0、g1、g2 → g1、g2、g3；final v1×3 → v1×2、v2×1 |
 | 缩容的删除还没消失就开始替换 | 0： | — |
 | 未观测的组当作未就绪的候选 | 1：EX-3 | EX-3：min_real_ready 3 → 2 |
 <!-- END GENERATED: mutants -->
 
-「缩容的删除还没消失就开始替换」不改变这些可观察量：它只改变过程中的停点（契约的表里「规模完成」那一行出不出现）。这条规则是为了守契约 A.4 第 2 条的字面，没有脚本能把它和不守区分开。
+「缩容的删除还没消失就开始替换」不改变这五个可观察量：它只改变过程中的停点。停点单独重放。下面五行各取 runner 一个用例里的一步，那一步的期望是一个停点；在那个状态上算一轮的写，规则在和不在各一次：
+
+<!-- BEGIN GENERATED: stops -->
+| 场景 | runner 用例 | 这一步 | runner 的期望 | 本设计这一轮的写 | 去掉「缩容没做完不替换」之后 |
+| --- | --- | --- | --- | --- | --- |
+| SG-C05 | RUN-629 | 缩容删的两个组还在终止，v2 到来 | 活动 5、就绪 3，不再有动作 | 无 | 删 g2（替换）：**停点出不来** |
+| SG-C10 | RUN-634 | 缩容删的两个组还在终止，v2 到来（之后还有 v3） | 活动 5、就绪 3，不再有动作 | 无 | 删 g2（替换）：**停点出不来** |
+| SG-C07 | RUN-631 | 同一请求里 N 5→3 并提交 v2 | 先到活动 3、就绪 3、三个都是旧版本 | 删 g4（缩容）；删 g3（缩容） | 删 g4（缩容）；删 g3（缩容）；删 g2（替换）：**停点出不来** |
+| SG-C02 | RUN-626 | N 3→2，g2 是未就绪的 v2 | 先到活动 2、就绪 2、两个旧版本 | 删 g2（缩容） | 删 g2（缩容）；删 g1（替换）：**停点出不来** |
+| SG-C12 | RUN-636 | N 4→3，U=0、S=1，已有一个多出来的 v2 | 先缩容完成（活动 4、就绪 4） | 删 g3（缩容） | 删 g3（缩容）；删 g2（替换）：**停点出不来** |
+<!-- END GENERATED: stops -->
+
+规则在时五个停点都与 runner 的期望相同，去掉之后都出不来。这是「缩容没做完不替换」这条规则仅有的证据；穷举模型的性质查不到它，因为它不是预算需要的。其余场景的停点没有逐步比较。
 
 ## 3. 组一级的穷举模型
 
@@ -50,16 +65,17 @@
 
 | 模型里有什么 | 内容 |
 | --- | --- |
-| ModelServing controller | 每一步只发一个写，每个写之前重新计划。看到的是缓存加上自己的在途登记；登记了而缓存里没有的组算未就绪。有在途的创建时不发别的写 |
+| ModelServing controller | 每一步只发一个写，每个写之前重新计划。看到的是缓存加上自己的在途登记；登记了而缓存里没有的组算未就绪。有在途的创建时不发别的写。设计允许一轮发一批创建（02 的 4.5）；模型里每个写之后都可以停下并接管，一批等价于其中的一串，这一步等价是推演 |
 | 接管 | 任何时刻进程可以被换掉，在途登记丢失。有接管屏障时新进程从一致的 LIST 和刷新过的组 `status` 开始；没有时（或者旧进程还在写时）它的缓存可以缺最新的组 |
 | 环境 | 组就绪、失去就绪、失败、清空、消失；缓存按创建的先后追上；用户按脚本改 `spec` |
 | 升级接管 | 存量的组变成对象；闸门放行之前不做别的 |
 | 性质 PA | 健康的组被替换之后，真实的 Ready 不低于 `minAvailable` |
-| 性质 PB | 被替换的是过期的组；缩容只在有多余时发生；缩容不在还有过期的组时删健康的好组 |
-| 性质 PD | 接管完成之前不创建、不删除组 |
-| 性质 PE | 每个静止的状态都是完整的：没有失败的、终止中的、没被看到的组；活动数不超过上限；N 个好组，除非有起不来的组占着预算 |
+| 性质 PB | 被替换的是过期的组；缩容只在有多余时发生；缩容不在还有过期的组时删健康的好组。分类用终稿的规则独立算，不用被检查的那套规则，所以分类规则被改坏时它报得出来 |
+| 性质 PD | 接管完成之前不创建、不删除组。按构造成立（第 1 节） |
+| 性质 PE | 每个静止的状态都是完整的：没有失败的、终止中的、没被看到的组；活动数不超过上限；全部组就绪时恰好 N 个好组、没有过期的组。有未就绪的组时最后一项不检查，比「除非有起不来的组占着预算」弱 |
+| 性质 PL | 只在带滞后的形状（L1、L2）里有意义：健康的组被替换之后，真实的 Ready 不低于 `minAvailable` 减去 `status` 落后的组数 |
 | 性质 PF | 组的个数有界 |
-| 性质 PG | 失败的组清空之后才被删（D15） |
+| 性质 PG | 失败的组清空之后才被删（D15）。按构造成立（第 1 节） |
 | CYCLE | 没有活锁 |
 | W-PC（说明项） | 超过上限创建了组。只在「进程按一份缺了组的视图行动」时可达 |
 
@@ -67,57 +83,69 @@
 
 <!-- BEGIN GENERATED: group-model -->
 ```text
-scenario                                      rules                   spec             note                                                 states  sinks  violations
-G0 rollout, no takeover                       final                   N=3 U=1 S=0 P=0  -                                                    20      1      -
-G0 rollout, no takeover                       final                   N=3 U=0 S=1 P=0  -                                                    20      1      -
-G0 rollout, no takeover                       final                   N=3 U=1 S=1 P=0  -                                                    58      1      -
-G1 rollout                                    final                   N=3 U=1 S=0 P=0  -                                                    44      3      -
-G1 rollout                                    final                   N=3 U=0 S=1 P=0  -                                                    48      3      -
-G1 rollout                                    final                   N=3 U=1 S=1 P=0  -                                                    145     3      -
-G2 two rollouts                               final                   N=3 U=1 S=0 P=0  -                                                    180     5      -
-G2 two rollouts                               final                   N=3 U=0 S=1 P=0  -                                                    222     5      -
-G2 two rollouts                               final                   N=3 U=1 S=1 P=0  -                                                    705     5      -
-G3 scale during rollout                       final                   N=2 U=1 S=0 P=0  -                                                    210     6      -
-G3 scale during rollout                       final                   N=2 U=0 S=1 P=0  -                                                    209     6      -
-G3 scale during rollout                       final                   N=2 U=1 S=1 P=0  -                                                    435     6      -
-G4 partition                                  final                   N=3 U=1 S=0 P=2  -                                                    64      12     -
-G4 partition                                  final                   N=3 U=0 S=1 P=2  -                                                    62      10     -
-G4 partition                                  final                   N=3 U=1 S=1 P=2  -                                                    134     12     -
-G5 bad target                                 final                   N=3 U=1 S=0 P=0  -                                                    49      4      -
-G5 bad target                                 final                   N=3 U=0 S=1 P=0  -                                                    49      4      -
-G5 bad target                                 final                   N=3 U=1 S=1 P=0  -                                                    170     4      -
-G6 faults                                     final                   N=3 U=1 S=0 P=0  -                                                    1273    8      -
-G6 faults                                     final                   N=3 U=0 S=1 P=0  -                                                    2167    8      -
-G6 faults                                     final                   N=3 U=1 S=1 P=0  -                                                    3889    8      -
-G7 failure at a canary stop                   final                   N=3 U=1 S=0 P=1  -                                                    24      5      -
-G8 adoption                                   final                   N=3 U=1 S=0 P=0  -                                                    42      3      -
-G8 adoption                                   final                   N=3 U=0 S=1 P=0  -                                                    44      3      -
-G8 adoption                                   final                   N=3 U=1 S=1 P=0  -                                                    116     3      -
-G8 adoption                                   final                   N=3 U=1 S=0 P=1  canary in progress                                   18      3      -
-G8 adoption                                   final                   N=2 U=0 S=1 P=0  rollout with a surge group in progress               19      2      -
-L1 status one hop late                        final                   N=3 U=1 S=0 P=0  a drop of Ready is seen late                         133     2      PAx6
-L1 status one hop late                        final                   N=3 U=0 S=1 P=0  a drop of Ready is seen late                         169     2      PAx9
-L1 status one hop late                        final                   N=3 U=1 S=1 P=0  a drop of Ready is seen late                         376     2      PAx20
-M1 scale-down order of 007                    no outdated-first       N=4 U=0 S=1 P=0  -                                                    70      2      PBx4
-M2 cap is always N                            no surge cap            N=3 U=0 S=1 P=0  -                                                    1       1      PEx1
-M3 capacity counted on live groups            cap on live             N=3 U=1 S=1 P=0  -                                                    96      1      W-PCx8
-M4 no healthy budget                          no maxHealthyScaleDown  N=3 U=1 S=0 P=1  -                                                    54      2      PAx2
-M5 no in-flight registry                      no registry             N=3 U=1 S=0 P=0  -                                                    7822    1      W-PCx254, PFx128
-M6 no barrier while a creation is in flight   no barrier              N=3 U=1 S=0 P=0  -                                                    409     4      W-PCx24, PBx10
-M7 no adoption gate                           no gate                 N=3 U=1 S=0 P=0  -                                                    154     1      PDx11, PDx27
-M8 a Failed group is deleted at once          no wait                 N=3 U=1 S=0 P=0  -                                                    18      2      PGx3
-M9 no takeover barrier (also: two processes)  stale view              N=3 U=1 S=0 P=0  the view of the new process lacks the newest groups  321     3      W-PCx22
-M9 no takeover barrier (also: two processes)  stale view              N=3 U=0 S=1 P=0  the view of the new process lacks the newest groups  356     3      W-PCx22
-M9 no takeover barrier (also: two processes)  stale view              N=3 U=1 S=1 P=0  the view of the new process lacks the newest groups  935     3      W-PCx54
-M9 no takeover barrier (also: two processes)  stale view              N=3 U=1 S=0 P=0  and group status is stale                            639     4      PAx12, W-PCx39
+scenario                                                  rules                   spec             note                                                 states  sinks  violations
+G0 rollout, no takeover                                   final                   N=3 U=1 S=0 P=0  -                                                    20      1      -
+G0 rollout, no takeover                                   final                   N=3 U=0 S=1 P=0  -                                                    20      1      -
+G0 rollout, no takeover                                   final                   N=3 U=1 S=1 P=0  -                                                    58      1      -
+G1 rollout                                                final                   N=3 U=1 S=0 P=0  -                                                    44      3      -
+G1 rollout                                                final                   N=3 U=0 S=1 P=0  -                                                    48      3      -
+G1 rollout                                                final                   N=3 U=1 S=1 P=0  -                                                    145     3      -
+G2 two rollouts                                           final                   N=3 U=1 S=0 P=0  -                                                    180     5      -
+G2 two rollouts                                           final                   N=3 U=0 S=1 P=0  -                                                    222     5      -
+G2 two rollouts                                           final                   N=3 U=1 S=1 P=0  -                                                    705     5      -
+G3 scale during rollout                                   final                   N=2 U=1 S=0 P=0  -                                                    210     6      -
+G3 scale during rollout                                   final                   N=2 U=0 S=1 P=0  -                                                    209     6      -
+G3 scale during rollout                                   final                   N=2 U=1 S=1 P=0  -                                                    435     6      -
+G4 partition                                              final                   N=3 U=1 S=0 P=2  -                                                    64      12     -
+G4 partition                                              final                   N=3 U=0 S=1 P=2  -                                                    62      10     -
+G4 partition                                              final                   N=3 U=1 S=1 P=2  -                                                    134     12     -
+G5 bad target                                             final                   N=3 U=1 S=0 P=0  -                                                    49      4      -
+G5 bad target                                             final                   N=3 U=0 S=1 P=0  -                                                    49      4      -
+G5 bad target                                             final                   N=3 U=1 S=1 P=0  -                                                    170     4      -
+G6 faults                                                 final                   N=3 U=1 S=0 P=0  -                                                    1273    8      -
+G6 faults                                                 final                   N=3 U=0 S=1 P=0  -                                                    2167    8      -
+G6 faults                                                 final                   N=3 U=1 S=1 P=0  -                                                    3889    8      -
+G7 failure at a canary stop                               final                   N=3 U=1 S=0 P=1  -                                                    24      5      -
+G8 adoption                                               final                   N=3 U=1 S=0 P=0  -                                                    42      3      -
+G8 adoption                                               final                   N=3 U=0 S=1 P=0  -                                                    44      3      -
+G8 adoption                                               final                   N=3 U=1 S=1 P=0  -                                                    116     3      -
+G8 adoption                                               final                   N=3 U=1 S=0 P=1  canary in progress                                   18      3      -
+G8 adoption                                               final                   N=2 U=0 S=1 P=0  rollout with a surge group in progress               19      2      -
+G9 third revision at a canary stop                        final                   N=3 U=1 S=0 P=1  -                                                    367     15     -
+G9 third revision at a canary stop                        final                   N=3 U=0 S=1 P=1  -                                                    409     13     -
+G9 third revision at a canary stop                        final                   N=3 U=1 S=1 P=1  -                                                    807     15     -
+L1 status one hop late                                    final                   N=3 U=1 S=0 P=0  a drop of Ready is seen late                         133     2      PAx6
+L1 status one hop late                                    final                   N=3 U=0 S=1 P=0  a drop of Ready is seen late                         169     2      PAx9
+L1 status one hop late                                    final                   N=3 U=1 S=1 P=0  a drop of Ready is seen late                         376     2      PAx20
+L2 status one hop late, two drops                         final                   N=3 U=1 S=0 P=0  two drops of Ready are seen late                     378     3      PAx15
+L2 status one hop late, two drops                         final                   N=3 U=0 S=1 P=0  two drops of Ready are seen late                     612     3      PAx27
+L2 status one hop late, two drops                         final                   N=3 U=1 S=1 P=0  two drops of Ready are seen late                     1081    3      PAx62
+L2 status one hop late, two drops                         final                   N=4 U=2 S=0 P=0  two drops of Ready are seen late                     1481    3      PAx76
+M1 scale-down order of 007                                no outdated-first       N=4 U=0 S=1 P=0  -                                                    70      2      PBx4
+M2 cap is always N                                        no surge cap            N=3 U=0 S=1 P=0  -                                                    1       1      PEx1
+M3 capacity counted on live groups                        cap on live             N=3 U=1 S=1 P=0  -                                                    96      1      W-PCx8
+M4 no healthy budget                                      no maxHealthyScaleDown  N=3 U=1 S=0 P=1  -                                                    54      2      PAx2, PLx2
+M5 no in-flight registry                                  no registry             N=3 U=1 S=0 P=0  -                                                    7822    1      W-PCx254, PFx128
+M6 no barrier while a creation is in flight               no barrier              N=2 U=1 S=0 P=0  scaling during a rollout                             140     3      PBx5
+M6 no barrier while a creation is in flight               no barrier              N=2 U=0 S=1 P=0  scaling during a rollout                             135     3      PBx8
+M6 no barrier while a creation is in flight               no barrier              N=2 U=1 S=1 P=0  scaling during a rollout                             327     3      PBx16
+M7 no adoption gate                                       no gate                 N=3 U=1 S=0 P=0  -                                                    154     1      PDx11, PDx27
+M8 a Failed group is deleted at once                      no wait                 N=3 U=1 S=0 P=0  -                                                    18      2      PGx3
+M9 no takeover barrier (also: two processes)              stale view              N=3 U=1 S=0 P=0  the view of the new process lacks the newest groups  321     3      W-PCx22
+M9 no takeover barrier (also: two processes)              stale view              N=3 U=0 S=1 P=0  the view of the new process lacks the newest groups  356     3      W-PCx22
+M9 no takeover barrier (also: two processes)              stale view              N=3 U=1 S=1 P=0  the view of the new process lacks the newest groups  935     3      W-PCx54
+M9 no takeover barrier (also: two processes)              stale view              N=3 U=1 S=0 P=0  and group status is stale                            639     4      PAx12, W-PCx39
+M10 only groups of the baseline are protected             no protect-any          N=3 U=1 S=0 P=1  -                                                    19      1      PBx1
+M11 the protected places do not go to the baseline first  no baseline-first       N=3 U=1 S=0 P=1  -                                                    13      1      PBx1
 ```
 <!-- END GENERATED: group-model -->
 
 读法：
 
-- **G0 到 G8 没有任何违反，也没有 W-PC。**包括滚动、连续两次滚动、滚动途中扩缩容、partition 途中改变、坏版本之后修正、组失去就绪和组失败、灰度停点上组失败、升级接管之后滚动。每一项都允许在任何一次写之后接管。
-- **L1 是已知的局限，不是规则的错。**一个组失去就绪、`status` 还没到 ModelServing controller 的那一段时间里，健康额度是按旧值算的，可能多删一个健康的组（02 的 6.5）。模型把它报出来，是为了说明它可达。
-- **M1 到 M9 各去掉一条规则。**每一条都有性质报出来：007 的缩容次序（PB）；上限恒为 N（滚动推不动，PE）；容量只数 `live`（超过上限创建）；没有健康额度（PA）；没有在途登记（组无界地增长，PF）；没有在途屏障（PB）；没有升级闸门（PD）；失败的组立刻删（PG）；没有接管屏障（多建组，以及 `status` 是旧的时候 PA）。
+- **G0 到 G9 没有任何违反，也没有 W-PC。**包括滚动、连续两次滚动、滚动途中扩缩容、partition 途中改变、坏版本之后修正、组失去就绪和组失败、灰度停点上组失败、升级接管之后滚动、灰度停点上提交第三个版本（受保护的基线组创建得最晚）。每一项都允许在任何一次写之后接管。
+- **L1 是已知的局限，不是规则的错。**一个组失去就绪、`status` 还没到 ModelServing controller 的那一段时间里，健康额度是按旧值算的，可能多删健康的组（02 的 6.5）。模型把它报出来，是为了说明它可达。L2 是两次失去就绪。两组里另外检查的性质 PL（健康的组被替换之后，真实的 Ready 不低于 `minAvailable` 减去 `status` 落后的组数）没有被违反：界是瞬时的，不是累计的（04 第 8 节）。模型只有「失去就绪晚一跳」；「变成就绪晚一跳」没有单独建模，它对替换是保守的，对缩容不是（M6 的轨迹就是这一种）。
+- **M1 到 M11 各去掉一条规则。**每一条都有东西报出来，其中 M3 和 M9 的前三行报的是说明项 W-PC，不是性质：007 的缩容次序（PB）；上限恒为 N（滚动推不动，PE）；容量只数 `live`（超过上限创建）；没有健康额度（PA）；没有在途登记（组无界地增长，PF）；没有在途屏障（PB：滚动途中扩缩容时，在途的新组其实已经就绪，被当成未就绪先缩掉）；没有升级闸门（PD）；失败的组立刻删（PG）；没有接管屏障（多建组，以及 `status` 是旧的时候 PA）；只保护基线版本的组（PB）；受保护的名额不先给基线版本的组（PB）。
+- **没有穷举证据的规则**：缩容时受保护的排在 deletion cost 前面（模型里没有 cost，只有 EX-2）；未观测的组不是替换候选（只有 EX-3）；缩容没做完不替换（只有第 2 节的停点）；空组改版本（只有 NEW-6、NEW-9、NEW-10）。
 
 接管前后终局是否相同（静止状态的集合，不看名字）：
 
@@ -138,7 +166,7 @@ G3             U=1 S=1   2                 2              yes
 
 没有接管屏障时会多建组（M9 的 W-PC），但终局的集合仍然相同：多出来的被缩回。
 
-模型没有的：未观测（它有一个场景脚本 EX-3，没有穷举）；deletion cost；两个进程同时在写组一级（只有「视图缺组」这一种后果被建模）；`RoleRollingUpdate` 下的组一级；序号命名。
+模型没有的：未观测（它有一个场景脚本 EX-3，没有穷举）；出错的轮次也写 `status`；deletion cost；空组；G5 和 `sourceGeneration`；原地更新和 `RecreateRequired`；Drained 经 `status` 晚一跳；两个进程同时在写组一级（只有「视图缺组」这一种后果被建模）；原进程退出之后它的请求才落地；`RoleRollingUpdate` 下的组一级（规则函数里这条分支只是 02 的 4.6 的条件，组内的滚动不在模型里）；序号命名；接管屏障的第 2 步失败。G 系列最多 3 个初始的组（M1 是 5 个）。
 
 ## 4. 账本的两条防护规则
 
@@ -153,6 +181,8 @@ G3             U=1 S=1   2                 2              yes
 | Q2 | 一个 Pod 被删，一定有一次代际号不小于它的 Draining |
 | Q3 | 静止时账本是 Established，两个成员都在 |
 | Q4 | 代际号不会涨到丢失的次数解释不了的地步 |
+
+范围：L4 只覆盖「把缺失当证据」这一半，「把终止中、终态当证据要读回同一个 UID」没有；L5 的四句里只覆盖「删除时比较代际号」和「清空之后代际号加一」，「没有标签按 0」「没有账本项时取现有 Pod 的最大值」没有。实例只有两个成员。
 
 <!-- BEGIN GENERATED: stale-model -->
 ```text
@@ -215,7 +245,7 @@ T9 mutants          v4 mutant: delete-before-ledger  Group   1x2x2  yes    estab
 
 读法沿用 007 的 04 第 13 节：T2 是按「任何丢失都要整范围重建」这个更严的口径检查，报出来的全部在实例建成之前，就是 03 第 11 节的 U1；T7 是 `status` 被清空之后退化成只补；T8 去掉了两步删除，报的是 D15 本身；T9 去掉账本、或者先删后写，报的是没有丢失而整范围删除。
 
-这个模型里账本对每个实例都记，与本设计相同。它的组一级只有「按数量补」，没有版本和滚动；那一部分由第 3 节的模型覆盖。两个模型没有合成一个：组一级的滚动和实例一级的恢复在同一个状态空间里的交错没有穷举，靠的是对象的边界（组失败或终止中，里面的一切就停）这条论证。
+这个模型里账本对每个实例都记，与本设计相同。它的组一级是 007 的规则：只有「按数量补」，没有版本和滚动，失败的组在缩容里排第一，ModelServing controller 直接读 Pod；这些与本设计不同的地方由第 3 节的模型覆盖。它没有「实例只有一个 Pod」的形状。「`status` 被清空之后 Draining 会卡住」「上一代的终止中 Pod 会被当成证据」这两条 02 第 11 节列出的理由，在两个账本模型里都没有对应的检查。两个模型没有合成一个：组一级的滚动和实例一级的恢复在同一个状态空间里的交错没有穷举，靠的是对象的边界（组失败或终止中，里面的一切就停）这条论证。
 
 ## 6. 推演的部分
 
@@ -225,13 +255,19 @@ T9 mutants          v4 mutant: delete-before-ledger  Group   1x2x2  yes    estab
 | --- | --- |
 | Role 一级的滚动、扩缩容、协调，与账本的衔接 | Role 一级的规则沿用 v2，由 005 的参考模型覆盖。衔接点只有一个：被 Role 一级选中删除的实例，先写 Draining（E4） |
 | 原地更新 | 沿用 007 的 05，没有模型 |
-| plugin 钩子的次序；`OnRoleDelete` 在离开 Draining 之前调过 | 03 的 E2 |
-| 槽位被外来 Pod 占着（L7） | 03 的 E7 |
-| `sourceGeneration`；在途的 `spec` 下发 | 02 的 A2、4.5 |
-| condition 和计数字段 | 03 第 6 节 |
+| SG 模式配原地更新：改 `spec.revision`、`RecreateRequired` 之后回到重建 | 02 的 4.2、第 9 节 |
+| plugin 钩子的次序；`OnRoleDelete` 在离开 Draining 之前调过；调用之前的直读 | 03 的 E2、E3；02 第 7 节 |
+| 槽位被外来 Pod 占着（L7）；待接管的成员 | 03 第 3 节、E7 |
+| `sourceGeneration`；在途的 `spec` 下发；一批创建等价于一串 | 02 的 A2、4.5 |
+| 接管屏障按 ModelServing 设；出错的轮次也照实写 `status` | 02 的 6.3、A1 |
+| 无主的成员 Pod 的收养和它的竞态 | 02 的 5.5 |
+| `RoleRollingUpdate` 下的组一级；模式切换；组的版本取哪个字段 | 02 的 4.1、4.6、4.7 |
+| 计数字段、condition、`RolloutBlocked` 的五个 reason 和期限 | 03 第 6 节。评审用小状态枚举查过两次：第一次的四个判定式有漏报和误报；改成五个 reason 之后那些没有了，另找到一种漏报（基线没有推进而没有别的事要做），已经补进「有事要做」，补上之后没有再枚举。期限没有建模 |
+| 事件记在哪；拓扑和亲和 | 02 的 8.8、8.9 |
+| 接管表里钩子、owner、surge 标记、PodGroup、接管注解的各行 | 03 的 10.2 |
 | `status` 被改写的各种情形 | 03 的 10.5；其中「账本被清空」有 007 的模型 |
 | 升级接管里成员一级的步骤：换 owner、待接管的成员、带删除标记的 Pod | [06](06-live-upgrade.md)。组一级的闸门有模型 |
-| 两种命名策略 | 02 的 2.2 |
+| 两种名字和按名字的次序键 | 02 的 2.2、4.4 |
 | 用例目录里按规则归类的部分 | 04 第 8 节 |
 
 ## 7. 留给真实验证的
@@ -252,9 +288,22 @@ T9 mutants          v4 mutant: delete-before-ledger  Group   1x2x2  yes    estab
 7. 契约 2.12 的全量用例在新实现上跑一遍，按 04 第 8 节改过的断言。先跑 04 里标成「有意变化」和「待定」的。
 8. 03 的 10.2 的每一行：在那次写之后杀掉 controller，看新进程的动作。
 9. 两个进程并存：关掉「失主退出」，看多建的组被缩回、没有健康的成员被误删。
-10. 就绪晚一跳的窗口：一个组失去就绪之后多久 ModelServing controller 才看到；这期间滚动会不会多删一个。
+10. 就绪晚一跳的窗口：一个组失去就绪之后多久 ModelServing controller 才看到；这期间滚动多删了几个；ServingGroup controller 写不出 `status`（出错的轮次也要写）时窗口有多长。
 11. 多建的组的 PodGroup 在资源紧张时会不会挤掉别的作业（Volcano）。
 12. 写量：稳态下每次就绪变化的 status 写、每个实例建成时的 status 写，对 apiserver 的压力。
+13. 耗时：每一步多一跳之后一次滚动要多久；`spec` 下发之后未观测的窗口多长；进程重启之后接管屏障要多久（组很多时）。
+14. 接管屏障的第 2 步有组一直失败时，别的组和别的 ModelServing 照常。
+15. 原进程退出之后它的创建请求才落地：多建的组被缩回。请求超时设多短合适。
+16. 缩容的次序晚一跳：一个组刚变坏时缩容，删的是哪一个。
+17. Drained 晚一跳：Drained 为真之后再让一个成员出故障，组是不是在它单独停下之前被删。
+18. 无主的成员 Pod：`--cascade=orphan` 删一个组之后被收养；先多建一个组、再缩掉一个的竞态。
+19. 各 Role 的副本数缩到 0、改模板、再扩回来：过期的空组直接改版本，没有先起旧版本的 Pod。
+20. `ServingGroupRollingUpdate` 配原地更新：组的版本原地变；plugin 不支持、超期、有终态成员时 `RecreateRequired` 为真，组被重建。
+21. `groupPolicy` 和按 Role 的网络拓扑：PodGroup 的 owner 换成 ServingGroup 之后调度结果不变。
+22. `OnRoleDelete` 一直失败：实例停在清空中，组报 `DrainBlocked`；恢复之后接着做。
+23. `RolloutBlocked` 的五个 reason 各造一次；期限取多少；正常的缩容和滚动收尾不会报。
+24. 滚动模式 ServingGroup → Role → ServingGroup 来回切：切到 Role 模式时 `spec.revision` 被清空，切回来时按 `status.revision` 分类。
+25. ServingGroup controller 对一个组一直出错：`status` 照实写出来，带 `ReconcileFailed`，过期的话照常被替换；`status` 写不出来时超过期限报 `GroupNotObserved`。
 
 ## 8. 怎样重跑
 
