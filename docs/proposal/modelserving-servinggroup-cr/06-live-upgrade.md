@@ -104,7 +104,7 @@ P1 的三点补充：
 | 驱逐 | 驱逐 webhook 照常应答，预算照常算（P5）。被驱逐的 Pod 没有人补 | 补（下一行） |
 | Pod 被删 | 没有人管 | 只补：账本从零值开始（T5） |
 | Pod 变成 `Failed` | 没有人管 | 按 `recoveryPolicy` 的范围恢复：故障不看账本是不是零值（[03](03-state-machine.md) 的 4.3，E5） |
-| 容器崩溃 | kubelet 按 `restartPolicy` 重启容器。没有按策略的重建 | 升级上来的这一次没有故障起点可读：重启故障的 grace 从新进程第一次看到它时起算，与今天相同。起点从这时起写在组的 `status` 里，之后的每次重启接着算（[02](02-design.md) 的 5.3；第 11 节） |
+| 容器崩溃 | kubelet 按 `restartPolicy` 重启容器。没有按策略的重建 | 重启故障的 grace 从新进程第一次看到它时起算，与今天相同（D9；[02](02-design.md) 的 5.3） |
 | 进行到一半的滚动、恢复、缩容 | 停在原地。多出来的组继续占资源 | 第 6 节 |
 | `ModelServing.status` | 不更新 | 接管注解是 `InProgress` 期间只更新 condition，计数保留旧版本写的值（5.2）；`Done` 之后重算 |
 | 旧的 controller Pod 停不下来 | 以上各行一直持续。空窗没有上界（第 10 节） | — |
@@ -155,7 +155,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 
 `InProgress` 期间，ModelServing controller 对这个 ModelServing 不做 S1′、G0 到 G6 的任何写（[03](03-state-machine.md) 第 7 节的升级闸门，M3）。`status` 的计数不重算，保留旧版本写的值，只更新 condition（[03](03-state-machine.md) 第 6 节）：刚接管来的组还没有写出 Ready，重算会让可用数掉到 0 再回来。
 
-闸门只停组一级的写。`InProgress` 期间，ServingGroup controller 对已经换完 owner 的组照常做 [03](03-state-machine.md) 第 8 节的全部步骤：补缺的成员，接着做组内没滚完的 Role 一级的滚动和扩缩容，按策略恢复。动手恢复之前，恢复策略和 grace 从 ModelServing 上直读（[02](02-design.md) 的 5.3）：接管没做完时把策略改成 `None`、`-1` 或者更长的 grace 同样生效。反方向（打开策略、缩短 grace）要等 G5 下发，`InProgress` 期间 G5 不做，不生效。
+闸门只停组一级的写。`InProgress` 期间，ServingGroup controller 对已经换完 owner 的组照常做 [03](03-state-machine.md) 第 8 节的全部步骤：补缺的成员，接着做组内没滚完的 Role 一级的滚动和扩缩容，按策略恢复。动手恢复之前，恢复策略和 grace 从 ModelServing 上直读（[02](02-design.md) 的 5.3）：接管没做完时把策略改成 `None`、`-1` 或者更长的 grace 同样生效。反方向（打开策略、缩短 grace）要等 G5 下发，`InProgress` 期间 G5 不做，不生效；组里的副本本来就是打开的、`-1` 没有下发就改回来的除外，改回来之后重新计满一个 grace。
 
 **T3 怎样判定 surge 注解。**标记只在创建对象时写，之后只会被摘掉，不会后加（[02](02-design.md) 的 2.1）。所以判定必须在 T3 做完，不能留给 T4，也不能留给 `Done` 之后的 G0。
 
@@ -260,7 +260,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 | 缩容进行中 | 多于 N 个组，有的在终止 | 活着的接管；闸门放行之后 G2 按次序再选 | v1.1.0 没有标记，再选的不一定是原来那个 |
 | 原地更新进行中（v1.1.0） | 一部分 Pod 的标签是旧版本，带进度注解 | 组的版本取注解里的目标；成员分类先看进度注解。续做。续不下去的（超期、被作废、有终态成员、plugin 不支持）：ServingGroup controller 把组的 `RecreateRequired` 写成真，这个组按可替换的算，在预算之内删除，在原序号上重建（[02](02-design.md) 第 9 节） | 没有验证：原地更新没有模型 |
 | 存量 Pod 已经是 `Failed`，旧版本在容忍它（grace 是 `-1`，或者还没到期） | 一个终态的 Pod；同一个实例、同一个组里别的 Pod 是健康的 | 照常接管。之后的第一轮：终态的成员是故障，不看账本是不是零值、不等 grace（[03](03-state-machine.md) 的 4.3，E5）。`RoleRecreate` 重建这个实例，`ServingGroupRecreate` 换掉整个组 | **健康的 Pod 被重建，而没有人改过 `spec`。**这不满足不断服（第 10 节）。它是 005 已批准的 D10、D13 在升级那一刻生效，不是本设计新加的规则；旧版本的容忍取自契约 2.12 的文字，没有读源版本的代码 |
-| 存量 Pod 在重启故障里，grace 还没到期 | 容器在反复重启，Pod 不 Ready | 照常接管。没有故障起点可读，grace 从新进程第一次看到它时起算 | 与旧版本自己重启一次相同 |
+| 存量 Pod 在重启故障里，grace 还没到期 | 容器在反复重启，Pod 不 Ready | 照常接管。grace 从新进程第一次看到它时起算 | 与旧版本自己重启一次相同 |
 | 全零的组（N 大于 0，各 Role 的副本数都是 0） | 没有 Pod；v1.1.0 可能留着 PodGroup | 没有可接管的 Pod。留着 PodGroup 的：T1 直读到存量对象，T2′ 把这些 PodGroup 按 UID 删掉。什么都没留的：T1 直接写 `Done`。两种情形闸门放行之后 G4 都在序号 0 到 N − 1 上建空的组，ServingGroup controller 建 PodGroup。空组的版本按序号指派：序号小于 P 并且基线不等于目标时是基线，否则是目标（02 的 4.2） | 存量的 PodGroup 被删了重建，UID 变了，它名下没有 Pod。各 Role 的副本数调回来时，各序号的版本与旧版本按序号新建的结果相同 |
 | roleCoordination 滚动进行中 | 基线在 ControllerRevision 的注解上 | 由 ModelServing controller 读出来，下发到组的 `spec` | — |
 | owner 是 LeaderWorkerSet 的 ModelServing | — | 与别的 ModelServing 相同。组名一直是序号，plugin 照旧从组名里取 `group-index`（02 的 2.2） | — |
@@ -288,7 +288,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 不要做的事：
 
 - 任何步骤里都不删 CRD。chart 里 CRD 的位置不要变（位置一变，Helm 升级会删掉它，连带全部实例）。
-- 升级和重启 controller 的同时不要排空节点，不要做会删 Pod 的操作。这一次升级：空窗里丢的 Pod 没有人补，接管之后只补。按用户的口径升级不赦免，这一次没有做到，与今天旧版本自己升级时相同（[README](README.md) 的 OP8）。之后新版本的每一次升级和重启：停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复，重建的 Pod 比丢的多；停机之前就在重启故障里的成员，grace 接着算，停机超过 grace 时回来的第一轮就恢复（第 11 节；[07](07-user-and-ops-guide.md) 的 4.2、4.3）。
+- 升级和重启 controller 的同时不要排空节点，不要做会删 Pod 的操作。这一次升级：空窗里丢的 Pod 没有人补，接管之后只补。按用户的口径升级不赦免，这一次没有做到，与今天旧版本自己升级时相同；用户已接受这个缺口（2026-11-23）。之后新版本的每一次升级和重启：停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复，重建的 Pod 比丢的多（第 11 节；[07](07-user-and-ops-guide.md) 的 4.2）。
 
 ### 7.1 升级前检查的输出
 
@@ -398,7 +398,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 - **带 surge 的滚动途中可以回退**，前提是上表的各条，尤其是第 2 条。临时的组带着标记回去，旧版本按自己的规则把滚动做完。
 - **稀疏的序号集合上、带 surge 的滚动途中回退，没有分析。**这一版把临时的容量建在不小于 N 的最低空闲序号上并带标记；两个源版本在同样的集合下把这份容量建在小于 N 的空洞里（第 2 节）。回退之后旧版本看到的是「一个带标记的临时的组，加范围内的空洞」，它接着怎样做没有读代码核对。回退前检查报出这样的 ModelServing（第 12 节）。
 - **回退时丢掉的两种进度**，上一版也丢：Failed 写上而还没删的组，旧版本只看到一个带故障 Pod 的组；清空到一半的 Role 实例，旧版本只补。
-- **账本和故障起点随 ServingGroup 对象一起没有了。**旧版本按它自己的方式重新计 grace。
+- **账本随 ServingGroup 对象一起没有了。**重启故障的 grace 本来就在进程里，旧版本从它第一次看到起重新计。
 - owner 是 LeaderWorkerSet 的 ModelServing 没有单独的条件。`group-index` 可以不连续：缩容按未就绪的先、deletion cost 低的先，会留下洞，今天也是这样。
 
 ### 9.3 升级、回退、再升级
@@ -424,7 +424,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 | 旧的 controller Pod 停不下来（节点失联、finalizer） | 新进程一直等（X1）。数据面不受影响，控制面的空窗没有上界 | X1 的事件、日志和超时告警；由人处理那个 Pod。不要只把 Pod 对象强制删掉：容器还在跑时 X1 看不到它 |
 | 用百分比或 `maxUnavailable` 的 PDB | 不是断服，但升级那一刻允许的驱逐数变了：期望数从组的个数变成这个组里 Pod 的个数（[02](02-design.md) 的 8.5），方向是变严。接管到一半时是两种口径之和 | 升级前检查列出这些 PDB（7.1），升级之后核对。没有验证（第 12 节第 13 项） |
 
-这一次升级不受影响、之后新版本自己的每一次重启和升级才有的两种，列在第 11 节：停机期间丢了成员的已建成实例按范围恢复；停机超过 grace 时到期的重启故障在回来的第一轮恢复。
+这一次升级不受影响、之后新版本自己的每一次重启和升级才有的一种，列在第 11 节：停机期间丢了成员的已建成实例按范围恢复。
 
 ## 11. 危险操作
 
@@ -442,9 +442,8 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 | `helm rollback`、`kubectl rollout undo` 到旧版本 | 第 9 节：不做反向接管就是事故。旧版本的 Pod 先起来并且就绪，新版本的 Pod 才被停掉，中间两个版本同时在跑 | X1 的持续观察只停得下新版本一侧的写；旧版本一侧挡不住，它照样删 Pod。文档写明回退的入口是 9.1。X3 在这个方向不起作用：旧 chart 会把旧的 ServiceAccount 建回来 |
 | 在新版本运行时启动一个旧版本的进程（另一个 namespace、另一个 release、本地调试） | 第 1 节第 2 条 | 没有，只有文档。X1 只看自己 namespace 里的 Pod；X3 只挡用这个 release 的 ServiceAccount 的旧进程 |
 | 回退开关留着没有删（9.1） | 新版本的两个 controller 不做正常的 reconcile，也不做正向接管 | 升级前检查报告它（7.1） |
-| 重启或升级新版本的 controller，同时排空节点或删 Pod | 停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复。`ServingGroupRecreate` 下的整组恢复不受滚动预算限制。从旧版本升上来的那一次不这样：账本从零值开始，只补（README 的 OP8） | 驱逐预算（配了 `evictionStrategy` 并且驱逐 webhook 可用时）。其余只有文档 |
-| 新版本的 controller 停机超过 `restartGracePeriodSeconds`（重启、升级、换主卡住） | 停机之前已经在重启故障里、回来时还是同一段故障的成员，起点延续。回来的第一轮它们同时到期，按 `recoveryPolicy` 的范围同时恢复，没有上限；与上一行叠加。要不要给第一轮加一个上限，留给评审定。今天是回来之后再等一个 grace。从旧版本升上来的那一次没有起点，不受影响；之后的每次重启受影响 | 没有，只有文档。这一条改了已批准的决定，要批准（[04](04-behavior-expectations.md) 第 11 节的 N1）；不批准时起点留在内存里，这一行不成立 |
-| 改 `ServingGroup.status` | 账本回到零值：重新建账之前的丢失只补；重启故障的起点丢失，重新计。Drained 被写成真：失败的组被提前删 | `servinggroups/status` 不授给用户 |
+| 重启或升级新版本的 controller，同时排空节点或删 Pod | 停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复。`ServingGroupRecreate` 下的整组恢复不受滚动预算限制。从旧版本升上来的那一次不这样：账本从零值开始，只补（用户已接受） | 驱逐预算（配了 `evictionStrategy` 并且驱逐 webhook 可用时）。其余只有文档 |
+| 改 `ServingGroup.status` | 账本回到零值：重新建账之前的丢失只补。Drained 被写成真：失败的组被提前删 | `servinggroups/status` 不授给用户 |
 | 手工改 surge 注解 | 组对象上的注解由 controller 在创建时写，之后只会被它摘掉。手工摘掉：这个临时的组成为正式的组，不再被回收；正式的组多于 N 时按缩容删一个，删的不一定是它。手工加上：序号不小于 N 的正式的组会被当成临时容量，没有滚动要做时被回收；序号小于 N 的下一轮又被摘掉。Pod 上的副本：手工改了之后被 ServingGroup controller 按组对象写回去 | `servinggroups` 的 patch 不授给用户。「只会被摘掉、不会后加」不能由 API 强制，靠没有人有 patch 权限（02 的 8.10） |
 
 开了 `OwnerReferencesPermissionEnforcement` 的集群上，换 owner 需要对 Pod、PodGroup、Service 的 delete 权限；写 `blockOwnerDeletion` 需要对 `servinggroups/finalizers` 的 update 权限。新 chart 的 ClusterRole 按新 controller 的需要重写，包括对 PodGroup 的 patch 和 T2′ 用到的 delete。
@@ -488,7 +487,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 33. 整个组的 Pod 都在终止时升级：连续的序号集合下补出来的同名的组等旧 Pod 消失；稀疏布局下落到更低的空洞上，新旧两批 Pod 并存多久。
 34. 灰度进行中升级，再回退：序号小于 P 的组前后是同一批，新旧版本起来之后都不动 Pod。
 35. 稀疏的序号集合上、带 surge 的滚动途中回退：旧版本怎样接着做（9.2，没有分析）。
-36. 重启故障的计时：从旧版本升上来的那一次从第一次看到起算；之后重启新版本的 controller，起点延续；停机超过 grace 时回来的第一轮恢复的范围。
+36. 重启故障的计时：升级、重启、换主之后新的进程从第一次看到起重新计满一个 grace，与今天相同。
 37. T7 与第一次 status 写的先后（5.2）：`Done` 写上的那一刻，接管来的组都已观测，可用数没有掉下去。
 38. T3 撞上不属于这个 ModelServing 的同名 ServingGroup：不建、不删、有事件；那个对象被删掉之后接管做得完。
 39. 升级那一刻就没有 controller owner 的带标签的 Pod：名字对得上的被接管，对不上的不接管、有事件；升级前检查两种都报得出来。

@@ -13,7 +13,7 @@
 
 | 想知道 | 看 |
 | --- | --- |
-| 一个状态是凭什么判定的 | 第 3–6 节每一层的判定表。条件都只用对象上的字段写，时间只和对象上的时间戳比较 |
+| 一个状态是凭什么判定的 | 第 3–6 节每一层的判定表。条件都只用对象上的字段写，时间只和对象上的时间戳比较。一处例外：重启故障到没到期（第 3 节） |
 | 一个状态能去哪、谁推动、要什么条件 | 第 4.3、5.3 节的转换表 |
 | 一轮 reconcile 的完整过程 | 第 7、8 节，两个 controller 各一条线 |
 | 两个 controller 怎样配合 | 第 9 节，四张时序图 |
@@ -21,7 +21,7 @@
 
 三条贯穿全文的性质：
 
-1. **状态不存储，只判定。**每一轮从对象重新得出。写在对象上的只有事实（账本的值、Failed、`deletionTimestamp`、版本），不是「我做到第几步」。
+1. **状态不存储，只判定。**每一轮从对象重新得出；重启故障到没到期除外，它看进程里记的起点（第 3 节）。写在对象上的只有事实（账本的值、Failed、`deletionTimestamp`、版本），不是「我做到第几步」。
 2. **每个状态的动作只取决于这个状态。**不取决于是怎样到达的、是哪个进程到达的。
 3. **动作之前的提交点是一次带条件的写。**提交之后停下，下一个进程读到提交的事实，接着做；提交之前停下，下一个进程重新判断。
 
@@ -29,12 +29,12 @@
 
 | 层 | 状态由什么得出 | 存在哪个对象上 | 谁写 |
 | --- | --- | --- | --- |
-| Pod 成员 | Pod 的 `deletionTimestamp`、`phase`、容器状态、原地更新的注解 | Pod | kubelet、环境；ServingGroup controller 只创建和删除 |
-| Role 实例 | 账本的值 × 成员的观察 × 组的 `spec` | `ServingGroup.status.roleInstances[]`；重启故障的起点在 `status.restartFaults[]` | ServingGroup controller |
+| Pod 成员 | Pod 的 `deletionTimestamp`、`phase`、容器状态、原地更新的注解。重启故障到没到期另看起点 | Pod。重启故障的起点不在对象上，在进程里（D9） | kubelet、环境；ServingGroup controller 只创建和删除 |
+| Role 实例 | 账本的值 × 成员的观察 × 组的 `spec` | `ServingGroup.status.roleInstances[]` | ServingGroup controller |
 | ServingGroup | 名字里的序号；`deletionTimestamp`；surge 注解；`status` 的 Failed、Drained、Ready、`pods`；`observedGeneration`。确认就绪另看名下的 Pod | ServingGroup | 创建、删除、surge 注解、`spec`：ModelServing controller。`status`：ServingGroup controller |
 | ModelServing | 名下各组的状态和版本；`spec` | 不存储。只有基线在 `status.currentRevision` | ModelServing controller |
 
-内存里没有状态。决定的输入只来自对象；有写要发的轮次不按缓存发，按直读重算（M7、R7）。进程里不是对象副本的几样东西只会让动作晚一点，清单在 02 的 3.2。
+除了重启故障的 grace 从什么时候起算（D9，第 3 节），内存里没有状态。决定的输入只来自对象；有写要发的轮次不按缓存发，按直读重算（M7、R7）。进程里不是对象副本的几样东西只会让动作晚一点，清单在 02 的 3.2。
 
 ## 3. 第一层：Pod 成员
 
@@ -47,17 +47,20 @@ ServingGroup controller 对名下每个期望的位置判定一个成员状态�
 | 终止中 | `deletionTimestamp` 非空 | 已建成的实例：丢失。创建中的实例：等它消失 |
 | 终态 | `phase` 是 `Failed` 或 `Succeeded` | 故障，不等 grace |
 | 原地更新中 | 原地更新的进度注解没有完成 | 不是故障。走原地更新的接口点 |
-| 重启故障（到期） | 有计划外的容器重启、不 Ready，恢复生效，账本里有它这一段故障的起点，并且现在距离起点已经满了 grace | 故障 |
-| 重启故障（未到期） | 同上，没满 grace，或者账本里还没有这一段故障的起点；或者恢复不生效 | 未就绪。恢复生效而还没有起点的，这一轮的 status 写里记上。满 grace 的时刻定时入队；恢复不生效时只报告 |
+| 重启故障（范围已提交） | 有计划外的容器重启、不 Ready，并且它所在的范围已经提交：所在的组是 Failed，或者所在实例的账本是 Draining(g) 而它的代际号不大于 g | 故障。不看 grace 到没到期，不看恢复生不生效：这个成员反正要删，这一行只让它落在两步删除的第一步 |
+| 重启故障（到期） | 有计划外的容器重启、不 Ready，恢复生效，并且从本进程第一次看到它这样起已经满了 grace | 故障 |
+| 重启故障（未到期） | 同上，没满 grace；或者恢复不生效 | 未就绪。满 grace 的时刻定时入队；恢复不生效时只报告 |
 | 就绪 | `Running` 并且 Ready | — |
 | 未就绪 | 其余 | 等待 |
 | 缺失 | 该有这个成员而没有 Pod | 已建成的实例：丢失。创建中的实例：创建 |
 
-第三行起只对 controller owner 的 UID 是这个组的 Pod 判定。「恢复不生效」的重启故障不是故障，不触发恢复。
+第三行起只对 controller owner 的 UID 是这个组的 Pod 判定。「恢复不生效」的重启故障不是故障，不触发恢复。「范围已提交」一行不是触发：范围已经因为别的成员、因为它自己到期、或者因为计划内的清空（E4）而提交了，这一行只定它在两步删除里的先后。条件成立时 E1 或 E2 先中，走不到 E5。
 
-「恢复生效」指 `recoveryPolicy` 不是 `None`，并且 grace 不是 `-1`。
+「恢复生效」指 `recoveryPolicy` 不是 `None`，并且 grace 不是 `-1`。计时的时候恢复生不生效、grace 有多长，取组里的副本和缓存里所属 ModelServing 两者中保守的一个（02 的 5.3）。
 
-**故障的起点**在账本里：`status.restartFaults[]` 每个在重启故障里的成员一项，带起点和这一段故障的身份（Pod 的 UID、写起点时 Ready condition 的 `lastTransitionTime`、原地更新的重启基准）。读的时候身份对不上（Ready 变回过、Pod 换了、打过原地更新的补丁），这一项作废，按「还没有起点」处理。恢复不生效时不记，已有的去掉。换主之后 grace 接着算（02 的 5.3）。
+**故障的起点**在进程的内存里，与今天相同（D9）：ServingGroup controller 第一次看到一个成员进入重启故障的时刻，以 Pod 的 UID、Ready condition 的 `lastTransitionTime` 和原地更新的重启基准为键。键对不上（成员恢复过再坏、Pod 换了、打过原地更新的补丁），重新计。同一个进程里改 grace 不动起点，到期按当时生效的 grace 现算（副本和缓存里的 ModelServing 两者中较长的一个）。换主、重启之后新的进程从它第一次看到起重新计满一个 grace。这是成员状态里唯一不能只从对象判定的一格；用户的口径是 grace 的计时可以赦免，因为它只影响时间（02 的 5.3）。
+
+**起点只决定提交什么时候发生。**范围提交之后（写上了 Failed 或 Draining），范围里在重启故障里的成员按上表「范围已提交」一行直接算故障，不再看起点。所以提交之后的两步删除（E1、E2、S4）只取决于对象，换了进程也照样先删故障的成员。恢复不生效时不计时，已有的起点去掉；生不生效取副本和缓存里的 ModelServing 两者中保守的一个，所以策略还没下发到组时把 grace 改成 `-1` 再改回来，改回来之后重新计满一个 grace（02 的 5.3）。
 
 Pod 上值是 `serving-group` 的 surge 注解是组对象上那个注解的副本，不参与成员状态的判定。ServingGroup controller 只在 `ServingGroupRollingUpdate` 下让它跟随组对象（R10）；值是 `role` 的它不动。
 
@@ -160,7 +163,7 @@ stateDiagram-v2
 | 离开 | E4、E5、E6 → 清空中；E5、E6（`ServingGroupRecreate`）→ 组失败 |
 | 这个状态下缺成员的含义 | **丢失。按策略的范围恢复。**与 controller 当时在不在、换没换主无关 |
 | 不允许 | 不经直读就把缺失当丢失 |
-| 接管时 | 新进程读到 Established。成员在不在，直读确认。结果与原进程相同 |
+| 接管时 | 新进程读到 Established。成员在不在，直读确认。结果与原进程相同。因为重启故障而离开（E5）的那一种：grace 在新进程里重新计，提交晚一个 grace（第 3 节） |
 
 **清空中 Draining(g)**
 
@@ -372,18 +375,18 @@ key 是一个 ServingGroup。
 
 | 步 | 做什么 | 读 | 写 | 这一步停下 |
 | --- | --- | --- | --- | --- |
-| R0 入队 | 这个组的新增、更新、删除（一次更新事件里新旧对象的 UID 不同时按删除加新增处理，并对这个 key 调 `Forget`）；这个组的成员 Pod（02 的 4.1）的新增、更新、删除，包括 owner 被改：controller owner 是这个组的，映射时比对 ownerReference 的 UID；待接管的，按组名标签找到组、再按第 3 节的条件判定。入队的范围与摘要的范围是同一个集合；PodGroup、Service 的更新和删除；`spec` 引用的 ControllerRevision 的新增；grace 到期、原地更新期限到期；周期 resync | — | — | — |
+| R0 入队 | 这个组的新增、更新、删除（一次更新事件里新旧对象的 UID 不同时按删除加新增处理，并对这个 key 调 `Forget`）；这个组的成员 Pod（02 的 4.1）的新增、更新、删除，包括 owner 被改：controller owner 是这个组的，映射时比对 ownerReference 的 UID；待接管的，按组名标签找到组、再按第 3 节的条件判定。入队的范围与摘要的范围是同一个集合；PodGroup、Service 的更新和删除；`spec` 引用的 ControllerRevision 的新增；所属 ModelServing 的 `recoveryPolicy` 或 grace 变了；grace 到期、原地更新期限到期；周期 resync | — | — | — |
 | R1 取对象 | 这个组。它的 controller owner 不是一个现存的 ModelServing（按 UID）：发事件，返回，不创建、不删除、不恢复（02 的 2.4）。它在终止中：尽力调 `OnRoleDelete`，返回 | 缓存 | — | 无影响 |
 | R2 接管成员 | 名下有待接管的成员：换 owner（06；02 的 5.5） | 直读 | W7 PATCH Pod、PodGroup、Service 的 owner | 06 |
 | R3 观察 | 这个组的成员 Pod：controller owner 的 UID 是这个组的，和待接管的。摘要按这一轮算 `status` 用的那批成员 Pod 算（R11 写进 `observedPods`）：没有直读的轮次是缓存里的，R7 直读过的轮次是直读到的。读 `spec` 引用的 ControllerRevision；它不在：这一轮出错，分类之后跳到 R11，等它出现的事件 | 缓存 | — | 无影响 |
-| R4 分类 | 成员（第 3 节）、实例（4.1）、组（5.1）。故障的起点按账本里的项和它的身份判定 | — | — | 纯函数 |
+| R4 分类 | 成员（第 3 节）、实例（4.1）、组（5.1）。重启故障到没到期另看进程里记的起点 | — | — | 除这一格之外是对象的纯函数 |
 | R5 组已失败 | 只做 E1；算 Drained；跳到 R11 | — | W10 DELETE Pod | 第 10.2 节 |
 | R6 Role 一级的计划 | v2 的 Role 层规则：扩缩容、滚动（重建或原地）、协调。得出哪些实例不再期望、哪些成员要打补丁 | — | — | 纯函数 |
 | R7 账本的转换 | 对每个实例走 4.3 的表，得出这一轮的全部转换。**这一轮要写 Failed、写 Draining、删 Pod 或者打原地更新的补丁时：直读这个组和它名下的 Pod，用读到的重做 R4 到 R7。要写 Failed、写 Draining 时另直读所属的 ModelServing，恢复策略和 grace 取它上面的** | 直读 | — | 无影响 |
-| R8 提交 | 有转换（E3、E4、E5、E6、E6′、E8，或 S3、S3′），或者故障的起点有变化（新记、作废）：写 status。**被拒绝：返回，本轮后面不发任何删除和创建** | — | W8 `ServingGroup.status`，带 resourceVersion | 第 10.2 节 |
+| R8 提交 | 有转换（E3、E4、E5、E6、E6′、E8，或 S3、S3′）：写 status。**被拒绝：返回，本轮后面不发任何删除和创建** | — | W8 `ServingGroup.status`，带 resourceVersion | 第 10.2 节 |
 | R9 钩子和删除 | 清空中的实例：`OnRoleDelete`（本进程第一次；调之前直读账本），不成功就不删、报 `DrainBlocked`；成功之后两步删除。`None` 下终态的成员：删 | 直读 | W9 plugin 钩子；W10 DELETE Pod，带 UID | 第 10.2 节 |
 | R10 同步和创建 | 对每个在期望之内的实例调 `OnRoleSync`。PodGroup、Service 不在的建，内容与期望不同的更新（`minMember` 随 Role 的副本数和协调的阶段变化）；撞名字或者要更新时核对 owner 的 UID。E6（`None`）、E7 的成员：`OnPodCreate`，创建。`status.pods` 是 0 的组（L8）：PodGroup 建成之后、第一个 Pod 之前，先写一次 status，`pods` 是要建的个数，带 resourceVersion；写成功才建，被拒绝则这一轮不建。PodGroup 建不出来：不写，这一轮出错，`pods` 仍然是 0。原地更新的补丁，带 Pod 的 resourceVersion。Role 一级的 surge 标记和转正；非生效的那一层留下的标记摘掉。Pod 上组一级标记的副本跟随组对象（只在 `ServingGroupRollingUpdate` 下；值是 `role` 的不动） | 直读 | W11 创建和更新 Pod、PodGroup、Service；W8（L8 的那一次）；W12 Pod 的注解和镜像 | 第 10.2 节 |
-| R11 写 status | 每一轮都算，内容变了才写；出错的轮次也照此：读到了成员的话，`observedGeneration` 照样推进，Ready 按看到的成员照实算，带 `ReconcileFailed`。这一轮第一次看到就绪的成员：`OnPodReady`。`observedGeneration`、Ready、Drained、版本、引用到的版本、deletion cost、计数（`pods` 含这一轮刚建的）、故障的起点、`observedPods`。成员 Pod 的判定用到的字段变了摘要就变，所以这样的变化之后都有一次写。这一轮没有 R8 时两次写合成一次 | — | W8 | 下一轮重写 |
+| R11 写 status | 每一轮都算，内容变了才写；出错的轮次也照此：读到了成员的话，`observedGeneration` 照样推进，Ready 按看到的成员照实算，带 `ReconcileFailed`。这一轮第一次看到就绪的成员：`OnPodReady`。`observedGeneration`、Ready、Drained、版本、引用到的版本、deletion cost、计数（`pods` 含这一轮刚建的）、`observedPods`。成员 Pod 的判定用到的字段变了摘要就变，所以这样的变化之后都有一次写。这一轮没有 R8 时两次写合成一次 | — | W8 | 下一轮重写 |
 
 `observedGeneration` 在 R8 或 R11 的写里推进，条件是「这一轮的决定是按这份 `spec` 做的」，不等动作做完。每次 status 写都把 Ready、版本按这一轮读到的 `spec` 重算，不带着上一份 `spec` 的结论。
 
@@ -468,7 +471,7 @@ sequenceDiagram
 
 ### 10.1 新进程面对的是同一张表
 
-新进程里没有屏障，没有要重建的内存，两个 controller 之间没有先后。它等缓存同步，然后面对的就是第 3–6 节的判定表，没有别的输入。靠的是三件事（02 的 6.3）：
+新进程里没有屏障，没有要重建的内存，两个 controller 之间没有先后。它等缓存同步，然后面对的就是第 3–6 节的判定表。不从对象来、又会推迟删除的输入只有一样：重启故障的 grace 从新进程第一次看到起重新计（D9，第 3 节）。进程里的另外几样见 10.2 表后的限定。靠的是三件事（02 的 6.3）：
 
 | 担心 | 靠什么 |
 | --- | --- |
@@ -528,12 +531,11 @@ sequenceDiagram
 | W12 原地更新的补丁 | 进度在 Pod 注解上：按注解续做 | — | 相同（007 的 05） |
 | W12 Role 一级的 surge 标记、转正、回收 | 标记在 Pod 上：按标记续做。回收之前直读（R7），看得到已经摘掉的标记 | — | 相同。沿用 v2 的分析（v2 的 04 第 5 节和第 10 节），本文没有重做 |
 | W12 Pod 上组一级标记的副本 | 与组对象不一致的接着改 | — | 相同。副本不是任何决定的输入 |
-| W8 记故障的起点 | 成员还在故障、账本里没有这一段的起点：再记，时间是新进程看到的时间 | 已经有起点，身份对得上：按它算 | 相同。写之前停下时起点晚一轮；写上之后换多少次进程都不重新计 |
 | R8 被拒绝之后 | 没有发过删除：下一轮重新判定 | — | 相同 |
 
 表里没有「取决于原进程记得什么」的格子。「按更新的事实」的格子是水平触发的正常结果：两次观察之间对象变了，动作跟着变。
 
-这句话有三处限定。一是它只对表里列出的写成立：ModelServing controller 的各行有模型（[05](05-inference-verification.md) 第 3 节），ServingGroup controller 的账本各行有 007 的模型，钩子、owner、surge 标记和它的副本、故障的起点、PodGroup 的各行是推演。二是 plugin 自己的进程内记忆不在表里：内置的 headless Service plugin 今天有一份会影响删除动作的记忆，要按 02 第 7 节改成对象上的事实。三是进程里的两样东西：W5 里 `RolloutBlocked` 的 `GroupNotObserved` 什么时候报，取决于 ModelServing controller 记着的起点（02 的 3.2）；W9 的 `OnRoleDelete` 调不调，取决于本进程调过没有，表里写成「钩子多调一次」。两样都不改变任何创建和删除。
+这句话有三处限定。一是它只对表里列出的写成立：ModelServing controller 的各行有模型（[05](05-inference-verification.md) 第 3 节），ServingGroup controller 的账本各行有 007 的模型，钩子、owner、surge 标记和它的副本、PodGroup 的各行是推演。二是 plugin 自己的进程内记忆不在表里：内置的 headless Service plugin 今天有一份会影响删除动作的记忆，要按 02 第 7 节改成对象上的事实。三是进程里的三样东西：W5 里 `RolloutBlocked` 的 `GroupNotObserved` 什么时候报，取决于 ModelServing controller 记着的起点（02 的 3.2）；W9 的 `OnRoleDelete` 调不调，取决于本进程调过没有，表里写成「钩子多调一次」；重启故障的 grace 从新进程第一次看到起重新计（D9）。它只推迟提交（W8 写 Draining、写 Failed 之前的那一段）：每换一次进程，新进程从第一次看到起再等一个完整的 grace；这期间成员自己恢复了，这一次就不恢复；两次重启的间隔一直短于 grace 时一直不恢复。它不会让恢复提前，不会扩大范围。提交之后的各行不看它：范围已经提交时，在重启故障里的成员直接算故障（第 3 节），所以 W8 写上之后、W10 各步之间换进程，新进程照样先删故障的成员。前两样不改变任何创建和删除。
 
 ### 10.3 新进程的缓存是旧的
 
@@ -560,7 +562,6 @@ sequenceDiagram
 | Failed 被清掉 | 组回到运行。实例的账本还在：丢失的证据还在的话，重新判定，重新写 Failed |
 | Drained 被错误地写成真 | 挡不住：故障成员还没停，组就被删。`status` 端点要用 RBAC 保护 |
 | `observedGeneration` 被改小 | 未观测，直到 ServingGroup controller 重写 |
-| 故障的起点被清空 | 重新计：落在晚一点恢复的一侧 |
 | `pods` 被改成 0 | 「没有成员」另要 Pod 缓存里没有它的成员 Pod：有 Pod 的组不会被当成没有成员。ServingGroup controller 下一次写 `status` 时改回来 |
 | `observedPods` 被改 | 不新鲜，按未观测算，直到 ServingGroup controller 重写。要改成正好相同的值，得算得出同一个摘要 |
 | `ModelServing.status.currentRevision` 被清空 | 从各组的 `spec.baselineRevision` 读回（02 的 4.8） |
@@ -576,12 +577,12 @@ sequenceDiagram
 | U3 | 策略从 `None` 改成范围策略的那一刻，已建成的实例里正好有一个成员在补 | 按新策略整范围恢复 |
 | U4 | Failed 或 Draining 写上之后策略改成 `None` | 照样做完。提交之后不撤销 |
 | U5 | 一直不就绪的目标版本的组 | 在正式位置上的：留在 N 个里面，滚动算完成不了（基线不推进），`RolloutBlocked` 报 `TargetNotReady`。它是不是故障由成员状态和恢复策略决定，不由滚动决定。带 surge 注解的：没有滚动要做时被回收，未就绪的先 |
-| U6 | Drained 写成真之后又有成员出故障，而 ModelServing controller 的 Pod 缓存还没看到那次故障；或者那次故障不改 Pod（重启故障的 grace 到期） | 组被删，新出故障的成员没有被单独等。Pod 缓存看到之后 `status` 不新鲜，G1 不删。02 的 6.5 |
+| U6 | Drained 写成真之后又有成员出故障，而 ModelServing controller 的 Pod 缓存还没看到那次故障；或者那次故障不改 Pod（原地更新的进度期限到期） | 组被删，新出故障的成员没有被单独等。Pod 缓存看到之后 `status` 不新鲜，G1 不删。02 的 6.5 |
 | U7 | 原进程已经退出，它发出的请求之后才落地 | 晚到的创建撞名字，或者成为那个序号上的组；晚到的删除带 resourceVersion，对象没变过才执行。02 的 6.4 |
 | U8 | 用 orphan 方式删组之后，组的缓存先显示少了一个组，Pod 的缓存还没显示无主 | 连续的序号集合下没有后果：G4 选中的就是那个序号，收养来的成员版本不同时组报 `RecreateRequired`，在预算之内替换。稀疏的集合下先在更低的序号上多建一个组，再缩掉一个。02 的 5.5 |
 | U9 | 同名的上一个对象已经没有了，它的 Pod 还在 | 按「外来」等它们消失，不收养，不数。02 的 4.5 |
 | U10 | 对象消失之后，它腾出的序号和以前缩容留下的洞分不开 | 补位取最低的空闲序号。稀疏布局下范围内的组可能落到更低的洞上。02 的 4.2 |
-| U11 | controller 不在的时候才开始的重启故障，或者恢复过又再坏的 | 起点是回来之后第一次看到的时刻，比真实的晚，不超过停机的时长。02 的 5.3 |
+| U11 | 重启故障的 grace 没满时换了进程 | 每换一次进程，新进程从第一次看到起再等一个完整的 grace；这期间成员自己恢复了，这一次就不恢复；两次重启的间隔一直短于 grace 时一直不恢复。它不会让恢复提前，不会扩大范围（D9）。用户的口径：grace 的计时可以赦免。02 的 5.3 |
 | U12 | 复核读的 Pod 缓存自己晚了 | 与今天单个 controller 相同的滞后。02 的 6.5 |
 
 ## 12. 证据索引
@@ -600,9 +601,10 @@ sequenceDiagram
 | S3′：整个组的 Pod 都没了写 Failed | 推演。之后的重建有场景脚本 | 05 第 6 节 |
 | E3–E8：账本；ServingGroup controller 在任何两次写之间停下 | 007 的组级模型，原样重跑，除用时之外结果相同 | 05 第 5 节 |
 | L4 直读、L5 代际号 | 小模型：去掉之后分别报「没有丢失而清空」「新一批被旧的清空删掉」。R7 把直读扩大到全部破坏性的写，扩大的部分是推演 | 05 第 4 节 |
-| E0、E1、E2、E3 的钩子次序和调用之前的直读；E6′；E7 的外来 Pod；待接管的成员；故障的起点和它的身份；先写后建（L8）；G1 要 `status` 新鲜；摘要取哪些字段、入队与摘要同一个集合；撞名字之后这一轮怎样接着做 | 推演 | — |
+| E0、E1、E2、E3 的钩子次序和调用之前的直读；E6′；E7 的外来 Pod；待接管的成员；先写后建（L8）；G1 要 `status` 新鲜；摘要取哪些字段、入队与摘要同一个集合；撞名字之后这一轮怎样接着做 | 推演 | — |
 | 第 6 节的计数和 condition | 推演；口径取自当前实现的走读 | — |
-| 10.2 里钩子、owner、surge 标记和副本、故障的起点、PodGroup、接管注解的各行 | 推演 | — |
+| 10.2 里钩子、owner、surge 标记和副本、PodGroup、接管注解的各行 | 推演 | — |
+| 重启故障：起点在内存里和它的键；范围已提交时按故障算，不看 grace；计时取副本和缓存里的 ModelServing 两者中保守的一个（02 的 5.3） | 推演。「到期、已提交、故障的成员还没删时换进程」这一格没有模型 | 05 第 6 节 |
 | 同名重建的各条（按 UID、队列、事件） | 推演。先例里出过的问题见 01 第 5 节 | — |
 | A1、A2：未观测、`sourceGeneration` | 未观测的处理有场景脚本；其余推演 | 05 |
 | 10.5 | 推演；007 的模型里有「`status` 被清空」一项 | 05 第 5 节 |

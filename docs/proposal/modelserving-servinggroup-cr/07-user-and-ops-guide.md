@@ -39,7 +39,7 @@ llama-3   Ready      llama-6b7f9    True    serving-group   6m
 
 被 `partition` 留在旧版本的是序号小于 P 的组，和今天一样：看名字里的序号和 REVISION 一列。灰度停下时 ModelServing 的 `Available` 的 message 也列出它们。
 
-`kubectl describe servinggroup` 里有每个 Role 实例的阶段，这个组不就绪或者失败的原因，和正在计时的重启故障是从什么时候起算的（4.3）。
+`kubectl describe servinggroup` 里有每个 Role 实例的阶段，和这个组不就绪或者失败的原因。
 
 Pod 上（`kubectl get pod -o yaml`）：
 
@@ -101,7 +101,6 @@ ModelServing 的字段没有增减。组一级的行为和今天相同（4.1）�
 | --- | --- | --- | --- |
 | controller 不在的时候丢了 Pod | 回来之后只补这一个 | 已经建成的 Role 实例按 `recoveryPolicy` 的范围恢复 | 4.2 |
 | 实例建成之前丢了成员 | 上游按范围恢复；在网版本只补 | 只补 | 4.2 |
-| 重启故障的 grace 遇上 controller 重启 | 每个新进程重新计满一个 grace | 接着算，controller 不在的时间计入 | 4.3 |
 | 恢复开始之后改 `recoveryPolicy` | 契约：还没开始删的要取消。已批准的决定：已经开始删的做完 | 组变成 Failed、实例开始清空之后不撤销。还在等 grace 的照旧可以取消 | 4.4 |
 | 整个组的 Pod 都没了 | 按序号和当时的 `partition` 重建这个组的 Pod | 结果相同。多一步：组对象先被换掉，UID 和 `AGE` 变 | 4.5 |
 | 组一级 surge 标记记在哪 | 组的每个 Pod 的注解 | ServingGroup 的注解；Pod 上留副本 | 4.6 |
@@ -110,7 +109,7 @@ ModelServing 的字段没有增减。组一级的行为和今天相同（4.1）�
 | 事件记在哪 | 全部在 ModelServing 上 | Role 实例和 Pod 一级的在 ServingGroup 上 | 第 6 节 |
 | Pod 的 owner | ModelServing | ServingGroup | 第 7 节 |
 
-前四行改的是行为契约里写明的话，要评审批准，条款在 [04](04-behavior-expectations.md) 第 11 节。其中第三行另外改了一个已经批准过的决定。另有两条要批准的不直接改变你看到的行为，改的是事实记在哪：每个 Role 实例在 ServingGroup 的 `status` 里有一条记录（建成过没有，在不在清空）；删到一半的恢复靠这条记录接着做，不靠 Pod 上的标记。
+前三行改的是行为契约里写明的话，要评审批准，条款在 [04](04-behavior-expectations.md) 第 11 节；第一行的口径已经定了（4.2）。重启故障的 grace 遇上 controller 重启时怎样计，没有变（4.3）。另有两条要批准的不直接改变你看到的行为，改的是事实记在哪：每个 Role 实例在 ServingGroup 的 `status` 里有一条记录（建成过没有，在不在清空）；删到一半的恢复靠这条记录接着做，不靠 Pod 上的标记。
 
 ### 4.1 没有变的
 
@@ -161,47 +160,34 @@ ModelServing 的字段没有增减。组一级的行为和今天相同（4.1）�
 | --- | --- | --- | --- |
 | 升级、重启 | 照 `recoveryPolicy` 的范围处理 | 只补 | 按范围恢复 |
 | 主备切换；多副本时主被删，或者主所在的节点故障 | 照范围处理 | 只补 | 按范围恢复 |
-| 完全故障；controller 被删除之后 | 允许只补 | 只补 | 按范围恢复。controller 认不出这一种，照上面两行处理 |
+| 完全故障；controller 被删除之后 | 允许只补，照范围处理也可以 | 只补 | 按范围恢复。不区分 controller 为什么不在 |
 
 前两行算在正常运行的容灾范围里：恢复策略在这些窗口里同样要成立。
 
 - 正在终止的 Pod 也算丢失。优雅终止时间长的 Pod 在 controller 回来时还没消失，同样触发。
 - `ServingGroupRecreate` 下的整组恢复不受滚动预算限制。几个组各丢了一个成员，它们在同一轮被换掉。
-- 例外：从旧版本升到这个版本的那一次。接管来的实例的记录从头开始，升级的空窗里丢的只补（[06](06-live-upgrade.md) 的 5.2）。这一次没有做到上表的第一行，与今天旧版本自己升级时相同；所以这一次升级期间不要排空节点。之后的每一次重启和升级都按上面的规则。
+- 例外：从旧版本升到这个版本的那一次。接管来的实例的记录从头开始，升级的空窗里丢的只补（[06](06-live-upgrade.md) 的 5.2）。这一次没有做到上表的第一行，与今天旧版本自己升级时相同，是已经接受的缺口；所以这一次升级期间不要排空节点。之后的每一次重启和升级都按上面的规则。
 - 现成的缓解：配了 `evictionStrategy` 并且驱逐 webhook 可用时，节点排空造成的丢失不超过驱逐预算；webhook 在 controller 不工作时照常应答。节点故障和直接删 Pod 不受它限制。
 
 **建成之前只补。**还在创建中的实例（成员还没全部建出来过）被删了成员，只补，三种策略都一样。成员是 `Failed` 的不在此列，照样按范围恢复。上游今天在这种时候按范围恢复；在网版本已经是只补。这段时间很短：从实例开始创建到它的成员第一次全部出现。
 
-### 4.3 重启之后 grace 不重新计
+### 4.3 重启故障的 grace：不变
 
-`restartGracePeriodSeconds` 是「一个成员在重启故障里多久之后按 `recoveryPolicy` 恢复」。变的是它从什么时候起算。
+`restartGracePeriodSeconds` 是「一个成员在重启故障里多久之后按 `recoveryPolicy` 恢复」。它从 controller 第一次看到故障起算，起点在 controller 的内存里。这一点与今天相同：
 
-| | 今天 | 这个设计 |
-| --- | --- | --- |
-| 起点记在哪 | controller 的内存里 | ServingGroup 的 `status` 里，按 Pod 的 UID |
-| controller 重启或换主之后 | 从新进程第一次看到起，重新计满一个 grace | 同一段故障的起点延续，controller 不在的时间计入 |
-| grace 是 60 秒：t = 0 看到故障，t = 40 controller 退出，t = 50 新进程起来 | 等到 t = 110 | 等到 t = 60 |
-| controller 停的时间比 grace 长，回来时故障还在 | 再等一个 grace | **立刻按策略恢复** |
-| controller 每隔不到一个 grace 就重启一次 | 永远不恢复 | 照常恢复 |
-| controller 不在的时候才开始的故障 | 从回来之后第一次看到起算 | 相同 |
-| 成员自己恢复过，之后又坏了 | 重新计 | 重新计。controller 不在的时候恢复过又坏的也是 |
+| | 今天和这个设计 |
+| --- | --- |
+| controller 重启、升级或换主之后 | 从新进程第一次看到起，重新计满一个 grace |
+| grace 是 60 秒：t = 0 看到故障，t = 40 controller 退出，t = 50 新进程起来 | 等到 t = 110 |
+| controller 每隔不到一个 grace 就重启一次 | 一直不到期 |
+| 成员自己恢复过，之后又坏了 | 重新计 |
+| `-1`、`None` | 不计时。改回有限的 grace 之后，从 controller 下一次看到故障的时刻起算，不会立刻到期 |
 
-起点可以直接看：
+它和 4.2 不同：4.2 说的是恢复的范围，升级和主备切换的窗口里必须成立；这里说的是恢复什么时候开始：每换一次 controller 进程，从新进程第一次看到起再等一个完整的 grace。恢复一旦开始（组变成 Failed，或者实例开始清空），换了 controller 也接着做完，不再等 grace（4.4）。清空一个实例时（缩容、滚动、恢复都一样），里面正在反复重启的 Pod 先删，等它消失再删其余的。
 
-```sh
-kubectl get servinggroup llama-1 -o jsonpath='{.status.restartFaults}'
-```
+变的只有一处，在改策略和 grace 的时候：
 
-运维上的后果：
-
-- **停机超过 grace 时，回来立刻恢复。**停机之前就在重启故障里、回来时还是同一段故障的成员，在回来的第一轮同时到期，按 `recoveryPolicy` 的范围同时恢复。没有上限；要不要给第一轮加一个上限，留给评审定。它和 4.2 叠加：controller 长时间不在之后的第一轮，动的 Pod 比今天多；`ServingGroupRecreate` 下的整组恢复不受滚动预算限制。今天是回来之后再等一个 grace，中间有人工介入的时间。
-- **用的是墙上时钟。**到期按「现在的时间减起点」算。换主之后新旧两个进程在不同的节点上，时钟有偏差时，到期的时刻差出这个偏差。grace 只有几秒时不保证精度。
-- **`-1` 和 `None` 不记起点。**`restartGracePeriodSeconds` 是 `-1`、或者 `recoveryPolicy` 是 `None` 时不计时，已有的起点去掉。改回有限的 grace 之后，从 controller 下一次看到故障的时刻起算，不会立刻到期。用 `-1` 冻结恢复、处理完再放开的做法不受影响。一个角落：controller 停着的时候改成 `-1` 又改回来，controller 没有见过 `-1`，旧的起点还在，回来之后接着算，可能立刻到期。
-- **改策略和 grace，往保守的方向立刻生效。**controller 按策略动手之前读 ModelServing 上最新的 `recoveryPolicy` 和 grace。改成 `None`、`-1`、更长的 grace，或者改范围：动手那一刻就按新的，不用等下发到每个 ServingGroup，升级接管没做完时也生效。打开策略（从 `None`、`-1` 改成别的）、缩短 grace：要等下发到 ServingGroup 才生效（看组的 `spec` 确认）；升级接管没做完时不生效。
-- **起点写不上时不开始计时。**组的 `status` 写被拒绝时，这一轮不删任何 Pod，下一轮重试。
-- **从旧版本升上来的那一次没有起点可读**，从新进程第一次看到起算，与今天相同。之后的每一次重启按上表。
-
-这一条改了一个已经批准过的决定（故障计时不跨重启）和契约里对应的文字，**要评审批准**。不批准时起点留在内存里，这一节的内容不成立，其余不受影响。
+- **打开策略、缩短 grace，要等下发到 ServingGroup 才生效。**今天改了就按新的。这个设计里往保守的方向仍然立刻生效：controller 按策略动手之前读 ModelServing 上最新的 `recoveryPolicy` 和 grace，改成 `None`、`-1`、更长的 grace，或者改范围，动手那一刻就按新的，不用等下发到每个 ServingGroup，升级接管没做完时也生效。另一个方向不是：打开策略（从 `None`、`-1` 改成别的）、缩短 grace，要等下发到 ServingGroup 才生效（看组的 `spec` 确认）；升级接管没做完时不生效。`None`、`-1` 还没下发到组就改回来的不在此列：改回来之后重新计满一个 grace 就恢复。
 
 ### 4.4 整组恢复，和提交之后不撤销
 
@@ -288,7 +274,6 @@ Pod 的 owner 从 ModelServing 变成 ServingGroup。用整数 `minAvailable` �
 | 重建一个 Pod | `kubectl delete pod`。之后发生什么由 `recoveryPolicy` 决定，和今天一样。组里只有这一个 Pod 时见 4.5 |
 | 让某个组优先被缩掉 | 和今天一样：给它的 Pod 设 `controller.kubernetes.io/pod-deletion-cost`，下一次缩容按它排 |
 | 查一个组上一代的事件 | `kubectl get events --field-selector involvedObject.name=<组名>` |
-| 看一个成员什么时候会因为重启故障被恢复 | `kubectl get servinggroup <组名> -o jsonpath='{.status.restartFaults}'` 里的起点，加上 `restartGracePeriodSeconds` |
 
 权限。chart 把 `servinggroups` 的 get、list、watch 聚合进内置的 view、edit、admin 角色；delete 聚合进 edit、admin，能删 Pod 的人本来就能触发恢复；create、update、patch 不给，`status` 的写也不给。
 
@@ -298,7 +283,7 @@ Pod 的 owner 从 ModelServing 变成 ServingGroup。用整数 `minAvailable` �
 | --- | --- |
 | 手工创建 ServingGroup | 带着正确的 owner 时，它被算成多出来的一个组，按缩容的次序删掉一个；老的组里有 deletion cost 更低的，被删的就是老的组。没有 owner 或者 owner 不对时，它占着那个序号，这个位置建不出来（4.8） |
 | 改 ServingGroup 的 `spec` | 下一轮被写回去 |
-| 改或者清空 ServingGroup 的 `status` | 这个组「建成过」的记录丢失：成员齐全的实例会被重新记成建成，在那之前丢了成员只补，不按范围恢复。重启故障的起点丢失，重新计 |
+| 改或者清空 ServingGroup 的 `status` | 这个组「建成过」的记录丢失：成员齐全的实例会被重新记成建成，在那之前丢了成员只补，不按范围恢复 |
 | 改 ServingGroup 或 Pod 上的 surge 注解 | ServingGroup 上的：摘掉之后这个临时的组成为正式的组，不再被回收，组多于 N 时按缩容删一个。Pod 上的：被写回去 |
 | 给 ServingGroup 加 finalizer | 它被删除时卡在 Terminating，序号一直被占着（4.8） |
 | `kubectl delete servinggroup --all` | 这个 namespace 里全部 ModelServing 的全部副本同时被删、同时重建，不受滚动预算限制 |
@@ -338,8 +323,8 @@ Pod 的 owner 从 ModelServing 变成 ServingGroup。用整数 `minAvailable` �
 | 组的序号有洞，例如只有 `llama-0`、`llama-3` | ModelServing 的 condition 的 message | 按 `pod-deletion-cost` 缩容留下的，正常，今天也是这样。之后的扩容先补最低的洞 |
 | 删掉的组又回来了，`AGE` 很小 | — | 正常（第 3 节） |
 | `describe servinggroup` 里看不到以前的事件 | — | 它只显示当前这个对象的。按名字查（上面） |
-| controller 重启之后，一批实例或者组同时被重建 | 重启期间有没有排空节点；停机有没有超过 `restartGracePeriodSeconds` | 4.2、4.3 |
-| 一个在重启故障里的成员比预期早被恢复 | `status.restartFaults` 里的起点 | 起点是 controller 第一次看到故障的时刻，跨 controller 重启延续（4.3） |
+| controller 重启之后，一批实例或者组同时被重建 | 重启期间有没有排空节点，有没有 Pod 被删 | 4.2 |
+| 一个在重启故障里的成员比预期晚被恢复 | 这期间 controller 有没有重启、换主 | 每个新进程重新计满一个 grace（4.3） |
 | controller 的日志里有 AlreadyExists 和 409 Conflict | — | 正常路径，不是错误。重复的创建撞名字；对上一代对象、或者对已经变过的对象的写被拒绝，下一轮重新计划。同一个组名一直 AlreadyExists 而组一直建不出来：看 `OrdinalOccupied` |
 | 升级之后新的 controller Pod 就绪了，迟迟不接手 | 新 Pod 的事件和日志；同一个 namespace 里有没有旧版本的 controller Pod | 它在等旧版本的 Pod 消失，事件和日志里写着在等哪个；等待超过设定的时间有告警。旧 Pod 卡在 Terminating 时一直等：处理那个 Pod。不要只把 Pod 对象强制删掉 |
 | 升级之后新的 controller Pod 不就绪，旧的还在工作 | 两个 CRD 在不在；新 Pod 的日志 | ServingGroup 的 CRD 或者对它的权限不在。先装 CRD（第 7 节） |
@@ -380,7 +365,7 @@ Pod 的 owner 从 ModelServing 变成 ServingGroup。用整数 `minAvailable` �
 
 **升级之后会缩掉一个组的情形。**序号集合有洞、并且正在带 `maxSurge` 滚动的 ModelServing：旧版本可能把临时多出来的那个组建在了小于 N 的空洞里，不带临时的标记。升级之后它是正式的组，正式的组比 N 多一个，controller 缩掉一个。多出来的那个组已经就绪时，按缩容的次序删一个：没有设 deletion cost 时是序号最高的那个旧组，与旧版本本来要做的相同。它还没就绪时，被缩掉的是它，之后重新来。没有健康的组被多删。升级前检查会报出这样的 ModelServing；等它滚动做完再升级。
 
-**升级和排空节点。**这一次升级期间丢的 Pod 只补（4.2 的例外）；已经是 `Failed` 的 Pod 除外，见下一段。之后新版本的每一次升级和重启都按 4.2、4.3：停机期间丢了成员，回来之后按 `recoveryPolicy` 的范围恢复；停机超过 grace 时，停机之前就在重启故障里的成员回来立刻恢复。所以以后升级和重启 controller 的同时也不要排空节点。
+**升级和排空节点。**这一次升级期间丢的 Pod 只补（4.2 的例外）；已经是 `Failed` 的 Pod 除外，见下一段。之后新版本的每一次升级和重启都按 4.2：停机期间丢了成员，回来之后按 `recoveryPolicy` 的范围恢复。所以以后升级和重启 controller 的同时也不要排空节点。
 
 **升级之前已经有 `Failed` 的 Pod。**旧版本在容忍它的话（`restartGracePeriodSeconds` 是 `-1`，或者还没到期），新版本接管之后不容忍：终态的 Pod 不等 grace，`RoleRecreate` 重建它所在的实例，`ServingGroupRecreate` 换掉整个组，健康的 Pod 跟着被重建。升级前检查会列出这样的 Pod 和会被重建的范围。升级之前先处理掉它们。
 
