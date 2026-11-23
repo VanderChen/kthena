@@ -545,7 +545,7 @@ L8 没有模型，是推演。L4 和 L5 是 007 里「没有模型证据」的�
 - 范围取动手那一刻的策略。要写 Draining、写 Failed 的轮次直读所属的 ModelServing，`recoveryPolicy` 和 grace 取它上面的最新值（6.3）；组的 `spec` 里的那一份是副本，用来触发 reconcile 和平时判断成员是不是故障。直读是动手之前的最后一道：副本说该恢复而 ModelServing 上已经改成不该（`None`、`-1`、更长的 grace），不恢复；范围改了，按新的范围。这个方向不用等下发。反过来不是：副本还是 `None`、`-1` 或者更长的 grace 时，ServingGroup controller 不会走到要写的那一步，也就不读；打开策略、缩短 grace 要等 G5 下发到组才生效，升级接管没做完时（G5 不做）不生效。
 - 终态不等 grace（D13）；重启故障按 grace，`-1` 不触发。
 - 最后一列：在网版本连续运行时已经是这样，它只在「本进程见过这个实例建成」之后才把缺失扩大成范围恢复，这个「见过」只在内存里。`main` 和契约在连续运行时不看建没建成，删除事件到了就按范围恢复；对它们这是一处变化（007 的 T14）。
-- 「建成过」现在写在对象上：**controller 不在的时候发生的丢失，回来之后照样按范围恢复。**今天两个版本在这种情形下都只补一个。
+- 「建成过」现在写在对象上：**controller 不在的时候发生的丢失，回来之后照样按范围恢复。**今天两个版本在这种情形下都只补一个。按用户的口径，升级 controller、主备切换、多副本时主被删或所在节点故障算在正常运行的容灾范围里，这些窗口里必须按范围处理；只有 controller 完全故障和被删除之后的变化允许只补。这一版从对象上分不出后两种，一律按范围恢复（[04](04-behavior-expectations.md) 第 11 节的 C2）。
 
 **整个组的 Pod 都没有了**（`ServingGroupRollingUpdate` 下）。组期望有成员，账本里有建成过的实例，而一个成员 Pod 都没有了：属于这个组的没有，待接管的（[03](03-state-machine.md) 第 3 节）没有，终止中的也没有。ServingGroup controller 写 Failed，Drained 同时为真，不再创建。任何恢复策略下都这样。ModelServing controller 删掉对象，在这个序号上按序号和当时的 partition 重建（5.4）。这是 D12：整个单元没有了，按当时的规则重新建，不沿用它原来的版本。ServingGroup controller 自己不能这样做，因为按序号选版本要用的 P 和 B 不在它手里。每组只有一个 Pod 时，这个 Pod 每丢一次，组对象换一个；Pod 直接按正确的版本起。组的 PodGroup、Service 随对象一起重建。`RoleRollingUpdate` 下不这样做：版本按 Role 的 partition 选，ServingGroup controller 自己有。
 

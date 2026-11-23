@@ -288,7 +288,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 不要做的事：
 
 - 任何步骤里都不删 CRD。chart 里 CRD 的位置不要变（位置一变，Helm 升级会删掉它，连带全部实例）。
-- 升级和重启 controller 的同时不要排空节点，不要做会删 Pod 的操作。这一次升级：空窗里丢的 Pod 没有人补，接管之后只补。之后新版本的每一次升级和重启：停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复，重建的 Pod 比丢的多；停机之前就在重启故障里的成员，grace 接着算，停机超过 grace 时回来的第一轮就恢复（第 11 节；[07](07-user-and-ops-guide.md) 的 4.2、4.3）。
+- 升级和重启 controller 的同时不要排空节点，不要做会删 Pod 的操作。这一次升级：空窗里丢的 Pod 没有人补，接管之后只补。按用户的口径升级不赦免，这一次没有做到，与今天旧版本自己升级时相同（[README](README.md) 的 OP8）。之后新版本的每一次升级和重启：停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复，重建的 Pod 比丢的多；停机之前就在重启故障里的成员，grace 接着算，停机超过 grace 时回来的第一轮就恢复（第 11 节；[07](07-user-and-ops-guide.md) 的 4.2、4.3）。
 
 ### 7.1 升级前检查的输出
 
@@ -442,7 +442,7 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 | `helm rollback`、`kubectl rollout undo` 到旧版本 | 第 9 节：不做反向接管就是事故。旧版本的 Pod 先起来并且就绪，新版本的 Pod 才被停掉，中间两个版本同时在跑 | X1 的持续观察只停得下新版本一侧的写；旧版本一侧挡不住，它照样删 Pod。文档写明回退的入口是 9.1。X3 在这个方向不起作用：旧 chart 会把旧的 ServiceAccount 建回来 |
 | 在新版本运行时启动一个旧版本的进程（另一个 namespace、另一个 release、本地调试） | 第 1 节第 2 条 | 没有，只有文档。X1 只看自己 namespace 里的 Pod；X3 只挡用这个 release 的 ServiceAccount 的旧进程 |
 | 回退开关留着没有删（9.1） | 新版本的两个 controller 不做正常的 reconcile，也不做正向接管 | 升级前检查报告它（7.1） |
-| 重启或升级新版本的 controller，同时排空节点或删 Pod | 停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复。`ServingGroupRecreate` 下的整组恢复不受滚动预算限制。从旧版本升上来的那一次不这样：账本从零值开始，只补 | 驱逐预算（配了 `evictionStrategy` 并且驱逐 webhook 可用时）。其余只有文档 |
+| 重启或升级新版本的 controller，同时排空节点或删 Pod | 停机期间丢了成员的已建成实例，回来之后按 `recoveryPolicy` 的范围恢复。`ServingGroupRecreate` 下的整组恢复不受滚动预算限制。从旧版本升上来的那一次不这样：账本从零值开始，只补（README 的 OP8） | 驱逐预算（配了 `evictionStrategy` 并且驱逐 webhook 可用时）。其余只有文档 |
 | 新版本的 controller 停机超过 `restartGracePeriodSeconds`（重启、升级、换主卡住） | 停机之前已经在重启故障里、回来时还是同一段故障的成员，起点延续。回来的第一轮它们同时到期，按 `recoveryPolicy` 的范围同时恢复，没有上限；与上一行叠加。要不要给第一轮加一个上限，留给评审定。今天是回来之后再等一个 grace。从旧版本升上来的那一次没有起点，不受影响；之后的每次重启受影响 | 没有，只有文档。这一条改了已批准的决定，要批准（[04](04-behavior-expectations.md) 第 11 节的 N1）；不批准时起点留在内存里，这一行不成立 |
 | 改 `ServingGroup.status` | 账本回到零值：重新建账之前的丢失只补；重启故障的起点丢失，重新计。Drained 被写成真：失败的组被提前删 | `servinggroups/status` 不授给用户 |
 | 手工改 surge 注解 | 组对象上的注解由 controller 在创建时写，之后只会被它摘掉。手工摘掉：这个临时的组成为正式的组，不再被回收；正式的组多于 N 时按缩容删一个，删的不一定是它。手工加上：序号不小于 N 的正式的组会被当成临时容量，没有滚动要做时被回收；序号小于 N 的下一轮又被摘掉。Pod 上的副本：手工改了之后被 ServingGroup controller 按组对象写回去 | `servinggroups` 的 patch 不授给用户。「只会被摘掉、不会后加」不能由 API 强制，靠没有人有 patch 权限（02 的 8.10） |
@@ -495,3 +495,4 @@ ModelServing 上有一个注解记接管的进度：没有（不知道）、`InP
 40. 回退到在网版本之后，新版本重建过的实例（新的 headless Service 布局）：旧版本怎样对待它们的 Service，DNS 记录有没有中断（第 10 节）。
 41. 名下只有「没有 controller owner 的带标签的 Pod」的 ModelServing：T1 写的是 `InProgress`，这些 Pod 被接管（5.1）。
 42. `InProgress` 期间把恢复策略改成 `None`：已经换完 owner 的组不再恢复。反方向（打开策略）在 `Done` 之后才生效（5.2）。
+43. 升级空窗里丢 Pod：从旧版本升上来的这一次只补；之后新版本到新版本的升级、主备切换、删掉主的 Pod 或让主所在的节点失联，已建成的实例都按范围恢复。
