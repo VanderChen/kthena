@@ -259,6 +259,30 @@ func TestAnOrdinalThatIsOccupiedIsLeftAlone(t *testing.T) {
 	}
 }
 
+// A group that lost the label naming its ModelServing is still its group. The
+// list by that label does not return it; the round must not take its ordinal
+// for free.
+func TestAGroupWithoutItsLabelIsStillCounted(t *testing.T) {
+	s := newSystem(t, modelServing())
+	s.settle()
+	group := s.groups()[0]
+	uid := group.UID
+	delete(group.Labels, workloadv1alpha1.ModelServingNameLabelKey)
+	if _, err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Update(context.Background(), group, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A round that writes reads from the API server: here it adds a group.
+	s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](4) })
+	s.settle()
+	if got, want := s.summary(), "groups[0=model:v1 1=model:v1 2=model:v1 3=model:v1] replicas=4 updated=4 current=4 available=4 Available"; got != want {
+		t.Errorf("after the scale-up:\n got %s\nwant %s", got, want)
+	}
+	if got := s.groups()[0]; got.UID != uid {
+		t.Errorf("group %s was replaced", got.Name)
+	}
+}
+
 // A rollout that waits is reported as blocked once the wait has lasted, with
 // what it waits for, and no longer when it moves again.
 func TestRolloutBlocked(t *testing.T) {
@@ -353,6 +377,33 @@ func TestRolloutBlocked(t *testing.T) {
 		round(s)
 		if status, reason := blockedOf(s); status != "True" || reason != workloadv1alpha1.RolloutBlockedGroupNotObserved {
 			t.Errorf("RolloutBlocked = %s/%s", status, reason)
+		}
+	})
+
+	t.Run("a group that has reported in between starts to count anew", func(t *testing.T) {
+		s := newSystem(t, modelServing())
+		s.settle()
+		// A new group has not reported yet: a wait begins. Then it reports.
+		s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](4) })
+		round(s)
+		round(s)
+		s.settle()
+		if got := s.condition(); got != "Available" {
+			t.Fatalf("after the scale-up: %s", got)
+		}
+		// Much later every group is behind again, for a moment. That wait has
+		// only just begun.
+		s.cluster.Advance(6 * time.Minute)
+		s.update(func(ms *workloadv1alpha1.ModelServing) {
+			ms.Spec.Replicas = ptr.To[int32](5)
+			ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+		})
+		round(s)
+		if after := round(s); after <= 0 {
+			t.Errorf("the round is due again after %v, want when the deadline passes", after)
+		}
+		if status, reason := blockedOf(s); status == "True" {
+			t.Errorf("RolloutBlocked = True/%s at once, for groups that reported six minutes ago", reason)
 		}
 	})
 }

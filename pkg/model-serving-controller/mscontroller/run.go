@@ -30,6 +30,7 @@ import (
 	"k8s.io/klog/v2"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
 )
 
 // Informers are the informers whose events start a round.
@@ -84,6 +85,21 @@ func (r *Runner) enqueueNamed(obj any) {
 	}
 }
 
+// enqueueGroup puts on the queue the ModelServing a ServingGroup concerns:
+// the one its label names, and the one whose group its name would be. An
+// object that holds the name of a group without belonging to the ModelServing
+// keeps the ordinal occupied, and so does a group that lost its label.
+func (r *Runner) enqueueGroup(obj any) {
+	accessor := object(obj)
+	if accessor == nil {
+		return
+	}
+	r.enqueueNamed(obj)
+	if prefix, _, ok := objcache.OrdinalName(accessor.GetName()); ok && prefix != accessor.GetLabels()[workloadv1alpha1.ModelServingNameLabelKey] {
+		r.queue.Add(accessor.GetNamespace() + "/" + prefix)
+	}
+}
+
 func (r *Runner) named() cache.ResourceEventHandlerFuncs {
 	return cache.ResourceEventHandlerFuncs{
 		AddFunc:    r.enqueueNamed,
@@ -108,9 +124,19 @@ func (r *Runner) Register(informers Informers) error {
 		{informers.ModelServings, cache.ResourceEventHandlerFuncs{
 			AddFunc:    r.enqueue,
 			UpdateFunc: func(_, current any) { r.enqueue(current) },
-			DeleteFunc: r.enqueue,
+			DeleteFunc: func(obj any) {
+				// No round will see this object again to forget it by.
+				if accessor := object(obj); accessor != nil {
+					r.controller.forget(accessor.GetUID())
+				}
+				r.enqueue(obj)
+			},
 		}},
-		{informers.ServingGroups, r.named()},
+		{informers.ServingGroups, cache.ResourceEventHandlerFuncs{
+			AddFunc:    r.enqueueGroup,
+			UpdateFunc: func(_, current any) { r.enqueueGroup(current) },
+			DeleteFunc: r.enqueueGroup,
+		}},
 		// Whether the status of a group is fresh is judged against the Pod
 		// cache, so a change of a Pod can change the plan without any change
 		// of a group.

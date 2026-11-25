@@ -90,7 +90,7 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	}
 	if ms.DeletionTimestamp != nil {
 		// The garbage collector deletes the groups.
-		c.forgetTarget(ms.UID)
+		c.forget(ms.UID)
 		return 0, nil
 	}
 	if c.rollingBack() {
@@ -189,9 +189,25 @@ func (c *Controller) readDirect(ctx context.Context, cached *workloadv1alpha1.Mo
 		listed[list.Items[i].Name] = true
 	}
 	for _, group := range c.caches.GroupsNamedAfter(ms.Namespace, ms.Name) {
-		if owner := metav1.GetControllerOfNoCopy(group); !listed[group.Name] && (owner == nil || owner.UID != ms.UID) {
-			named = append(named, group)
+		if listed[group.Name] {
+			continue
 		}
+		if owner := metav1.GetControllerOfNoCopy(group); owner == nil || owner.UID != ms.UID {
+			named = append(named, group)
+			continue
+		}
+		// A group of the ModelServing that the list does not have was deleted,
+		// or lost its label. Left out, its ordinal would look free, the group
+		// would be created again and again, and every other write of the round
+		// would be dropped with the failed creation.
+		direct, err := c.kthena.WorkloadV1alpha1().ServingGroups(ms.Namespace).Get(ctx, group.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, observed{}, false, err
+		}
+		named = append(named, direct)
 	}
 	return ms, split(ms, named), true, nil
 }

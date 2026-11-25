@@ -51,6 +51,34 @@ type blockage struct {
 // reported: a group that hangs in deletion hides what comes after it, and is
 // what has to be looked at first anyway.
 func (c *Controller) blockedOn(r *round, status workloadv1alpha1.ModelServingStatus, now time.Time) *blockage {
+	// Since when a group has not reported is kept up in every round, also in
+	// one that waits for nothing: a group that has reported in between must
+	// not be found, the next time it is behind, with the moment of an earlier
+	// time, and be reported as overdue at once.
+	type unreported struct {
+		since time.Time
+		what  string
+	}
+	behind := map[types.UID]unreported{}
+	seen := map[types.UID]bool{}
+	for i := range r.view.groups {
+		g := &r.view.groups[i]
+		_, awaiting := r.view.input.Orphans[g.ordinal]
+		if g.unit.Terminating || g.unit.Observed && g.unit.Fresh && !awaiting {
+			continue
+		}
+		what := "has not reported on its current spec"
+		switch {
+		case awaiting:
+			what = "has member Pods it has not adopted"
+		case g.unit.Observed:
+			what = "has not reported on the Pods the controller sees"
+		}
+		seen[g.object.UID] = true
+		behind[g.object.UID] = unreported{since: c.unsettledSince(g.object.UID, now), what: what}
+	}
+	c.forgetSettled(r.ms.UID, seen)
+
 	if meta.IsStatusConditionTrue(status.Conditions, string(workloadv1alpha1.ModelServingAvailable)) || r.gated {
 		return nil
 	}
@@ -104,24 +132,12 @@ func (c *Controller) blockedOn(r *round, status workloadv1alpha1.ModelServingSta
 	if found != nil {
 		return found
 	}
-	seen := map[types.UID]bool{}
 	for i := range r.view.groups {
 		g := &r.view.groups[i]
-		_, awaiting := r.view.input.Orphans[g.ordinal]
-		if g.unit.Observed && g.unit.Fresh && !awaiting {
-			continue
+		if late, ok := behind[g.object.UID]; ok {
+			earliest(workloadv1alpha1.RolloutBlockedGroupNotObserved, late.since, "ServingGroup %s %s", g.object.Name, late.what)
 		}
-		seen[g.object.UID] = true
-		what := "has not reported on its current spec"
-		switch {
-		case awaiting:
-			what = "has member Pods it has not adopted"
-		case g.unit.Observed:
-			what = "has not reported on the Pods the controller sees"
-		}
-		earliest(workloadv1alpha1.RolloutBlockedGroupNotObserved, c.unsettledSince(g.object.UID, now), "ServingGroup %s %s", g.object.Name, what)
 	}
-	c.forgetSettled(r.ms.UID, seen)
 	if found != nil {
 		return found
 	}

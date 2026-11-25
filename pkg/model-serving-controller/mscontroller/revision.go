@@ -72,11 +72,15 @@ func (c *Controller) targetRevision(ctx context.Context, ms *workloadv1alpha1.Mo
 	return revision, collisions, cr, nil
 }
 
-// forgetTarget drops what is remembered about a ModelServing that is gone.
-func (c *Controller) forgetTarget(uid types.UID) {
+// forget drops what the process remembers about a ModelServing that is gone.
+func (c *Controller) forget(uid types.UID) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	delete(c.targets, uid)
-	c.mu.Unlock()
+	for group := range c.unsettledOf[uid] {
+		delete(c.unsettled, group)
+	}
+	delete(c.unsettledOf, uid)
 }
 
 // baselineRevision returns the baseline revision B: the revision the groups
