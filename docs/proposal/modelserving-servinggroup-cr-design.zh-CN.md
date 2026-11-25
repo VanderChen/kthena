@@ -522,7 +522,7 @@ client-go 的 fake clientset 不检查 resourceVersion 和 UID 的前置条件�
 | --- | --- | --- |
 | X1 | 自查 | chart 给 controller-manager 的 Pod 模板加标签 `modelserving.volcano.sh/controller-protocol: servinggroup`。标的是协议的代，不是镜像版本：以后新版本之间的升级不应当被它挡住。进程拿到租约之后、启动任何 controller 之前，在自己的命名空间里列出带 `app.kubernetes.io/component: kthena-controller-manager`、不带这个标签、还没有结束（`Succeeded`、`Failed` 之外，终止中的也算在跑）的 Pod；有，就不启动任何 controller，只应答 webhook，每 5 秒查一次，在自己的 Pod 上发事件 `WaitingForPredecessor` 说明在等谁。运行中每 5 秒查一次；看到这样的 Pod，进程退出（退出码非零），容器重启之后回到启动自查。不在集群里跑（本地调试）时不查 |
 | X2 | CRD 和权限的闸 | 进程一启动就试着 LIST 一次 ServingGroup，每 5 秒重试，不论有没有拿到租约。成功之前 `/readyz` 返回 503（Deployment 的就绪探针指向它），`/healthz`（存活）照常，两个 controller 不启动。不退回旧的工作方式。新 Pod 不就绪时滚动更新不会停掉旧 Pod，旧版本接着工作：漏装 CRD 只是让升级停在那里。chart 里另用 `lookup` 在升级开始之前失败；`lookup` 在 `helm template` 和多数 GitOps 的渲染里返回空，所以只在「release 的命名空间查得到而 CRD 查不到」时才失败 |
-| X3 | 换凭据 | 最后一个里程碑。X2 和 X3 有一处相互作用：CRD 没装而 chart 的检查又没有触发时，X2 让新 Pod 不就绪、旧 Pod 留着，X3 却已经让旧 Pod 的凭据失效，结果是没有 controller 在工作。做法在那个里程碑定：要么写进文档当作漏做第 2 步的代价，要么由新进程在 X1、X2 通过之后自己删掉旧的绑定 |
+| X3 | 换凭据 | chart 里 controller-manager 的 ServiceAccount 改名为 `kthena-controller-manager-servinggroup`，两个绑定跟着改。`helm upgrade` 删掉旧的 ServiceAccount，旧版本的进程（包括失联节点上还活着的）随即失去凭据：Kind 上旧 Pod 在被 Deployment 删除之前就因为认证失败退出了一次，`kubectl get pod` 里短暂显示 `Error`，这是预期的。装回旧 chart 时反方向同样生效，回退靠它保证新版本的进程不再写。X2 和 X3 有一处相互作用：CRD 没装而 chart 的检查又没有触发（Helm 不能 `lookup`）时，X2 让新 Pod 不就绪、旧 Pod 留着，X3 却已经让旧 Pod 的凭据失效，这段时间没有 controller 在工作。不另加机制，写进升级步骤当作漏装 CRD 的代价：工作负载不受影响，只是不恢复、不滚动；装上 CRD 之后新进程自己变成就绪 |
 | X4 | 选主 | `--leader-elect` 默认改成真；失主的回调改成退出进程（今天只打一行日志，进程留着，已经在睡眠的 grace goroutine 还会去删 Pod）。`ReleaseOnCancel` 仍然是假 |
 
 运行中的自查选「退出」而不是 008 写的「停掉两个 controller、继续应答 webhook」：informer 和队列停下之后不能原地重启，退出重来是同一个效果，少一条要测试的路径。代价是这个 Pod 重启的几秒里它不应答 webhook；别的副本和那个旧 Pod 照样应答。
@@ -566,7 +566,7 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 | 原地更新途中 | 组的 `spec.revision` 取进度注解里的目标；成员接着完成 |
 | 整组恢复或者实例恢复做了一半 | 没有标记可续：缺的补（与旧版本自己重启相同） |
 | 有 `Failed` 的 Pod，或者在重启故障里的 Pod | grace 从新进程第一次看到起重新计。`None`、`-1` 下一直容忍，与今天相同 |
-| 各 Role 都是 0 的组 | 没有 Pod，不建对象；它的 PodGroup 由 T2′ 删掉；`Done` 之后 G4 按规则建出空组 |
+| 各 Role 都是 0 的组 | 没有 Pod，接管时不建对象；`Done` 之后 G4 按规则建出空组，旧版本留下的 PodGroup 由同步入口原地接过去（T2′ 没有实现，见 6.4） |
 | 整个组的 Pod 都在终止 | 不接管，不等。它们消失之后 G4 在那个序号上建 |
 | 带着标签、名字对不上的 Pod | 不接管，不删除，发事件 |
 
@@ -608,6 +608,7 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 
 - **与收养的竞争。**正常的一轮里 owner 是 ModelServing 的 Pod 是待接管的成员。开关出现时正在跑的一轮可能把刚换回去的 Pod 又接回来。所以 T4 换 owner 之前的那次直读里另查所属 ModelServing 的注解：是 `RollingBack` 就不换；回退的第 3 步在第 2 步的写成功之后才开始。
 - **放弃回退**：删掉开关。注解是 `RollingBack` 的和已经没有注解的 ModelServing 落回 T1，重新接管。
+- **带着开关启动**：新版本什么都不接管，工作负载留在 ModelServing 名下。为了不让它看起来像故障，进入和离开回退模式各记一行日志，并在开关这个 ConfigMap 上发 `RollbackMode` 事件。再次升级之前要先删掉开关。
 - **旧版本要对象回到什么样子**：三类对象的 controller owner 是 ModelServing；revision 和 role-template-hash 标签在（新版本一直在写）；原地更新的注解格式没变；ControllerRevision 上协调的基线注解在（新版本照旧写它）。代际号标签旧版本不认识，留着无妨。
 
 ### 6.9 chart 的改动
@@ -621,7 +622,7 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 | 存活和就绪两个探针分开 | X2 |
 | `--leader-elect` 默认真 | X4 |
 | `lookup` 的检查 | X2 |
-| ServiceAccount 换名字 | X3，最后一个里程碑 |
+| ServiceAccount 换名字（`kthena-controller-manager-servinggroup`） | X3 |
 
 ### 6.10 做不到的和没有覆盖的
 

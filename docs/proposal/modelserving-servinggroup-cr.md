@@ -498,7 +498,7 @@ at the same time, and the new version enforces this itself:
 | Step | Controller | Action |
 | --- | --- | --- |
 | T1 | ModelServing | Read the legacy objects directly. None: annotate `Done`. Some: annotate `InProgress`. While `InProgress` no group-level write is made for this ModelServing. The validating webhook admits an update that leaves `spec` unchanged, so that the annotation can be written on an object that today's rules would reject |
-| T2′ | ModelServing | Delete, by UID, legacy PodGroups and Services of groups that have no live Pod |
+| T2′ | — | Not implemented. Legacy PodGroups and Services of a group that has no live Pod are taken over in place once the group object exists; those at ordinals that are no longer wanted stay owned by the ModelServing and are collected with it |
 | T3 | ModelServing | Create a ServingGroup with the existing name for every group that has a live Pod. `spec.revision` comes from the Pods' revision label. The surge mark is decided once, by the rule the old version used: the ordinal is at or above `replicas` and at least one Pod carries the mark |
 | T4 | ServingGroup | For each legacy member: read the ServingGroup directly, then replace the controller owner of the Pod, the PodGroup and the Services with it and add the generation label |
 | T5 | ServingGroup | The ledger starts at its zero value. An instance whose members are all present is written as `Established` |
