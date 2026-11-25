@@ -69,7 +69,9 @@ func isSurge(spec Spec, g Group) bool {
 // isReplaceable: live, ServingGroupRollingUpdate, has members, and either
 // RecreateRequired or an old revision at an ordinal that is not protected.
 // "Has members" governs both; nothing below P is replaceable while the
-// baseline cannot be read, because it could not be created again.
+// baseline cannot be read, because it could not be created again. A group
+// whose revision cannot be compared with the target is not an old revision:
+// it stays as it is until its history can be read.
 func isReplaceable(spec Spec, g Group) bool {
 	if !g.live() || spec.Mode != ModeServingGroup || g.memberless() {
 		return false
@@ -77,7 +79,7 @@ func isReplaceable(spec Spec, g Group) bool {
 	if spec.Baseline == "" && g.Ordinal < spec.Partition {
 		return false
 	}
-	return g.RecreateRequired || (g.Revision != spec.Target && g.Ordinal >= spec.Partition)
+	return g.RecreateRequired || (g.Revision != spec.Target && g.Ordinal >= spec.Partition && !g.RevisionUnknown)
 }
 
 // placeRevision is the revision of a group created at this ordinal now: B

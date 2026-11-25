@@ -887,6 +887,53 @@ func TestPlanInPlace(t *testing.T) {
 	})
 }
 
+// A group whose revision cannot be compared with the target is neither rolled
+// nor counted as rolled.
+func TestPlanRevisionUnknown(t *testing.T) {
+	unknown := func(g *Group) { g.RevisionUnknown = true }
+	runPlanCases(t, []planCase{
+		{
+			name: "not replaced, and no surge is made for it",
+			in:   Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", unknown), group(1, "v1", unknown), group(2, "v1", unknown)}},
+		},
+		{
+			name: "the groups that can be compared are rolled",
+			in:   Input{Spec: rollout(3, 1, 0, 0), Groups: []Group{group(0, "v1", unknown), group(1, "v1"), group(2, "v2")}},
+			want: []Action{del(1, ReasonReplace)},
+		},
+		{
+			name: "the baseline does not advance over it",
+			in:   Input{Spec: rollout(3, 1, 0, 0), Groups: []Group{group(0, "v2"), group(1, "v2"), group(2, "v1", unknown)}},
+		},
+		{
+			name: "it is still deleted when it failed",
+			in:   Input{Spec: rollout(3, 1, 0, 0), Groups: []Group{group(0, "v2"), group(1, "v1", unknown, drained), group(2, "v2")}},
+			want: []Action{del(1, ReasonFailed)},
+		},
+		{
+			name: "it is still scaled in",
+			in:   Input{Spec: rollout(1, 1, 0, 0), Groups: []Group{group(0, "v1", unknown), group(1, "v1", unknown)}},
+			want: []Action{del(1, ReasonScaleDown)},
+		},
+		{
+			name: "it is still replaced when the group itself asks to be recreated",
+			in:   Input{Spec: rollout(2, 1, 0, 0), Groups: []Group{group(0, "v1", unknown, recreate), group(1, "v2")}},
+			want: []Action{del(0, ReasonReplace)},
+		},
+		{
+			name: "without a member it gets the revision of its ordinal",
+			in:   Input{Spec: rollout(2, 1, 0, 0), Groups: []Group{group(0, "v2"), group(1, "v1", unknown, memberless)}},
+			want: []Action{retarget(1, "v2", ReasonMemberless)},
+		},
+	})
+
+	spec := rollout(3, 1, 0, 0)
+	view := Classify(spec, []Group{group(0, "v1", unknown), group(1, "v1", unknown, notReady), group(2, "v2")}, nil)
+	if view.Classes[0] != ClassProtected || view.Work || view.NotReadyTarget != 0 || view.Ready != 2 {
+		t.Errorf("Classify() = %+v, want the unknown groups protected, no work, and the one that is not ready off the ready count", view)
+	}
+}
+
 func TestPlanIsDeterministic(t *testing.T) {
 	in := Input{
 		Spec: rollout(4, 2, 1, 1),

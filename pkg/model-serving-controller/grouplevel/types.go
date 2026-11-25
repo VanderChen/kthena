@@ -86,6 +86,11 @@ type Group struct {
 	// Revision is the revision the group counts as, resolved by the caller:
 	// spec.revision, or status.revision under RoleRollingUpdate.
 	Revision string
+	// RevisionUnknown: the revision cannot be compared with the target because a
+	// template cannot be resolved. The group is not of the target revision and
+	// is not replaced on account of its revision either: nothing is deleted on
+	// the strength of a history that cannot be read.
+	RevisionUnknown bool
 	// Surge: the group carries the surge annotation.
 	Surge bool
 	// Terminating: deletionTimestamp is set.
