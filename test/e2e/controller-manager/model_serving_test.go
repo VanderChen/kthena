@@ -1597,11 +1597,12 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 
 	t.Log("Waiting for controller to observe the patched Ready pods")
 	// One NotReady Role keeps AvailableReplicas at zero, and readiness may be
-	// observed without emitting a RoleRunning Event. Verify two successive
-	// non-template generations so an already running sync cannot acknowledge
-	// the readiness change without a following complete reconciliation.
-	var readyGeneration int64
-	observedGenerations := 0
+	// observed without emitting a RoleRunning Event. Pod readiness is observed
+	// by the ServingGroup controller, which reports the Pods it has seen in the
+	// status of the ServingGroup: wait until that status, computed from the
+	// current spec, counts the three Ready Pods next to the NotReady one.
+	groupName := targetPod.Labels[workload.GroupNameLabelKey]
+	require.NotEmpty(t, groupName, "Pod should have GroupName label")
 	require.Eventually(t, func() bool {
 		pods, listErr := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
 		if listErr != nil || len(pods.Items) != int(initialRoleReplicas) {
@@ -1628,23 +1629,12 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 		if unhealthy != 1 {
 			return false
 		}
-		if readyGeneration == 0 {
-			updateModelServingWithRetry(t, ctx, kthenaClient, modelServing.Name, func(current *workload.ModelServing) {
-				current.Spec.RevisionHistoryLimit = ptr.To(ptr.Deref(current.Spec.RevisionHistoryLimit, 10) + 1)
-				readyGeneration = current.Generation + 1
-			})
+		group, getErr := kthenaClient.WorkloadV1alpha1().ServingGroups(testNamespace).Get(ctx, groupName, metav1.GetOptions{})
+		if getErr != nil || !metav1.IsControlledBy(group, ms) {
 			return false
 		}
-		current, getErr := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
-		if getErr != nil || current.Status.ObservedGeneration != readyGeneration {
-			return false
-		}
-		observedGenerations++
-		if observedGenerations < 2 {
-			readyGeneration = 0
-			return false
-		}
-		return true
+		return group.Status.ObservedGeneration == group.Generation &&
+			group.Status.Pods == initialRoleReplicas && group.Status.ReadyPods == initialRoleReplicas-1
 	}, 30*time.Second, 2*time.Second, "Expected reconciliation of three Ready Roles and the original NotReady Role")
 
 	initialMS, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
