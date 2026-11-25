@@ -205,7 +205,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	if r.failure != nil {
 		status := servinggroup.ComputeStatus(servinggroup.StatusInput{
 			Group: group, Now: now, Members: r.members, Instances: r.instances,
-			Ledger: group.Status.RoleInstances, LayoutUnknown: true,
+			Ledger: group.Status.RoleInstances, LayoutUnknown: true, Revisions: r.history,
 			// No plan says which update is under way. An instance with a Pod
 			// that is patched and not relabelled is in the middle of one.
 			Updating: servinggroup.UnfinishedUpdates(r.instances),
@@ -265,7 +265,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 
 	input := servinggroup.StatusInput{
 		Group: group, Now: now, Members: r.members, Instances: r.instances,
-		Ledger: ledger, Wants: r.plan.Wants, Updating: r.updating,
+		Ledger: ledger, Wants: r.plan.Wants, Updating: r.updating, Revisions: r.history,
 		Fail: r.fail, RecreateRequired: r.recreate, DrainBlocked: drainBlocked,
 		PendingCreates: pending,
 		// First the status says that members are being created, then the first

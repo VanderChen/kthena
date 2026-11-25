@@ -242,8 +242,11 @@ type ServingGroupStatus struct {
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// Revision is the revision that every Pod of the group runs, read from the
-	// Pods and not from the spec. It is empty when the Pods run different
-	// revisions or the group has no Pod.
+	// Pods and not from the spec. A Pod runs the revision of its label, and
+	// every revision in which its Role renders the same Pods: a rollout that
+	// replaces Role by Role does not touch the Pods of a Role it does not
+	// change. It is empty when the Pods run different revisions or the group
+	// has no Pod.
 	// +optional
 	Revision string `json:"revision,omitempty"`
 

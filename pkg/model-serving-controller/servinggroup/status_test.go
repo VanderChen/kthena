@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 const (
@@ -217,6 +218,68 @@ func TestComputeStatusReadsTheLedgerOfThisRound(t *testing.T) {
 	group.Status.RoleInstances = ledgerOf(established, 0)
 	if value, _ := conditionOf(t, statusOf(group, ledgerOf(draining, 0), threePods()), condReady); value != "False" {
 		t.Errorf("Ready = %s in the round that starts to drain the instance, want False", value)
+	}
+}
+
+// roleClasses says, per Role, which revisions render the same Pods: the ones
+// with the same class. A revision that is not listed renders Pods of its own.
+type roleClasses map[string]map[string]string
+
+func (c roleClasses) CompareRole(revision, target, role string) workload.Comparison {
+	if revision == "unreadable" || target == "unreadable" {
+		return workload.Unknown
+	}
+	class := func(revision string) string {
+		if class, ok := c[role][revision]; ok {
+			return class
+		}
+		return revision
+	}
+	if class(revision) == class(target) {
+		return workload.Equivalent
+	}
+	return workload.Different
+}
+
+func TestComputeStatusRevision(t *testing.T) {
+	// rev-b changes prefill and not decode; rev-c changes decode and not prefill.
+	same := roleClasses{
+		"decode":  {"rev-a": "first", "rev-b": "first"},
+		"prefill": {"rev-b": "second", "rev-c": "second"},
+	}
+	at := func(revision string) func(*corev1.Pod) {
+		return func(pod *corev1.Pod) { pod.Labels[workloadv1alpha1.RevisionLabelKey] = revision }
+	}
+	pods := func(prefill, decode string, more ...*corev1.Pod) []*corev1.Pod {
+		return append([]*corev1.Pod{memberPod("prefill", 0, 0, at(prefill)), memberPod("decode", 0, 0, at(decode))}, more...)
+	}
+	tests := []struct {
+		name             string
+		target, baseline string
+		pods             []*corev1.Pod
+		revisions        RoleComparer
+		want             string
+	}{
+		{name: "one label", pods: threePods(), want: "rev-a"},
+		{name: "no Pod", target: "rev-b", revisions: same, want: ""},
+		{name: "several labels and nothing to compare them with", target: "rev-b", pods: pods("rev-b", "rev-a"), want: ""},
+		{name: "the Role the target does not change keeps its labels", target: "rev-b", pods: pods("rev-b", "rev-a"), revisions: same, want: "rev-b"},
+		{name: "the changed Role is not rolled yet: the baseline", target: "rev-c", baseline: "rev-b", pods: pods("rev-b", "rev-a"), revisions: same, want: "rev-b"},
+		{name: "the changed Role is rolled in part", target: "rev-c", baseline: "rev-b",
+			pods: pods("rev-b", "rev-a", memberPod("decode", 1, 0, at("rev-c"))), revisions: same, want: ""},
+		{name: "rolled twice, another Role each time", target: "rev-c", baseline: "rev-b", pods: pods("rev-b", "rev-c"), revisions: same, want: "rev-c"},
+		{name: "a terminating Pod of the old revision does not count", target: "rev-b",
+			pods: pods("rev-b", "rev-a", memberPod("prefill", 1, 0, at("rev-a"), terminating)), revisions: same, want: "rev-b"},
+		{name: "the target cannot be read: what the labels agree on", target: "unreadable", pods: pods("rev-b", "rev-a"), revisions: same, want: "rev-b"},
+		{name: "nothing can be read", target: "rev-b", pods: pods("rev-b", "unreadable"), revisions: same, want: ""},
+	}
+	for _, tt := range tests {
+		group := statusGroup()
+		group.Spec.Revision, group.Spec.TargetRevision, group.Spec.BaselineRevision = "", tt.target, tt.baseline
+		status := statusOf(group, nil, tt.pods, func(in *StatusInput) { in.Revisions = tt.revisions })
+		if status.Revision != tt.want {
+			t.Errorf("%s: revision = %q, want %q", tt.name, status.Revision, tt.want)
+		}
 	}
 }
 

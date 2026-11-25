@@ -29,6 +29,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // Reasons of the conditions of a ServingGroup.
@@ -67,6 +68,10 @@ type StatusInput struct {
 	// LayoutUnknown reports that no Role plan could be made because the template
 	// of the group cannot be resolved.
 	LayoutUnknown bool
+	// Revisions compares what a Role renders in two revisions. With it the
+	// group also runs a revision that the labels of its Pods do not name (see
+	// revisionOf); without it only the labels count.
+	Revisions RoleComparer
 	// Updating holds the instances whose in-place update is not complete: to be
 	// patched, restarting, or waiting for the labels of their Pods to change.
 	// Such an instance is not ready, whatever its Pods report.
@@ -107,22 +112,16 @@ func ComputeStatus(in StatusInput) workloadv1alpha1.ServingGroupStatus {
 	}
 	instances := withLedger(in.Instances, in.Ledger)
 
-	revisions := sets.New[string]()
 	referenced := sets.New[string]()
 	for _, pod := range in.Members {
 		if revision := utils.ObjectRevision(pod); revision != "" {
 			referenced.Insert(revision)
-			if pod.DeletionTimestamp == nil {
-				revisions.Insert(revision)
-			}
 		}
 		if state := inplace.StateOf(pod); state.InProgress() && state.Revision != "" {
 			referenced.Insert(state.Revision)
 		}
 	}
-	if revisions.Len() == 1 {
-		status.Revision = revisions.UnsortedList()[0]
-	}
+	status.Revision = revisionOf(group, in.Members, in.Revisions)
 	if referenced.Len() > 0 {
 		status.ReferencedRevisions = sets.List(referenced)
 	}
@@ -213,6 +212,51 @@ func ComputeStatus(in StatusInput) workloadv1alpha1.ServingGroupStatus {
 
 	sort.Slice(status.Conditions, func(a, b int) bool { return status.Conditions[a].Type < status.Conditions[b].Type })
 	return status
+}
+
+// RoleComparer compares what a Role renders in two revisions.
+// workload.History implements it.
+type RoleComparer interface {
+	CompareRole(revision, target, roleName string) workload.Comparison
+}
+
+// revisionOf returns the revision that every Pod of the group that is not
+// terminating runs, or "" when there is none.
+//
+// A Pod runs the revision of its label, and every revision in which its Role
+// renders the same Pods. A rollout that replaces Role by Role leaves the Pods
+// of an unchanged Role alone, their labels included: after it the labels of
+// the group name several revisions although every Pod is what the target
+// renders. The revisions the spec names are tried first, so that such a group
+// reports the revision it was rolled to.
+func revisionOf(group *workloadv1alpha1.ServingGroup, members []*corev1.Pod, revisions RoleComparer) string {
+	type labelled struct{ revision, role string }
+	var pods []labelled
+	labels := sets.New[string]()
+	for _, pod := range members {
+		if revision := utils.ObjectRevision(pod); revision != "" && pod.DeletionTimestamp == nil {
+			pods = append(pods, labelled{revision: revision, role: pod.Labels[workloadv1alpha1.RoleLabelKey]})
+			labels.Insert(revision)
+		}
+	}
+	switch {
+	case labels.Len() == 1:
+		return pods[0].revision
+	case labels.Len() == 0 || revisions == nil:
+		return ""
+	}
+	candidates := append([]string{group.Spec.TargetRevision, group.Spec.Revision, group.Spec.BaselineRevision}, sets.List(labels)...)
+	for _, candidate := range candidates {
+		runs := candidate != ""
+		for i := 0; runs && i < len(pods); i++ {
+			runs = pods[i].revision == candidate ||
+				revisions.CompareRole(pods[i].revision, candidate, pods[i].role) == workload.Equivalent
+		}
+		if runs {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // withLedger returns the instances with their entries taken from ledger.

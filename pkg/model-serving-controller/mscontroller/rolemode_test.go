@@ -17,6 +17,7 @@ limitations under the License.
 package mscontroller
 
 import (
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -194,5 +195,70 @@ func TestRoleRollingUpdate(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A rollout that changes one Role of several leaves the Pods of the other
+// Roles alone, their revision labels included. A group still reports the new
+// revision once the changed Role is rolled, so the rollout ends and the
+// baseline advances; the next rollout, of another Role, starts from there.
+func TestRoleRollingUpdateOfOneRoleOfSeveral(t *testing.T) {
+	router := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, workloadv1alpha1.Role{
+			Name: "route", Replicas: ptr.To[int32](1), EntryTemplate: podTemplate("route:v1"),
+		})
+	}
+	s := newSystem(t, modelServing(roleRolling(), router))
+	s.settle()
+	const done = "replicas=2 updated=2 current=2 available=2 Available"
+	if got := s.counts() + " " + s.condition(); got != done {
+		t.Fatalf("status after creation = %s, want %s", got, done)
+	}
+	// uids returns the UID and the revision label of every Pod of a Role.
+	uids := func(role string) map[string]string {
+		out := map[string]string{}
+		for _, pod := range s.pods() {
+			if pod.Labels[workloadv1alpha1.RoleLabelKey] == role {
+				out[pod.Name] = string(pod.UID) + " " + pod.Labels[workloadv1alpha1.RevisionLabelKey]
+			}
+		}
+		return out
+	}
+	rolled := func(step, untouched string, before map[string]string, baseline string) string {
+		t.Helper()
+		if got := s.counts() + " " + s.condition(); got != done {
+			t.Fatalf("%s: status = %s, want %s", step, got, done)
+		}
+		status := s.modelServing().Status
+		if status.CurrentRevision != status.UpdateRevision || status.CurrentRevision == baseline {
+			t.Fatalf("%s: revisions %s, %s; before %s", step, status.CurrentRevision, status.UpdateRevision, baseline)
+		}
+		if after := uids(untouched); len(after) == 0 || !reflect.DeepEqual(after, before) {
+			t.Errorf("%s: the Pods of %s changed: %v, before %v", step, untouched, after, before)
+		}
+		for _, group := range s.groups() {
+			if group.Status.Revision != status.UpdateRevision {
+				t.Errorf("%s: group %s reports revision %q, want %q", step, group.Name, group.Status.Revision, status.UpdateRevision)
+			}
+		}
+		return status.CurrentRevision
+	}
+
+	first := s.modelServing().Status.CurrentRevision
+	routers := uids("route")
+	s.update(setImage("model:v2"))
+	s.settle()
+	second := rolled("serve rolled", "route", routers, first)
+
+	servers := uids("serve")
+	s.update(func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles[1].EntryTemplate = podTemplate("route:v2")
+	})
+	s.settle()
+	rolled("route rolled", "serve", servers, second)
+	for name, pod := range uids("route") {
+		if routers[name] == pod {
+			t.Errorf("Pod %s of route was not replaced", name)
+		}
 	}
 }
