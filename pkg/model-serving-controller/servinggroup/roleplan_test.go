@@ -284,6 +284,8 @@ func TestPlanRolesOfAGroupThatIsRolledRoleByRole(t *testing.T) {
 			want:      "1@rev-a 2@rev-a"},
 		{name: "instances below the partition stay",
 			role: workloadv1alpha1.ServingGroupRole{Partition: intOrString("2")}, instances: old3(), want: "0@rev-a 1@rev-a"},
+		{name: "a percentage partition is rounded up",
+			role: workloadv1alpha1.ServingGroupRole{Partition: intOrString("34%")}, instances: old3(), want: "0@rev-a 1@rev-a"},
 		{name: "a missing instance below the partition is created from the baseline",
 			role:      workloadv1alpha1.ServingGroupRole{Partition: intOrString("2")},
 			instances: []Instance{planInstance(1, "rev-a"), planInstance(2, "rev-b")}, want: "0@rev-a 1@rev-a 2@rev-b"},
