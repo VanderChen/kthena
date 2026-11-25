@@ -762,6 +762,82 @@ func TestModelServingRoleStatusEvents(t *testing.T) {
 	t.Log("ModelServing role status events test passed successfully")
 }
 
+// TestModelServingRoleRunningEventFollowsReadiness verifies when the RoleRunning event of a Role
+// is recorded on the ModelServing: once every Pod of the Role is Ready, and not while the Pods
+// only exist.
+func TestModelServingRoleRunningEventFollowsReadiness(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+	waitForWebhookReady(t, ctx, kthenaClient, testNamespace)
+
+	// A readiness gate keeps the Pod of the Role Running and not Ready until the test opens it.
+	gateType := corev1.PodConditionType("kthena.e2e/test-ready")
+	modelServing := createBasicModelServing("test-role-running-event", 1, 0)
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.ReadinessGates = []corev1.PodReadinessGate{
+		{ConditionType: gateType},
+	}
+
+	t.Log("Creating ModelServing whose Pod stays NotReady behind a ReadinessGate")
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Create(ctx, modelServing, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ModelServing")
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		if err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Delete(cleanupCtx, modelServing.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Failed to delete ModelServing %s during cleanup: %v", modelServing.Name, err)
+		}
+	})
+
+	// recorded reports whether an event with the reason was recorded on the ModelServing.
+	recorded := func(reason string) (bool, error) {
+		eventList, err := kubeClient.CoreV1().Events(testNamespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return false, err
+		}
+		for _, ev := range eventList.Items {
+			if ev.InvolvedObject.Kind == "ModelServing" && ev.InvolvedObject.UID == ms.UID && ev.Reason == reason {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+
+	waitForRunningPodCount(t, ctx, kubeClient, modelServing.Name, 1, 3*time.Minute)
+	labelSelector := modelServingLabelSelector(modelServing.Name)
+	podList, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	require.NoError(t, err, "Failed to list pods")
+	require.Len(t, podList.Items, 1, "Expected exactly 1 pod")
+	pod := podList.Items[0]
+	groupName := pod.Labels[workload.GroupNameLabelKey]
+	require.NotEmpty(t, groupName, "Pod should have GroupName label")
+
+	t.Log("Waiting for the controller to observe the Running, NotReady pod")
+	require.Eventually(t, func() bool {
+		creating, eventErr := recorded("RoleCreating")
+		current, podErr := kubeClient.CoreV1().Pods(testNamespace).Get(ctx, pod.Name, metav1.GetOptions{})
+		group, groupErr := kthenaClient.WorkloadV1alpha1().ServingGroups(testNamespace).Get(ctx, groupName, metav1.GetOptions{})
+		if eventErr != nil || podErr != nil || groupErr != nil || !creating {
+			return false
+		}
+		return current.UID == pod.UID && current.Status.Phase == corev1.PodRunning && !utils.IsPodReady(*current) &&
+			servingGroupReportedPods(group, ms, []corev1.Pod{*current})
+	}, time.Minute, time.Second, "Expected a RoleCreating event and a ServingGroup status computed from the NotReady pod")
+
+	require.Never(t, func() bool {
+		running, eventErr := recorded("RoleRunning")
+		return eventErr == nil && running
+	}, 5*time.Second, 500*time.Millisecond, "RoleRunning must not be recorded while the Pod of the Role is not Ready")
+
+	t.Log("Patching the pod to satisfy the ReadinessGate so the Role becomes Ready")
+	patchTrue := []byte(fmt.Sprintf(`{"status":{"conditions":[{"type":"%s","status":"True"}]}}`, gateType))
+	_, err = kubeClient.CoreV1().Pods(testNamespace).Patch(ctx, pod.Name, types.StrategicMergePatchType, patchTrue, metav1.PatchOptions{}, "status")
+	require.NoError(t, err, "Failed to patch readiness gate for pod %s", pod.Name)
+	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, modelServing.Name)
+
+	require.Eventually(t, func() bool {
+		running, eventErr := recorded("RoleRunning")
+		return eventErr == nil && running
+	}, time.Minute, time.Second, "RoleRunning should be recorded once the Pod of the Role is Ready")
+}
+
 // modelServingLabelSelector returns the label selector for resources belonging to a ModelServing.
 func modelServingLabelSelector(msName string) string {
 	return "modelserving.volcano.sh/name=" + msName
