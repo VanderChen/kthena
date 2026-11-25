@@ -106,6 +106,8 @@ type system struct {
 	sg      *sgcontroller.Controller
 	// invariant, when set, is checked after every pass.
 	invariant func()
+	// stuck, when set, names the Pods the kubelet never gets ready.
+	stuck func(*corev1.Pod) bool
 }
 
 func newSystem(t *testing.T, objects ...runtime.Object) *system {
@@ -177,7 +179,7 @@ func (s *system) settle() {
 func (s *system) kubelet() {
 	s.t.Helper()
 	for _, pod := range s.pods() {
-		if pod.DeletionTimestamp != nil || utils.IsPodRunningAndReady(pod) {
+		if pod.DeletionTimestamp != nil || utils.IsPodRunningAndReady(pod) || s.stuck != nil && s.stuck(pod) {
 			continue
 		}
 		pod.Status.Phase = corev1.PodRunning

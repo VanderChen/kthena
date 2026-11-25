@@ -116,7 +116,7 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	}
 
 	failure := c.execute(ctx, r)
-	status, err := c.writeStatus(ctx, r)
+	status, blockedAfter, err := c.writeStatus(ctx, r)
 	if err != nil {
 		return 0, errors.Join(failure, err)
 	}
@@ -124,6 +124,9 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		return 0, failure
 	}
 	c.cleanupRevisions(ctx, r, status)
+	if blockedAfter > 0 && (requeue == 0 || blockedAfter < requeue) {
+		requeue = blockedAfter
+	}
 	for _, g := range r.view.groups {
 		if !g.unit.Terminating && !(g.unit.Observed && g.unit.Fresh) {
 			return requeue, ErrNotSettled
@@ -398,8 +401,9 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 
 // writeStatus writes the status of the ModelServing when it changed, and
 // returns it. The baseline advances here, in the round that found the rollout
-// complete.
-func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha1.ModelServingStatus, error) {
+// complete. The duration, when positive, is when a wait of the round has
+// lasted long enough to be reported as a blocked rollout.
+func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha1.ModelServingStatus, time.Duration, error) {
 	baseline := r.baseline
 	for _, action := range r.actions {
 		if action.Kind == grouplevel.ActionAdvanceBaseline {
@@ -411,13 +415,14 @@ func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha
 		baseline = r.ms.Status.CurrentRevision
 	}
 	status := computeStatus(statusInput{ms: r.ms, view: r.view, baseline: baseline, collisions: r.collisions, adopting: r.gated})
+	blockedAfter := c.setBlocked(r, &status, c.now())
 	if apiequality.Semantic.DeepEqual(status, r.ms.Status) {
-		return status, nil
+		return status, blockedAfter, nil
 	}
 	updated := r.ms.DeepCopy()
 	updated.Status = status
 	if _, err := c.kthena.WorkloadV1alpha1().ModelServings(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return status, fmt.Errorf("write the status of ModelServing %s: %w", updated.Name, err)
+		return status, 0, fmt.Errorf("write the status of ModelServing %s: %w", updated.Name, err)
 	}
-	return status, nil
+	return status, blockedAfter, nil
 }

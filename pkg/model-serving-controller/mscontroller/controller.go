@@ -52,6 +52,10 @@ type Controller struct {
 	mu sync.Mutex
 	// targets caches the target revision resolved for a ModelServing, by UID.
 	targets map[types.UID]recorded
+	// unsettled holds, by the UID of a group, when this process first saw that
+	// the group had not reported; unsettledOf the groups of a ModelServing in it.
+	unsettled   map[types.UID]time.Time
+	unsettledOf map[types.UID]map[types.UID]bool
 }
 
 // Options are the dependencies of a Controller.
@@ -78,6 +82,9 @@ func New(options Options) *Controller {
 		recorder: options.Recorder,
 		now:      options.Now,
 		targets:  map[types.UID]recorded{},
+
+		unsettled:   map[types.UID]time.Time{},
+		unsettledOf: map[types.UID]map[types.UID]bool{},
 	}
 	if c.registry == nil {
 		c.registry = plugins.DefaultRegistry

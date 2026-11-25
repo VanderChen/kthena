@@ -18,8 +18,13 @@ package mscontroller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
+	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -235,7 +240,119 @@ func TestAnOrdinalThatIsOccupiedIsLeftAlone(t *testing.T) {
 	if got, err := s.cluster.GetServingGroup(testNamespace, "llama-1"); err != nil || got.UID != "squatter-uid" || len(got.OwnerReferences) != 0 {
 		t.Errorf("the object that holds the name: %+v, %v", got, err)
 	}
-	if got, want := s.counts()+" "+s.condition(), "replicas=2 updated=2 current=2 available=2 Progressing"; got != want {
+	// It is reported at once: nothing the controller does will free the name.
+	if got, want := s.counts()+" "+s.condition(), "replicas=2 updated=2 current=2 available=2 Progressing,RolloutBlocked"; got != want {
 		t.Errorf("status = %s, want %s", got, want)
 	}
+	blocked := meta.FindStatusCondition(s.modelServing().Status.Conditions, string(workloadv1alpha1.ModelServingRolloutBlocked))
+	if blocked.Reason != workloadv1alpha1.RolloutBlockedOrdinalOccupied || !strings.Contains(blocked.Message, "llama-1") {
+		t.Errorf("RolloutBlocked = %s: %s", blocked.Reason, blocked.Message)
+	}
+
+	// The object goes away: the ordinal is filled and the condition clears.
+	if err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Delete(context.Background(), "llama-1", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.settle()
+	if got, want := s.summary(), "groups[0=model:v1 1=model:v1 2=model:v1] replicas=3 updated=3 current=3 available=3 Available"; got != want {
+		t.Errorf("after the name was freed:\n got %s\nwant %s", got, want)
+	}
+}
+
+// A rollout that waits is reported as blocked once the wait has lasted, with
+// what it waits for, and no longer when it moves again.
+func TestRolloutBlocked(t *testing.T) {
+	blockedOf := func(s *system) (string, string) {
+		condition := meta.FindStatusCondition(s.modelServing().Status.Conditions, string(workloadv1alpha1.ModelServingRolloutBlocked))
+		if condition == nil {
+			return "", ""
+		}
+		return string(condition.Status), condition.Reason
+	}
+	round := func(s *system) time.Duration {
+		t.Helper()
+		caches, snapshot := s.caches()
+		s.ms.SetCaches(caches, snapshot.Listers().Services)
+		after, err := s.ms.Reconcile(context.Background(), testNamespace, testName)
+		if err != nil && !errors.Is(err, ErrNotSettled) {
+			t.Fatal(err)
+		}
+		return after
+	}
+
+	t.Run("a group of the target revision does not become ready", func(t *testing.T) {
+		s := newSystem(t, modelServing())
+		s.settle()
+		if status, _ := blockedOf(s); status != "" {
+			t.Fatalf("a ModelServing that was never blocked carries the condition: %s", status)
+		}
+		s.stuck = func(pod *corev1.Pod) bool { return pod.Spec.Containers[0].Image == "model:v2" }
+		s.update(setImage("model:v2"))
+		s.settle()
+		if got, want := s.summary(), "groups[0=model:v1 1=model:v1 2=model:v2] replicas=3 updated=1 current=2 available=2 UpdateInProgress"; got != want {
+			t.Fatalf("stuck:\n got %s\nwant %s", got, want)
+		}
+
+		// Not yet: the round comes back when the wait has lasted.
+		s.cluster.Advance(2 * time.Minute)
+		if after := round(s); after <= 0 || after > 3*time.Minute {
+			t.Errorf("the round is due again after %v, want when the deadline passes", after)
+		}
+		if status, _ := blockedOf(s); status != "" {
+			t.Errorf("RolloutBlocked = %s before the deadline", status)
+		}
+		s.cluster.Advance(4 * time.Minute)
+		round(s)
+		if status, reason := blockedOf(s); status != "True" || reason != workloadv1alpha1.RolloutBlockedTargetNotReady {
+			t.Errorf("RolloutBlocked = %s/%s after the deadline", status, reason)
+		}
+		if got := s.condition(); got != "RolloutBlocked,UpdateInProgress" {
+			t.Errorf("conditions = %s", got)
+		}
+
+		s.stuck = nil
+		s.settle()
+		if status, reason := blockedOf(s); status != "False" || reason != "NotBlocked" || s.condition() != "Available" {
+			t.Errorf("RolloutBlocked = %s/%s, conditions %s; want it cleared once the rollout is complete", status, reason, s.condition())
+		}
+	})
+
+	t.Run("a group that is deleted does not go away", func(t *testing.T) {
+		s := newSystem(t, modelServing())
+		s.settle()
+		s.cluster.HoldPodTermination(true)
+		s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](2) })
+		s.settle()
+		if got, want := s.images(), "0=model:v1 1=model:v1 2=model:v1!"; got != want {
+			t.Fatalf("groups = %s, want %s", got, want)
+		}
+		s.cluster.Advance(6 * time.Minute)
+		round(s)
+		if status, reason := blockedOf(s); status != "True" || reason != workloadv1alpha1.RolloutBlockedWaitingForDeletion {
+			t.Errorf("RolloutBlocked = %s/%s", status, reason)
+		}
+	})
+
+	t.Run("a group does not report", func(t *testing.T) {
+		s := newSystem(t, modelServing())
+		s.settle()
+		// The ServingGroup controller is away: a new spec is handed down and
+		// nobody reports on it.
+		s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy })
+		round(s)
+		s.cluster.Advance(6 * time.Minute)
+		round(s)
+		if status, reason := blockedOf(s); status != "" {
+			// The ModelServing is available: it has nothing to do and is not blocked.
+			t.Errorf("RolloutBlocked = %s/%s for a ModelServing that is available", status, reason)
+		}
+		// With work to do it is.
+		s.update(setImage("model:v2"))
+		round(s)
+		s.cluster.Advance(6 * time.Minute)
+		round(s)
+		if status, reason := blockedOf(s); status != "True" || reason != workloadv1alpha1.RolloutBlockedGroupNotObserved {
+			t.Errorf("RolloutBlocked = %s/%s", status, reason)
+		}
+	})
 }
