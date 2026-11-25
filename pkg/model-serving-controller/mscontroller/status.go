@@ -39,6 +39,9 @@ type statusInput struct {
 	// groups that were just created have not reported yet, and counting them
 	// would make the available replicas drop to zero and come back.
 	adopting bool
+	// handedDown reports whether the spec of a group is the one the round
+	// hands down. Nil means that every spec is.
+	handedDown func(*workloadv1alpha1.ServingGroup) bool
 }
 
 // computeStatus returns the status of the ModelServing, summed up from its
@@ -100,6 +103,11 @@ func computeStatus(in statusInput) workloadv1alpha1.ModelServingStatus {
 	copied.Status = status
 	utils.SetConditionWithRolloutAndProgressState(copied, progressing, updatedGroups, currentGroups, rolloutActive, progressActive)
 	status = copied.Status
+	if !in.adopting {
+		// Groups that were just created for workloads of an earlier version
+		// have not reported yet; what that version wrote stays until they have.
+		setCoordinationCondition(&status, ms, v, in.handedDown)
+	}
 
 	if !in.adopting {
 		status.Replicas = int32(len(v.groups))

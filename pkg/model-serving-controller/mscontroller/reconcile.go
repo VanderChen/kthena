@@ -60,6 +60,9 @@ type round struct {
 	history    *workload.History
 	view       *view
 	actions    []grouplevel.Action
+	// baselineReplicas holds, by Role name, the replica counts recorded with
+	// the baseline revision; nil unless the Roles are rolled together.
+	baselineReplicas map[string]int32
 	// gated reports that workloads of an earlier version are still being
 	// taken over: group objects are created for them and nothing else is rolled.
 	gated bool
@@ -201,6 +204,9 @@ func (c *Controller) plan(ctx context.Context, ms *workloadv1alpha1.ModelServing
 	}
 	r := &round{ms: ms, target: target, collisions: collisions}
 	r.baseline = baselineRevision(ms, groups.own, target)
+	if recorded, r.baselineReplicas, err = c.coordinatedReplicas(ctx, ms, target, r.baseline, recorded); err != nil {
+		return nil, err
+	}
 	// The ControllerRevision that was just recorded is read before the cache shows it.
 	r.history = workload.NewHistory(ms, func(namespace, name string) (*appsv1.ControllerRevision, error) {
 		if namespace == recorded.Namespace && name == recorded.Name {
@@ -385,13 +391,10 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 		if g.unit.Terminating || touched[g.ordinal] || group.Spec.SourceGeneration > r.ms.Generation {
 			continue
 		}
-		desired := workload.GroupSpec(r.ms, r.settings(group.Spec.Revision))
-		// The generation it was derived from changes with every change of the
-		// ModelServing. It is only written along with something else.
-		desired.SourceGeneration = group.Spec.SourceGeneration
-		if apiequality.Semantic.DeepEqual(desired, group.Spec) {
+		if r.handedDown(group) {
 			continue
 		}
+		desired := workload.GroupSpec(r.ms, r.settings(group.Spec.Revision))
 		desired.SourceGeneration = r.ms.Generation
 		updated := group.DeepCopy()
 		updated.Spec = desired
@@ -400,6 +403,16 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// handedDown reports whether the spec of a group is the one this round hands
+// down. The generation the spec was derived from changes with every change of
+// the ModelServing; it is only written along with something else, and is not
+// compared.
+func (r *round) handedDown(group *workloadv1alpha1.ServingGroup) bool {
+	desired := workload.GroupSpec(r.ms, r.settings(group.Spec.Revision))
+	desired.SourceGeneration = group.Spec.SourceGeneration
+	return apiequality.Semantic.DeepEqual(desired, group.Spec)
 }
 
 // writeStatus writes the status of the ModelServing when it changed, and
@@ -417,7 +430,7 @@ func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha
 		// The baseline cannot be told. What the status says about it is kept.
 		baseline = r.ms.Status.CurrentRevision
 	}
-	status := computeStatus(statusInput{ms: r.ms, view: r.view, baseline: baseline, collisions: r.collisions, adopting: r.gated})
+	status := computeStatus(statusInput{ms: r.ms, view: r.view, baseline: baseline, collisions: r.collisions, adopting: r.gated, handedDown: r.handedDown})
 	blockedAfter := c.setBlocked(r, &status, c.now())
 	if apiequality.Semantic.DeepEqual(status, r.ms.Status) {
 		return status, blockedAfter, nil
@@ -427,5 +440,6 @@ func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha
 	if _, err := c.kthena.WorkloadV1alpha1().ModelServings(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
 		return status, 0, fmt.Errorf("write the status of ModelServing %s: %w", updated.Name, err)
 	}
+	c.reportCoordination(r.ms, status)
 	return status, blockedAfter, nil
 }

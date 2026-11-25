@@ -46,5 +46,6 @@ func (r *round) settings(revision string) workload.Settings {
 	if err == nil {
 		settings.ExpectedPods = workload.ExpectedPods(at)
 	}
+	settings.BaselineReplicas = r.baselineReplicas
 	return settings
 }
