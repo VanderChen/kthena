@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -141,17 +142,19 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 		m.informers = append(m.informers, rollbackSwitch)
 	}
 	// The PodGroup informer exists only while the PodGroup
-	// CustomResourceDefinition is installed; its handlers are added when it starts.
-	m.podGroups = podgroupmanager.NewManager(kube, volcanoClient, apiext, func(informer cache.SharedIndexInformer) {
-		if m.groups != nil && informer != nil {
-			m.groups.RegisterPodGroups(informer)
-		}
-	})
+	// CustomResourceDefinition is installed; its handlers are added when it
+	// starts. That can be before the ServingGroup controller exists: with the
+	// definition installed, the PodGroup manager starts the informer while it
+	// is being built.
+	watch := &podGroupWatch{}
+	m.podGroups = podgroupmanager.NewManager(kube, volcanoClient, apiext, watch.started)
 
 	m.groups = sgcontroller.NewRunner(sgcontroller.New(sgcontroller.Options{
 		Kube: kube, Kthena: kthena, Caches: caches, Services: services.Lister(),
 		PodGroups: m.podGroups, Recorder: recorder, RollingBack: rollingBack,
 	}))
+	watch.bind(m.groups)
+	watch.started(m.podGroups.GetPodGroupInformer())
 	if err := m.groups.Register(sgcontroller.Informers{
 		ServingGroups: servingGroups, ModelServings: modelServings, Pods: pods.Informer(),
 		Services: services.Informer(), ControllerRevisions: revisions,
@@ -242,4 +245,51 @@ func (m *Manager) WaitForServingGroups(ctx context.Context) error {
 		}
 		return false, nil
 	})
+}
+
+// podGroupWatcher is what watches an informer of PodGroups: the runner of
+// the ServingGroup controller.
+type podGroupWatcher interface {
+	RegisterPodGroups(informer cache.SharedIndexInformer)
+}
+
+// podGroupWatch brings a PodGroup informer and its watcher together, in
+// whichever order they come into being, once.
+type podGroupWatch struct {
+	mu      sync.Mutex
+	watcher podGroupWatcher
+	pending []cache.SharedIndexInformer
+	watched map[cache.SharedIndexInformer]bool
+}
+
+// started is called with every PodGroup informer that is started. nil is ignored.
+func (w *podGroupWatch) started(informer cache.SharedIndexInformer) {
+	if informer == nil {
+		return
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.watched[informer] {
+		return
+	}
+	if w.watched == nil {
+		w.watched = map[cache.SharedIndexInformer]bool{}
+	}
+	w.watched[informer] = true
+	if w.watcher == nil {
+		w.pending = append(w.pending, informer)
+		return
+	}
+	w.watcher.RegisterPodGroups(informer)
+}
+
+// bind names the watcher. Informers that started before it are handed to it.
+func (w *podGroupWatch) bind(watcher podGroupWatcher) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.watcher = watcher
+	for _, informer := range w.pending {
+		watcher.RegisterPodGroups(informer)
+	}
+	w.pending = nil
 }
