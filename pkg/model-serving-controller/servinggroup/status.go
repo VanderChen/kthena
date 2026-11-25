@@ -67,6 +67,10 @@ type StatusInput struct {
 	// LayoutUnknown reports that no Role plan could be made because the template
 	// of the group cannot be resolved.
 	LayoutUnknown bool
+	// Updating holds the instances whose in-place update is not complete: to be
+	// patched, restarting, or waiting for the labels of their Pods to change.
+	// Such an instance is not ready, whatever its Pods report.
+	Updating map[InstanceKey]bool
 
 	// Fail, when not nil, sets the Failed condition. Failed is never cleared.
 	Fail *ConditionChange
@@ -174,7 +178,7 @@ func ComputeStatus(in StatusInput) workloadv1alpha1.ServingGroupStatus {
 		}
 	}
 
-	ready, reason, message := readiness(group, instances, in.Wants, in.LayoutUnknown, status)
+	ready, reason, message := readiness(group, instances, in.Wants, in.Updating, in.LayoutUnknown, status)
 	set(workloadv1alpha1.ServingGroupConditionReady, ready, reason, message)
 
 	sticky(workloadv1alpha1.ServingGroupConditionFailed, in.Fail)
@@ -241,13 +245,21 @@ func withLedger(instances []Instance, ledger []workloadv1alpha1.RoleInstanceStat
 // ready when it has at least the expected number of Pods and all of them are
 // ready, so that a group that serves is not reported as broken because its
 // history cannot be read.
-func readiness(group *workloadv1alpha1.ServingGroup, instances []Instance, wants map[InstanceKey]*Want, layoutUnknown bool, status workloadv1alpha1.ServingGroupStatus) (bool, string, string) {
+//
+// An instance that is being updated in place is not ready from the round that
+// decides to patch it until the labels of its Pods have changed. The Pods of
+// the group may all report ready at both ends of that time: before the kubelet
+// has seen the patch, and after the last container has restarted.
+func readiness(group *workloadv1alpha1.ServingGroup, instances []Instance, wants map[InstanceKey]*Want, updating map[InstanceKey]bool, layoutUnknown bool, status workloadv1alpha1.ServingGroupStatus) (bool, string, string) {
 	count := map[string]int32{}
 	pods := int32(0)
 	notReady := ""
 	for _, inst := range instances {
 		if inst.Entry == nil && len(inst.Members) == 0 {
 			continue
+		}
+		if updating[inst.Key()] {
+			return false, ReasonInstancesNotReady, fmt.Sprintf("instance %s-%d is being updated in place", inst.Role, inst.Index)
 		}
 		count[inst.Role]++
 		pods += int32(len(inst.Members))

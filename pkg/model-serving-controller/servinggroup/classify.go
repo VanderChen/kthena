@@ -97,6 +97,10 @@ type MemberContext struct {
 	Recovery Recovery
 	// Faults remembers since when this process has seen a fault.
 	Faults *FaultTracker
+	// Overdue holds the UIDs of the Pods that keep an in-place update from
+	// finishing after its progress deadline (see CheckInPlaceDeadlines). While
+	// recovery is enabled such a Pod has a fault.
+	Overdue sets.Set[types.UID]
 }
 
 // ClassifyMember returns the state of a member Pod owned by the group. For a
@@ -111,7 +115,16 @@ func ClassifyMember(pod *corev1.Pod, ctx MemberContext) (MemberState, time.Time)
 	}
 	state := inplace.StateOf(pod)
 	fault := utils.IsPodFailed(pod) || state.UnexpectedRestart(pod)
+	overdue := ctx.Recovery.Enabled && ctx.Overdue.Has(pod.UID)
 	switch {
+	case overdue && !state.InProgress():
+		// The Pod was never patched while the rest of its unit was, and the
+		// update cannot finish without it. The Pod is healthy: a grace period
+		// would not change anything about it.
+		return MemberFaulty, time.Time{}
+	case overdue:
+		// An update that did not finish in time is handled like a Pod that
+		// does not come up.
 	case state.InProgress() && fault:
 		// A crash during an in-place update is not one of its expected restarts.
 	case state.Updating(pod):

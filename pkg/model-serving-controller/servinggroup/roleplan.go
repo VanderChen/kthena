@@ -30,9 +30,11 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
-// Revisions resolves the Role templates of the revisions a group refers to.
-// workload.History implements it.
+// Revisions resolves the revisions a group refers to. workload.History
+// implements it.
 type Revisions interface {
+	// At returns the ModelServing as of a revision.
+	At(revision string) (*workloadv1alpha1.ModelServing, error)
 	Role(revision, roleName string) (*workloadv1alpha1.Role, error)
 	CompareRole(revision, target, roleName string) workload.Comparison
 }
@@ -45,8 +47,14 @@ type RolePlan struct {
 	// Promote lists the instances that lose the Role surge mark: temporary
 	// capacity that takes a regular place.
 	Promote []InstanceKey
-	// InPlace maps an instance to the revision it is updated to in place.
+	// InPlace maps an instance to the revision it is updated to in place: an
+	// instance the rollout chose in this round, and one whose update is under
+	// way. The second kind is carried on whatever the budget and the partition
+	// say now, so that an instance never stays patched in part.
 	InPlace map[InstanceKey]string
+	// Fallback says, for an instance that is replaced in this round although
+	// its Role is updated in place, why it cannot be.
+	Fallback map[InstanceKey]string
 	// Waiting says, per Role, why a place is not filled or an instance is not
 	// replaced. It is reported, not acted on.
 	Waiting []string
@@ -64,7 +72,7 @@ type RolePlan struct {
 // as a whole by the ModelServing controller, and the Role level only scales
 // and fills.
 func PlanRoles(group *workloadv1alpha1.ServingGroup, instances []Instance, revisions Revisions) (RolePlan, error) {
-	plan := RolePlan{Wants: map[InstanceKey]*Want{}, InPlace: map[InstanceKey]string{}}
+	plan := RolePlan{Wants: map[InstanceKey]*Want{}, InPlace: map[InstanceKey]string{}, Fallback: map[InstanceKey]string{}}
 	byRole := map[string][]Instance{}
 	for _, inst := range instances {
 		if inst.Entry != nil || len(inst.Members) > 0 {
@@ -79,7 +87,10 @@ func PlanRoles(group *workloadv1alpha1.ServingGroup, instances []Instance, revis
 		if err != nil {
 			return RolePlan{}, err
 		}
-		p := rolePlanner{role: role.Name, spec: spec, revisions: revisions, plan: &plan}
+		p := rolePlanner{
+			role: role.Name, spec: spec, revisions: revisions, plan: &plan,
+			updating: map[int]string{}, fallback: map[int]string{},
+		}
 		p.run(byRole[role.Name])
 	}
 	return plan, nil
@@ -121,6 +132,9 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 	if err := scaled("partition", role.Partition, true, &spec.Partition); err != nil {
 		return spec, err
 	}
+	// With no unavailable budget an in-place update could never start. The
+	// Role is then rolled by recreation, which can use its surge.
+	spec.InPlace = UpdatesInPlace(group) && (role.MaxUnavailable == nil || spec.MaxUnavailable > 0)
 	return spec, nil
 }
 
@@ -129,6 +143,12 @@ type rolePlanner struct {
 	spec      grouplevel.Spec
 	revisions Revisions
 	plan      *RolePlan
+	// updating maps the index of an instance whose in-place update is under
+	// way to the revision it is updated to.
+	updating map[int]string
+	// fallback maps the index of an instance that cannot be updated in place
+	// to the reason.
+	fallback map[int]string
 }
 
 func (p *rolePlanner) run(instances []Instance) {
@@ -158,6 +178,9 @@ func (p *rolePlanner) run(instances []Instance) {
 			p.want(key, action.Revision, action.Surge)
 		case grouplevel.ActionDelete:
 			removed[action.Ordinal] = true
+			if reason, ok := p.fallback[action.Ordinal]; ok && (action.Reason == grouplevel.ReasonReplace || action.Reason == grouplevel.ReasonReplaceNotReady) {
+				p.plan.Fallback[key] = reason
+			}
 		case grouplevel.ActionPromote:
 			p.plan.Promote = append(p.plan.Promote, key)
 			promoted[action.Ordinal] = true
@@ -169,6 +192,13 @@ func (p *rolePlanner) run(instances []Instance) {
 			}
 		case grouplevel.ActionWait:
 			p.plan.Waiting = append(p.plan.Waiting, fmt.Sprintf("Role %s, instance %d: %s", p.role, action.Ordinal, action.Reason))
+		}
+	}
+
+	for index, revision := range p.updating {
+		key := InstanceKey{Role: p.role, Index: index}
+		if _, chosen := p.plan.InPlace[key]; !chosen && !removed[index] {
+			p.plan.InPlace[key] = revision
 		}
 	}
 
@@ -262,7 +292,62 @@ func (p *rolePlanner) unit(inst Instance) (unit grouplevel.Group, revision strin
 	if role, err := p.revisions.Role(revision, p.role); err == nil {
 		unit.Ready = inst.Ready(role.WorkerReplicas)
 	}
+	if p.spec.Mode == grouplevel.ModeServingGroup && !unit.Terminating && !unit.Memberless {
+		p.inPlace(inst, &unit)
+	}
 	return unit, revision, adoptable
+}
+
+// inPlace describes the in-place update of an instance to the plan.
+//
+// An instance whose update is under way counts as the revision it is being
+// updated to and is not ready until the labels of its Pods have changed, so it
+// keeps its share of the budget for as long as the update takes. An instance
+// that cannot be updated in place asks to be recreated: one whose Pods cannot
+// be patched to the target, one whose update cannot be carried on, and one
+// whose Role went back to the template its Pods are labelled with after their
+// images were patched for another revision.
+func (p *rolePlanner) inPlace(inst Instance, unit *grouplevel.Group) {
+	target := p.spec.Target
+	check := func(revision string, allowed bool) (obstacle bool) {
+		step := PlanInPlace(InPlaceUnit{Role: p.role, Instances: []Instance{inst}, Target: revision, Allowed: allowed}, p.revisions)
+		if step.Obstacle == "" {
+			return false
+		}
+		unit.RecreateRequired = true
+		if step.Fallback {
+			p.fallback[inst.Index] = step.Obstacle
+		}
+		return true
+	}
+
+	if updating := unfinishedUpdate(inst.Members); updating != "" {
+		towards := p.revisions.CompareRole(updating, target, p.role)
+		if towards == workload.Different && unit.Revision == target && !unit.RevisionUnknown {
+			// By their labels the Pods are at the target: no rollout would
+			// ever patch them back.
+			unit.RecreateRequired = true
+			return
+		}
+		if check(updating, p.spec.InPlace) {
+			return
+		}
+		unit.Ready = false
+		unit.Revision, unit.RevisionUnknown = updating, false
+		switch towards {
+		case workload.Equivalent:
+			unit.Revision = target
+		case workload.Unknown:
+			unit.RevisionUnknown = true
+		}
+		p.updating[inst.Index] = updating
+	}
+	// Whether the instance can be patched is asked only where the plan would
+	// replace it for its revision: a protected instance must not become
+	// replaceable by asking.
+	if p.spec.InPlace && unit.Revision != target && !unit.RevisionUnknown && inst.Index >= p.spec.Partition {
+		check(target, true)
+	}
 }
 
 func deletionCost(pod *corev1.Pod) int64 {

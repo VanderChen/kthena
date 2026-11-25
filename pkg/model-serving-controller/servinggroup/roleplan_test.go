@@ -33,11 +33,27 @@ import (
 
 // fakeRevisions knows the revisions by name: a revision has one worker per
 // instance unless workers says otherwise; revisions in the same class render
-// the same Pods.
+// the same Pods. The container of a revision runs the image model:<revision>,
+// and revisions with different entries in env differ in more than the image.
 type fakeRevisions struct {
 	workers map[string]int32
 	class   map[string]string
 	missing map[string]bool
+	env     map[string]string
+}
+
+func (f fakeRevisions) At(revision string) (*workloadv1alpha1.ModelServing, error) {
+	role, err := f.Role(revision, "serve")
+	if err != nil {
+		return nil, err
+	}
+	template := workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+		Name: "model", Image: "model:" + revision, Env: []corev1.EnvVar{{Name: "MODE", Value: f.env[revision]}},
+	}}}}
+	role.EntryTemplate, role.WorkerTemplate = template, template.DeepCopy()
+	return &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
+		Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{*role}},
+	}}, nil
 }
 
 func (f fakeRevisions) Role(revision, roleName string) (*workloadv1alpha1.Role, error) {
