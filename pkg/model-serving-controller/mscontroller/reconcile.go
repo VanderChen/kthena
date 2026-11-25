@@ -108,7 +108,8 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 
 	r, err := c.plan(ctx, ms, split(ms, c.caches.GroupsNamedAfter(namespace, name)))
 	if err != nil {
-		return 0, err
+		// A round without a target still takes replica counts down.
+		return 0, c.withoutTarget(ctx, ms, err)
 	}
 	if r.writes() {
 		// Before a group is created, deleted or changed, the ModelServing and
@@ -122,7 +123,7 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 			return 0, nil
 		}
 		if r, err = c.plan(ctx, direct, groups); err != nil {
-			return 0, err
+			return 0, c.withoutTarget(ctx, direct, err)
 		}
 		r.direct = true
 	}
@@ -222,7 +223,7 @@ func (c *Controller) readDirect(ctx context.Context, cached *workloadv1alpha1.Mo
 func (c *Controller) plan(ctx context.Context, ms *workloadv1alpha1.ModelServing, groups observed) (*round, error) {
 	target, collisions, recorded, err := c.targetRevision(ctx, ms)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", errTargetUnknown, err)
 	}
 	r := &round{ms: ms, target: target, collisions: collisions}
 	r.baseline = baselineRevision(ms, groups.own, target)

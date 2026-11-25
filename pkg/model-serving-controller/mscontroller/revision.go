@@ -79,6 +79,7 @@ func (c *Controller) forget(uid types.UID) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.targets, uid)
+	delete(c.unresolved, uid)
 	for group := range c.unsettledOf[uid] {
 		delete(c.unsettled, group)
 	}

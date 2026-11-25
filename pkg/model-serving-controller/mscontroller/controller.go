@@ -64,6 +64,9 @@ type Controller struct {
 	// the group had not reported; unsettledOf the groups of a ModelServing in it.
 	unsettled   map[types.UID]time.Time
 	unsettledOf map[types.UID]map[types.UID]bool
+	// unresolved holds, by the UID of a ModelServing, the generation that was
+	// reported last as one whose revision cannot be recorded.
+	unresolved map[types.UID]int64
 }
 
 // Options are the dependencies of a Controller.
@@ -105,6 +108,7 @@ func New(options Options) *Controller {
 
 		unsettled:   map[types.UID]time.Time{},
 		unsettledOf: map[types.UID]map[types.UID]bool{},
+		unresolved:  map[types.UID]int64{},
 	}
 	if c.registry == nil {
 		c.registry = plugins.DefaultRegistry
