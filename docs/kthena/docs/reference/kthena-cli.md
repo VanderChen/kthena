@@ -20,6 +20,7 @@ The Kthena CLI offers a set of subcommands for managing AI inference workloads:
 - **`kthena get`** – Display one or many resources (templates, model‑servings, autoscaling policies, etc.)
 - **`kthena create`** – Create resources from predefined manifests and templates
 - **`kthena describe`** – Show detailed information about a specific resource
+- **`kthena preflight`** – Check ModelServings before an upgrade of the controller manager, and verify the upgrade afterwards
 
 Each subcommand supports additional resource‑specific operations. For a complete reference, see the dedicated documentation:
 
@@ -27,6 +28,7 @@ Each subcommand supports additional resource‑specific operations. For a comple
 - [kthena get](kthena-cli/kthena_get.md) – Display resources
 - [kthena create](kthena-cli/kthena_create.md) – Create resources
 - [kthena describe](kthena-cli/kthena_describe.md) – Describe resources
+- [kthena preflight](kthena-cli/kthena_preflight.md) – Check resources before an upgrade
 
 ### Installation
 
@@ -49,6 +51,41 @@ kthena get model-servings --all-namespaces
 ```
 
 For more detailed usage, refer to the subcommand documentation linked above.
+
+### Checking ModelServings before an upgrade
+
+The version that keeps every ServingGroup of a ModelServing in a `ServingGroup` object takes over the Pods of
+earlier versions without restarting them. `kthena preflight model-servings` tells, before the upgrade, what will
+happen to every ModelServing, and verifies the upgrade afterwards. It reads the cluster and changes nothing; the
+one write it sends is a server-side dry-run that adds the adoption annotation to every ModelServing, which the
+API server validates and does not persist (`--skip-dry-run` leaves it out).
+
+```bash
+# Before the upgrade, against the cluster that still runs the earlier version
+kthena preflight model-servings --all-namespaces --baseline-file baseline.json
+
+# After the upgrade, when every ModelServing is taken over
+kthena preflight model-servings --compare-baseline baseline.json
+```
+
+Every ModelServing gets a verdict, with the findings behind it:
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `ready` | Can be upgraded without disruption | 0 |
+| `attention` | The upgrade works, and something happens that you should know about | 2 |
+| `wait` | Something is in progress; the finding says what to wait for | 2 |
+| `blocked` | Would not be taken over cleanly; the finding says why | 3 |
+
+The comparison exits with 0 when no Pod, PodGroup or Service of the baseline was replaced, no container
+restarted, `status.availableReplicas` did not drop and every ModelServing is taken over; with 3 when one of
+these does not hold; and with 2 when the only changes are in ModelServings for which the check had announced
+that the controller changes Pods by itself. Exit code 1 means that the command could not run. Use `-o json`
+for scripts.
+
+See [kthena preflight model-servings](kthena-cli/kthena_preflight_model-servings.md) for all flags, and the
+[README of the CLI](https://github.com/volcano-sh/kthena/blob/main/cli/kthena/README.md#upgrade-pre-flight-check)
+for the list of findings.
 
 ## Integrating with kubectl‑ai
 

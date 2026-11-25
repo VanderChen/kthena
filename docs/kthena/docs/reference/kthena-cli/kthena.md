@@ -36,4 +36,5 @@ Examples:
 * [kthena create](kthena_create.md)	 - Create kthena resources
 * [kthena describe](kthena_describe.md)	 - Show detailed information about a specific resource
 * [kthena get](kthena_get.md)	 - Display one or many resources
+* [kthena preflight](kthena_preflight.md)	 - Check resources before an upgrade of Kthena
 

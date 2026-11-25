@@ -216,6 +216,17 @@ const sidebars: SidebarsConfig = {
                 { type: 'doc', id: 'reference/kthena-cli/kthena_describe_template', label: 'Describe template' },
               ],
             },
+            {
+              type: 'category',
+              label: 'Preflight',
+              link: {
+                type: 'doc',
+                id: 'reference/kthena-cli/kthena_preflight',
+              },
+              items: [
+                { type: 'doc', id: 'reference/kthena-cli/kthena_preflight_model-servings', label: 'Preflight model-servings' },
+              ],
+            },
           ],
         },
         {

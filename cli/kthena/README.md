@@ -76,6 +76,7 @@ The `kthena` CLI follows kubectl-style verb-noun grammar and provides an easy wa
 - Get and view templates and Kthena resources in your cluster
 - Describe detailed information about specific templates and resources
 - Create Kthena resources from predefined manifest templates
+- Check ModelServings before an upgrade of the controller manager, and verify the upgrade afterwards
 - Manage inference workloads, models, and autoscaling policies with kubectl-like commands
 
 ### Install
@@ -150,12 +151,115 @@ kthena create manifest --template deepseek-r1-distill-llama-8b --values-file val
 kthena create manifest --template deepseek-r1-distill-llama-8b --name my-model --dry-run
 ```
 
+### Upgrade Pre-flight Check
+
+The version of Kthena that keeps every ServingGroup of a ModelServing in a `ServingGroup` object takes over the
+Pods, PodGroups and Services that earlier versions own through the ModelServing, without restarting a Pod.
+`kthena preflight model-servings` tells, before the upgrade, what the new controllers will do with every
+ModelServing, and verifies the upgrade afterwards. Run it against the cluster while it still runs the earlier
+version.
+
+```bash
+# 1. Before the upgrade: check, and record the baseline for the verification
+kthena preflight model-servings --all-namespaces --baseline-file baseline.json
+
+# 2. Apply the CRDs of the new chart by hand, then helm upgrade
+
+# 3. After the upgrade, when every ModelServing is taken over: verify
+kthena preflight model-servings --compare-baseline baseline.json
+```
+
+```text
+kthena preflight model-servings [NAME] [-n NAMESPACE | -A] [-o table|json]
+                                [--baseline-file FILE | --compare-baseline FILE] [--skip-dry-run]
+```
+
+The command follows the verb-noun grammar of `get` and `describe`: `preflight` is the verb, `model-servings`
+(aliases `ms`, `model-serving`) the resource. The design of the ServingGroup resource refers to it as
+`modelserving preflight`. `-n`, `-A` and `-o` work as they do for `kthena get`; without them the namespace of
+the current kubeconfig context is checked. The upgrade replaces the controller of every namespace, so use `-A`
+before upgrading.
+
+| Flag | Meaning |
+| --- | --- |
+| `-o table` (default) | Report for a person: the cluster, one line per ModelServing, and the findings behind every verdict |
+| `-o json` | The same report with stable field names (`formatVersion: v1`); the baseline notice goes to standard error |
+| `--baseline-file FILE` | Also write the baseline: per Pod the UID, the restart count of every container, the Ready condition and its last transition time, and the node; per PodGroup and headless Service the UID; per ModelServing the status counts and revisions |
+| `--compare-baseline FILE` | Instead of the check, compare the cluster with a baseline. The scope is the one of the baseline |
+| `--skip-dry-run` | Leave out the dry-run patch (see below) |
+
+The check only reads, with one exception: every ModelServing is patched once with a **server-side dry-run** that
+adds the annotation `modelserving.volcano.sh/servinggroup-adoption`, the write the takeover begins with. The API
+server runs admission and validation and persists nothing. It needs `get` and `list` on ModelServings,
+ServingGroups, Pods, Services, PodGroups, ControllerRevisions and PodDisruptionBudgets in the checked
+namespaces, `patch` on ModelServings for the dry-run, and, cluster-wide, `list` on Deployments, Pods and Nodes
+and `get` on ConfigMaps and ValidatingWebhookConfigurations. A cluster-level read that is not permitted is
+reported as a finding and does not stop the check.
+
+Every ModelServing, and the cluster, gets a verdict: the most severe level among its findings.
+
+| Verdict | Meaning | Exit code |
+| --- | --- | --- |
+| `ready` | Can be upgraded without disruption | 0 |
+| `attention` | The upgrade works, and something happens that you should know about | 2 |
+| `wait` | Something is in progress; the finding says what to wait for | 2 |
+| `blocked` | Would not be taken over cleanly; the finding says why | 3 |
+
+Exit code 1 means that the check could not run. With `--compare-baseline` the exit code is 0 when nothing that
+the baseline records has changed, 3 when something changed that must not change (a Pod replaced or restarted,
+a PodGroup or Service replaced, `status.availableReplicas` lower, a ModelServing not taken over, a group without
+its ServingGroup), and 2 when the only changes are in ModelServings for which the check announced that the
+controller changes Pods by itself (`podChangesExpected` in the report), or whose spec was changed since.
+
+Findings about the cluster:
+
+| Finding | Level | Meaning |
+| --- | --- | --- |
+| `controller-manager-in-several-namespaces` | blocked | Controller manager Pods or Deployments exist in more than one namespace; the new version only waits for an earlier version in its own namespace |
+| `rollback-switch-present` | blocked | The ConfigMap `kthena-servinggroup-rollback` exists in the namespace of the controller manager: the new version would start in rollback mode |
+| `controller-manager-upgrade-in-progress` | wait | Controller manager Pods of both versions exist |
+| `controller-manager-upgraded` | attention | The controller manager already works with ServingGroup objects |
+| `controller-manager-not-running`, `controller-manager-not-found` | attention | No controller manager Pod runs, or none is found in any namespace |
+| `controller-manager-recreate-strategy` | attention | The Deployment uses the update strategy Recreate: no webhook answers during the upgrade |
+| `leader-election` | info, attention | Whether `--leader-elect` is set or defaulted; attention with several replicas and no leader election |
+| `read-failed` | attention | A cluster-level read was not permitted; what depends on it was not checked |
+| `servinggroup-crd-not-installed` | info | The ServingGroup CRD has to be applied by hand before `helm upgrade` |
+| `servinggroups-exist`, `cordoned-nodes`, `scope-limited` | info | ServingGroup objects that exist and who controls them; cordoned nodes; only part of the cluster was checked |
+
+Findings about a ModelServing:
+
+| Finding | Level | Meaning |
+| --- | --- | --- |
+| `revision-identity` | attention | **k groups (Role instances under RoleRollingUpdate) will be rolled after the upgrade** although the spec was not changed: the new version resolves the template to a revision that does not render the same Pods as the one the running version rolled to. Without this finding the report says "no rollout after the upgrade" |
+| `rollout-in-progress` | wait | Groups or Role instances are not at the target revision yet; the new version continues the rollout |
+| `partition-holds` | info | Groups or Role instances below the partition stay at their revision |
+| `revision-unknown` | attention | The revision of a group cannot be compared with the target (ControllerRevision missing, or Pods of two revisions): it is taken over and not rolled |
+| `revision-unresolved` | blocked | The revision of the template cannot be computed |
+| `groups-exceed-replicas` | wait | **More groups without the surge mark than `spec.replicas`**: after the upgrade one group per surplus is scaled in; the finding names the likely one (not ready first, then lowest Pod deletion cost, then highest ordinal) |
+| `groups-below-replicas` | wait | Fewer groups than `spec.replicas`: a scale-out or a recovery is in progress |
+| `surge-groups` | wait | Temporary surge groups of a rolling update exist; they are taken over as such and removed when the rollout ends |
+| `surge-mark-partial` | attention | Only some Pods of a group carry the surge mark; one is enough to make it a surge group |
+| `surge-mark-below-replicas`, `unmarked-group-beyond-replicas`, `surge-mark-ignored`, `ordinal-holes` | info | Where surge marks are and what the takeover makes of them; ordinals that are not contiguous |
+| `role-surge-instances` | wait, attention | Temporary Role instances: of a Role rollout in progress (wait), or left over under ServingGroupRollingUpdate (attention) |
+| `terminating-pods`, `inplace-update-in-progress`, `not-observed` | wait | Pods terminating; an in-place update in progress; a spec the running controller has not processed |
+| `failed-pods`, `restarting-pods` | wait, attention | Pods in phase Failed, or not ready with restarted containers: the scope that `recoveryPolicy` recreates (wait), or tolerated when recovery is disabled (attention) |
+| `pod-not-a-member` | blocked | A Pod that the ModelServing controls has not the name of a member (`<group>-<role>-<instance>-<member>`): it is not taken over, and the takeover does not finish |
+| `pod-without-owner`, `pod-foreign-owner` | attention | Labelled Pods without a controller owner (adopted when they have the name of a member, left alone otherwise), or controlled by another object |
+| `servinggroup-name-taken` | blocked | A ServingGroup object holds the name of a group without being controlled by the ModelServing |
+| `dry-run-rejected` | blocked | An admission webhook or the API server rejects the write of the adoption annotation |
+| `dry-run-rejected-by-kthena-webhook`, `dry-run-unknown` | attention | The running version's own webhook rejects the object (the new version admits updates that leave the spec unchanged), or the dry-run could not be judged |
+| `pods-on-cordoned-nodes`, `disruption-budget-expected-count` | attention | Pods on cordoned nodes; PodDisruptionBudgets whose allowed disruptions change with the owner of the Pods |
+| `objects-of-groups-without-pods` | info | PodGroups and Services that the takeover deletes and recreates because their group has no Pod |
+| `deleting`, `takeover-in-progress`, `rollback-in-progress` | wait | The ModelServing is being deleted, taken over, or handed back |
+| `taken-over` | info | The ModelServing was taken over already |
+
 For more detailed usage information, run:
 ```bash
 kthena --help
 kthena get --help
 kthena describe --help
 kthena create --help
+kthena preflight model-servings --help
 ```
 
 ## Configuration
