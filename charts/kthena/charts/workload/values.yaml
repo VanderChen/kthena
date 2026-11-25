@@ -13,7 +13,9 @@ controllerManager:
     failurePolicy: Fail
     timeoutSeconds: 5
     trackerTTLSeconds: 60
-  # replicas is the number of instances to run.
+  # replicas is the number of instances to run. Instances stand for leader
+  # election: one of them runs the controllers, every one answers the webhooks.
+  # With 2, the controllers are back within seconds when their node is lost.
   replicas: 1
   image:
     repository: ghcr.io/volcano-sh/kthena-controller-manager
@@ -34,10 +36,10 @@ controllerManager:
   # If empty or not specified, all controllers are enabled
   controllers: ""
   # kubeAPIQPS is the QPS (queries per second) to use while talking with kubernetes apiserver
-  # If 0 or not specified, uses default value (5)
+  # If 0 or not specified, uses default value (50)
   kubeAPIQPS: 0
   # kubeAPIBurst is the burst to use while talking with kubernetes apiserver
-  # If 0 or not specified, uses default value (10)
+  # If 0 or not specified, uses default value (100)
   kubeAPIBurst: 0
   # debugPort is the debug HTTP server port.
   # If 0 or not specified, debug server is disabled.

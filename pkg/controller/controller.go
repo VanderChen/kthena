@@ -29,6 +29,7 @@ import (
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
 	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
+	msmanager "github.com/volcano-sh/kthena/pkg/model-serving-controller/manager"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -40,6 +41,12 @@ import (
 )
 
 const (
+	// The ModelServing controllers write every group object and its status, and
+	// read from the API server before a write: the client defaults of 5 and 10
+	// throttle them.
+	defaultKubeAPIQPS   = 50
+	defaultKubeAPIBurst = 100
+
 	defaultLeaseDuration = 15 * time.Second
 	defaultRenewDeadline = 10 * time.Second
 	defaultRetryPeriod   = 2 * time.Second
@@ -56,7 +63,7 @@ func SetupController(ctx context.Context, cc Config) {
 	if err != nil {
 		klog.Fatalf("build client config: %v", err)
 	}
-	// Set QPS and Burst if provided
+	config.QPS, config.Burst = defaultKubeAPIQPS, defaultKubeAPIBurst
 	if cc.KubeAPIQPS > 0 {
 		config.QPS = cc.KubeAPIQPS
 	}
@@ -75,7 +82,7 @@ func SetupController(ctx context.Context, cc Config) {
 	}
 
 	var mc *modelbooster.ModelBoosterController
-	var msc *modelserving.ModelServingController
+	var msm *msmanager.Manager
 	var lwsc *modelserving.LWSController
 	var ac *autoscaler.AutoscaleController
 
@@ -85,9 +92,9 @@ func SetupController(ctx context.Context, cc Config) {
 			case ModelBoosterController:
 				mc = modelbooster.NewModelBoosterController(kubeClient, client)
 			case ModelServingController:
-				msc, err = modelserving.NewModelServingController(kubeClient, client, volcanoClient, apiextClient)
+				msm, err = msmanager.New(kubeClient, client, volcanoClient, apiextClient)
 				if err != nil {
-					klog.Fatalf("failed to create ModelServing controller: %v", err)
+					klog.Fatalf("failed to create ModelServing controllers: %v", err)
 				}
 				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
@@ -102,13 +109,21 @@ func SetupController(ctx context.Context, cc Config) {
 	}
 
 	startControllers := func(ctx context.Context) {
+		if msm != nil {
+			// Workloads are taken over from a controller manager of an earlier
+			// version only once it has stopped for good.
+			if err := waitForPredecessors(ctx, kubeClient); err != nil {
+				return
+			}
+			go exitOnPredecessor(ctx, kubeClient)
+		}
 		if mc != nil {
 			go mc.Run(ctx, cc.Workers)
 			klog.Info("ModelBooster controller started")
 		}
-		if msc != nil {
-			go msc.Run(ctx, cc.Workers)
-			klog.Info("ModelServing controller started")
+		if msm != nil {
+			go msm.Run(ctx, cc.Workers)
+			klog.Info("ModelServing and ServingGroup controllers started")
 
 			if lwsc != nil {
 				go func() {
@@ -127,8 +142,8 @@ func SetupController(ctx context.Context, cc Config) {
 		if cc.DebugPort > 0 {
 			go func() {
 				debugMux := http.ServeMux{}
-				if msc != nil {
-					msc.RegisterModelServingDebugEndpoints(&debugMux)
+				if msm != nil {
+					msm.RegisterDebugEndpoints(&debugMux)
 				}
 				// Ensure the debug server is only accessible locally for security reasons
 				debugAddr := fmt.Sprintf("localhost:%d", cc.DebugPort)
@@ -164,6 +179,13 @@ func SetupController(ctx context.Context, cc Config) {
 			panic(err)
 		}
 		leaderElector.Run(ctx)
+		if ctx.Err() == nil {
+			// The lease was lost. The controllers were stopped with it, and
+			// another process may hold it now. This process cannot go on: it
+			// ends, and its replacement stands for election again.
+			klog.ErrorS(nil, "Leader election lost; exiting")
+			klog.FlushAndExit(klog.ExitFlushTimeout, 1)
+		}
 	} else {
 		startControllers(ctx)
 		klog.Info("Started controllers without leader election")

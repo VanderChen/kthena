@@ -16,6 +16,10 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: kthena-controller-manager
+        # Tells this version from one that does not know ServingGroup objects.
+        # The two must not work at the same time: this one waits for the other
+        # to be gone before it starts its controllers.
+        workload.serving.volcano.sh/servinggroup-controller: "true"
         {{- include "kthena.labels" . | nindent 8 }}
     spec:
       containers:

@@ -83,13 +83,13 @@ func main() {
 	pflag.StringVar(&wc.serviceName, "service-name", "kthena-controller-manager-webhook", "Service name for the webhook server")
 	pflag.BoolVar(&wc.enableEviction, "enable-eviction-webhook", false, "If true, pods/eviction webhook protection will be used. Default is false")
 	pflag.DurationVar(&wc.evictionTrackerTTL, "eviction-tracker-ttl", 60*time.Second, "TTL for in-memory eviction disruption tracker entries")
-	pflag.BoolVar(&cc.EnableLeaderElection, "leader-elect", false, "Enable leader election for controller. "+
-		"Enabling this will ensure there is only one active controller. Default is false.")
-	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
+	pflag.BoolVar(&cc.EnableLeaderElection, "leader-elect", true, "Enable leader election for controller. "+
+		"Enabling this will ensure there is only one active controller. Default is true. A process that loses the lease exits.")
+	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers of each controller. Default is 5")
 	pflag.StringSliceVar(&controllers, "controllers", []string{"*"}, "A list of controllers to enable. '*' enables all controllers, 'foo' enables the controller "+
 		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster', 'autoscaler'")
-	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
-	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
+	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use the default value of 50.")
+	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use the default value of 100.")
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
 	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
 		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
