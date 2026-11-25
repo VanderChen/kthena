@@ -62,7 +62,7 @@ type ServingGroupSpecApplyConfiguration struct {
 	// RestartGracePeriodSeconds is the restart grace period of the ModelServing template.
 	RestartGracePeriodSeconds *int64 `json:"restartGracePeriodSeconds,omitempty"`
 	// GangPolicy is the gang scheduling configuration of the ModelServing template.
-	GangPolicy *GangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
+	GangPolicy *ServingGroupGangPolicyApplyConfiguration `json:"gangPolicy,omitempty"`
 	// NetworkTopology is the network topology configuration of the ModelServing template.
 	NetworkTopology *NetworkTopologyApplyConfiguration `json:"networkTopology,omitempty"`
 	// QueueName is the scheduling queue of the PodGroup of the group.
@@ -145,7 +145,7 @@ func (b *ServingGroupSpecApplyConfiguration) WithRestartGracePeriodSeconds(value
 // WithGangPolicy sets the GangPolicy field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the GangPolicy field is set to the value of the last call.
-func (b *ServingGroupSpecApplyConfiguration) WithGangPolicy(value *GangPolicyApplyConfiguration) *ServingGroupSpecApplyConfiguration {
+func (b *ServingGroupSpecApplyConfiguration) WithGangPolicy(value *ServingGroupGangPolicyApplyConfiguration) *ServingGroupSpecApplyConfiguration {
 	b.GangPolicy = value
 	return b
 }

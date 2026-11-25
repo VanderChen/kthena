@@ -176,6 +176,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupGangPolicy"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupGangPolicyApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupRole"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupRoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupRolloutStrategy"):

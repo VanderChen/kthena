@@ -307,7 +307,6 @@ GangPolicy defines the gang scheduling configuration.
 
 
 _Appears in:_
-- [ServingGroupSpec](#servinggroupspec)
 - [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
@@ -1253,6 +1252,27 @@ _Appears in:_
 
 
 
+#### ServingGroupGangPolicy
+
+
+
+ServingGroupGangPolicy is the gang scheduling configuration of a group: what
+GangPolicy is for the template of a ModelServing, without its rules about
+updates. The ModelServing controller writes it, and whatever the
+ModelServing was allowed to change has to be writable here: a rule that
+rejected the copy would leave the group with the settings of an earlier
+generation for good.
+
+
+
+_Appears in:_
+- [ServingGroupSpec](#servinggroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `minRoleReplicas` _object (keys:string, values:integer)_ | MinRoleReplicas is the minimum number of replicas of each Role that gang<br />scheduling requires. See GangPolicy. |  |  |
+
+
 #### ServingGroupList
 
 
@@ -1342,7 +1362,7 @@ _Appears in:_
 | `rolloutStrategy` _[ServingGroupRolloutStrategy](#servinggrouprolloutstrategy)_ | RolloutStrategy carries the rollout settings of the ModelServing that apply<br />inside a group. |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy is the recovery policy of the ModelServing. |  | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
 | `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds is the restart grace period of the ModelServing template. |  | Minimum: -1 <br /> |
-| `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy is the gang scheduling configuration of the ModelServing template. |  |  |
+| `gangPolicy` _[ServingGroupGangPolicy](#servinggroupgangpolicy)_ | GangPolicy is the gang scheduling configuration of the ModelServing template. |  |  |
 | `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology is the network topology configuration of the ModelServing template. |  |  |
 | `queueName` _string_ | QueueName is the scheduling queue of the PodGroup of the group. |  |  |
 | `roles` _[ServingGroupRole](#servinggrouprole) array_ | Roles carries, for every Role of the ModelServing template, the settings that<br />are not part of a revision. |  |  |
