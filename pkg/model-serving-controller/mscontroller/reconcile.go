@@ -116,12 +116,14 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	}
 
 	failure := c.execute(ctx, r)
-	if err := c.writeStatus(ctx, r); err != nil {
+	status, err := c.writeStatus(ctx, r)
+	if err != nil {
 		return 0, errors.Join(failure, err)
 	}
 	if failure != nil {
 		return 0, failure
 	}
+	c.cleanupRevisions(ctx, r, status)
 	for _, g := range r.view.groups {
 		if !g.unit.Terminating && !(g.unit.Observed && g.unit.Fresh) {
 			return requeue, ErrNotSettled
@@ -394,9 +396,10 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 	return errors.Join(failures...)
 }
 
-// writeStatus writes the status of the ModelServing when it changed. The
-// baseline advances here, in the round that found the rollout complete.
-func (c *Controller) writeStatus(ctx context.Context, r *round) error {
+// writeStatus writes the status of the ModelServing when it changed, and
+// returns it. The baseline advances here, in the round that found the rollout
+// complete.
+func (c *Controller) writeStatus(ctx context.Context, r *round) (workloadv1alpha1.ModelServingStatus, error) {
 	baseline := r.baseline
 	for _, action := range r.actions {
 		if action.Kind == grouplevel.ActionAdvanceBaseline {
@@ -409,12 +412,12 @@ func (c *Controller) writeStatus(ctx context.Context, r *round) error {
 	}
 	status := computeStatus(statusInput{ms: r.ms, view: r.view, baseline: baseline, collisions: r.collisions, adopting: r.gated})
 	if apiequality.Semantic.DeepEqual(status, r.ms.Status) {
-		return nil
+		return status, nil
 	}
 	updated := r.ms.DeepCopy()
 	updated.Status = status
 	if _, err := c.kthena.WorkloadV1alpha1().ModelServings(updated.Namespace).UpdateStatus(ctx, updated, metav1.UpdateOptions{}); err != nil {
-		return fmt.Errorf("write the status of ModelServing %s: %w", updated.Name, err)
+		return status, fmt.Errorf("write the status of ModelServing %s: %w", updated.Name, err)
 	}
-	return nil
+	return status, nil
 }
