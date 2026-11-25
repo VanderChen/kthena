@@ -765,3 +765,56 @@ func TestPodGroupOfRolledRolesUsesTheSmallestLayout(t *testing.T) {
 		})
 	}
 }
+
+// The members of a surge group carry a copy of its mark. When the group takes
+// a regular place the ModelServing controller removes the mark from the
+// group; the copy follows, and no Pod is replaced for it.
+func TestTheCopyOfTheSurgeMarkFollowsTheGroup(t *testing.T) {
+	ms := testModelServing()
+	group := groupOf(ms, "rev-a")
+	group.Annotations = map[string]string{workloadv1alpha1.SurgeAnnotationKey: workloadv1alpha1.SurgeScopeServingGroup}
+	h := newHarness(t, ms, group, revisionOf(t, ms, "rev-a"))
+	h.settle()
+	marks := func() (marked, pods int) {
+		for _, pod := range h.pods() {
+			pods++
+			if pod.Annotations[workloadv1alpha1.SurgeAnnotationKey] == workloadv1alpha1.SurgeScopeServingGroup {
+				marked++
+			}
+		}
+		return marked, pods
+	}
+	if marked, pods := marks(); pods == 0 || marked != pods {
+		t.Fatalf("%d of %d Pods of a surge group carry the copy of its mark", marked, pods)
+	}
+	before := map[string]string{}
+	for _, pod := range h.pods() {
+		before[pod.Name] = string(pod.UID)
+	}
+
+	h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+		delete(group.Annotations, workloadv1alpha1.SurgeAnnotationKey)
+	})
+	h.cluster.ResetWrites()
+	writes := h.mustRound()
+	if len(writes) != len(before) {
+		t.Fatalf("writes = %v, want one patch for each of the %d Pods", writes, len(before))
+	}
+	for _, write := range writes {
+		if !strings.HasPrefix(write, "patch pods ") {
+			t.Fatalf("writes = %v, want patches of Pods alone", writes)
+		}
+	}
+	if marked, _ := marks(); marked != 0 {
+		t.Errorf("%d Pods still carry the copy of the mark", marked)
+	}
+	for _, pod := range h.pods() {
+		if before[pod.Name] != string(pod.UID) {
+			t.Errorf("Pod %s was replaced", pod.Name)
+		}
+	}
+	h.cluster.Settle()
+	if writes := h.mustRound(); len(writes) != 0 || !h.isReady() {
+		t.Errorf("writes of the next round = %v, ready = %t; want none and the group ready", writes, h.isReady())
+	}
+}

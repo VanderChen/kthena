@@ -80,8 +80,23 @@ func (c *Controller) deletePod(ctx context.Context, pod *corev1.Pod) error {
 }
 
 // promote removes the Role surge mark from the members of the instances that
-// take a regular place.
+// take a regular place, and the copy of the surge mark of the group from the
+// members of a group that took one: the ModelServing controller removed the
+// mark from the group, and the copy follows it.
 func (c *Controller) promote(ctx context.Context, r *round) error {
+	if r.group.Annotations[workloadv1alpha1.SurgeAnnotationKey] != workloadv1alpha1.SurgeScopeServingGroup {
+		for i := range r.steps {
+			for _, member := range r.steps[i].inst.Members {
+				if member.Membership != servinggroup.Owned || member.Pod.Annotations[workloadv1alpha1.SurgeAnnotationKey] != workloadv1alpha1.SurgeScopeServingGroup {
+					continue
+				}
+				err := c.patchPod(ctx, member.Pod, map[string]any{"annotations": map[string]any{workloadv1alpha1.SurgeAnnotationKey: nil}})
+				if err != nil && !apierrors.IsNotFound(err) {
+					return fmt.Errorf("remove the copy of the surge mark from Pod %s: %w", member.Pod.Name, err)
+				}
+			}
+		}
+	}
 	for _, key := range r.plan.Promote {
 		for i := range r.steps {
 			if r.steps[i].key != key {
