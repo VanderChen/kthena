@@ -199,9 +199,7 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 
 	podInformer := kubeInformerFactory.Core().V1().Pods()
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
-
-	go kubeInformerFactory.Start(ctx.Done())
-	go kthenaInformerFactory.Start(ctx.Done())
+	sgInformer := kthenaInformerFactory.Workload().V1alpha1().ServingGroups()
 
 	mux := http.NewServeMux()
 
@@ -211,11 +209,18 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 	mux.HandleFunc("/mutate/leaderworkerset", lwsMutator.Handle)
 
 	if wc.enableEviction {
-		evictionHandler := modelservingwebhook.NewEvictionHandler(kubeClient, kthenaClient, podInformer.Lister(), msInformer.Lister(), wc.evictionTrackerTTL)
+		evictionHandler := modelservingwebhook.NewEvictionHandler(kubeClient, kthenaClient, podInformer.Lister(), msInformer.Lister(), sgInformer.Lister(), wc.evictionTrackerTTL)
 		mux.HandleFunc("/validate-eviction", evictionHandler.Handle)
 	} else {
 		mux.HandleFunc("/validate-eviction", modelservingwebhook.AllowEviction)
 	}
+
+	// A factory starts only the informers requested before Start, and Lister()
+	// above is what requests them. The ServingGroup informer cannot sync while
+	// the ServingGroup CRD is not installed, so it is not waited for: the eviction
+	// handler reads from the API server a ServingGroup its lister does not have.
+	go kubeInformerFactory.Start(ctx.Done())
+	go kthenaInformerFactory.Start(ctx.Done())
 
 	modelValidator := modelboosterwebhook.NewModelValidator()
 	modelMutator := modelboosterwebhook.NewModelMutator()

@@ -32,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
@@ -75,13 +76,14 @@ type EvictionHandler struct {
 	kthenaClient clientset.Interface
 	podLister    corelisters.PodLister
 	msLister     workloadlisters.ModelServingLister
+	sgLister     workloadlisters.ServingGroupLister
 
 	// disruptionTTL controls how long a recently allowed logical unit remains
 	// in the shared ConfigMap tracker to cover informer cache lag.
 	disruptionTTL time.Duration
 }
 
-func NewEvictionHandler(kubeClient kubernetes.Interface, kthenaClient clientset.Interface, podLister corelisters.PodLister, msLister workloadlisters.ModelServingLister, disruptionTTL ...time.Duration) *EvictionHandler {
+func NewEvictionHandler(kubeClient kubernetes.Interface, kthenaClient clientset.Interface, podLister corelisters.PodLister, msLister workloadlisters.ModelServingLister, sgLister workloadlisters.ServingGroupLister, disruptionTTL ...time.Duration) *EvictionHandler {
 	ttl := defaultDisruptionTTL
 	if len(disruptionTTL) > 0 && disruptionTTL[0] > 0 {
 		ttl = disruptionTTL[0]
@@ -91,6 +93,7 @@ func NewEvictionHandler(kubeClient kubernetes.Interface, kthenaClient clientset.
 		kthenaClient:  kthenaClient,
 		podLister:     podLister,
 		msLister:      msLister,
+		sgLister:      sgLister,
 		disruptionTTL: ttl,
 	}
 }
@@ -184,7 +187,8 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		klog.Warningf("ModelServing %s/%s for pod %s/%s was not found in lister but was found by live API GET; continuing eviction protection evaluation: listerErr=%v", podNamespace, msName, podNamespace, podName, listerErr)
 	}
 
-	if !isOwnedByCurrentModelServing(pod, ms) {
+	ownership := h.newPodOwnership(ms)
+	if !ownership.owns(r.Context(), pod) {
 		klog.Infof("Allowing eviction for pod %s/%s because it is not owned by current ModelServing %s/%s uid=%s",
 			podNamespace, podName, podNamespace, msName, ms.UID)
 		h.allow(&admissionReview, w)
@@ -197,7 +201,7 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	allowed, reason := h.checkEvictionWithTracker(r.Context(), ms, pod)
+	allowed, reason := h.checkEvictionWithTracker(r.Context(), ms, pod, ownership)
 
 	if allowed {
 		h.allow(&admissionReview, w)
@@ -206,7 +210,7 @@ func (h *EvictionHandler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod) (bool, string) {
+func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, ownership *podOwnership) (bool, string) {
 	strategy := ms.Spec.RolloutStrategy.EvictionStrategy
 	lockKey := fmt.Sprintf("%s/%s", ms.Namespace, ms.Name)
 	lockValue, _ := evictionTrackerLocks.LoadOrStore(lockKey, &sync.Mutex{})
@@ -220,9 +224,9 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		klog.Errorf("Failed to list pods for ModelServing %s: %v", ms.Name, err)
 		return true, ""
 	}
-	allPods = filterPodsForCurrentModelServing(allPods, ms)
+	allPods = ownership.filter(ctx, allPods)
 	allPods = includeTargetPod(allPods, targetPod)
-	allPods = h.refreshLivePodsForIncompleteObservation(ctx, ms, targetPod, strategy, allPods)
+	allPods = h.refreshLivePodsForIncompleteObservation(ctx, ms, targetPod, strategy, allPods, ownership)
 
 	var allowed bool
 	var reason string
@@ -240,7 +244,7 @@ func (h *EvictionHandler) checkEvictionWithTracker(ctx context.Context, ms *work
 		}
 		entriesBeforeCleanup := len(entries)
 		cleanupDisruptionEntries(entries)
-		allPods = h.cleanupRecoveredDisruptionEntries(ctx, ms, entries, allPods, targetPod)
+		allPods = h.cleanupRecoveredDisruptionEntries(ctx, ms, entries, allPods, targetPod, ownership)
 		if entriesBeforeCleanup != len(entries) {
 			klog.Infof("Cleaned eviction tracker entries for ModelServing %s/%s tracker=%s entriesBefore=%d entriesAfter=%d",
 				ms.Namespace, ms.Name, cm.Name, entriesBeforeCleanup, len(entries))
@@ -522,13 +526,13 @@ func includeTargetPod(pods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
 	return append(pods, targetPod)
 }
 
-func (h *EvictionHandler) refreshLivePodsForIncompleteObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, strategy *workloadv1alpha1.EvictionStrategySpec, cachedPods []*corev1.Pod) []*corev1.Pod {
+func (h *EvictionHandler) refreshLivePodsForIncompleteObservation(ctx context.Context, ms *workloadv1alpha1.ModelServing, targetPod *corev1.Pod, strategy *workloadv1alpha1.EvictionStrategySpec, cachedPods []*corev1.Pod, ownership *podOwnership) []*corev1.Pod {
 	expected, observed, scope := expectedAndObservedInstances(ms, targetPod, strategy, cachedPods)
 	if expected <= 0 || observed >= expected {
 		return cachedPods
 	}
 
-	livePods, err := h.liveModelServingPods(ctx, ms)
+	livePods, err := h.liveModelServingPods(ctx, ms, ownership)
 	if err != nil {
 		klog.Warningf("Failed to refresh live pods for incomplete eviction observation modelServing=%s/%s pod=%s/%s scope=%s observed=%d expected=%d: %v",
 			ms.Namespace, ms.Name, targetPod.Namespace, targetPod.Name, scope, observed, expected, err)
@@ -611,13 +615,13 @@ func cleanupDisruptionEntries(entries disruptionEntries) {
 	}
 }
 
-func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context, ms *workloadv1alpha1.ModelServing, entries disruptionEntries, cachedPods []*corev1.Pod, targetPod *corev1.Pod) []*corev1.Pod {
+func (h *EvictionHandler) cleanupRecoveredDisruptionEntries(ctx context.Context, ms *workloadv1alpha1.ModelServing, entries disruptionEntries, cachedPods []*corev1.Pod, targetPod *corev1.Pod, ownership *podOwnership) []*corev1.Pod {
 	cleanupRecoveredDisruptionEntries(entries, cachedPods)
 	if !needsLiveRecoveryCheck(entries, cachedPods) {
 		return cachedPods
 	}
 
-	livePods, err := h.liveModelServingPods(ctx, ms)
+	livePods, err := h.liveModelServingPods(ctx, ms, ownership)
 	if err != nil {
 		klog.Warningf("Failed to refresh live pods for recovered eviction tracker cleanup modelServing=%s/%s: %v", ms.Namespace, ms.Name, err)
 		return cachedPods
@@ -669,7 +673,7 @@ func needsLiveRecoveryCheck(entries disruptionEntries, pods []*corev1.Pod) bool 
 	return false
 }
 
-func (h *EvictionHandler) liveModelServingPods(ctx context.Context, ms *workloadv1alpha1.ModelServing) ([]*corev1.Pod, error) {
+func (h *EvictionHandler) liveModelServingPods(ctx context.Context, ms *workloadv1alpha1.ModelServing, ownership *podOwnership) ([]*corev1.Pod, error) {
 	selector := labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name})
 	podList, err := h.kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
 	if err != nil {
@@ -678,7 +682,7 @@ func (h *EvictionHandler) liveModelServingPods(ctx context.Context, ms *workload
 	pods := make([]*corev1.Pod, 0, len(podList.Items))
 	for i := range podList.Items {
 		pod := podList.Items[i].DeepCopy()
-		if isOwnedByCurrentModelServing(pod, ms) {
+		if ownership.owns(ctx, pod) {
 			pods = append(pods, pod)
 		}
 	}
@@ -720,17 +724,91 @@ func hasPodUID(pods []*corev1.Pod, uid string) bool {
 	return false
 }
 
-func filterPodsForCurrentModelServing(pods []*corev1.Pod, ms *workloadv1alpha1.ModelServing) []*corev1.Pod {
-	if ms.UID == "" {
-		return pods
+// podOwnership tells which Pods belong to one ModelServing while one eviction
+// request is handled. A Pod belongs when the ModelServing owns it, or when its
+// controller is a ServingGroup that the ModelServing controls. Both forms exist
+// side by side, also inside one group, while Pods are handed over to ServingGroups.
+type podOwnership struct {
+	handler *EvictionHandler
+	ms      *workloadv1alpha1.ModelServing
+	// servingGroups keeps the answer for every ServingGroup reference, so that all
+	// Pods of a group get the same answer and a lagging cache costs one GET per group.
+	servingGroups map[servingGroupReference]bool
+}
+
+type servingGroupReference struct {
+	namespace string
+	name      string
+	uid       types.UID
+}
+
+func (h *EvictionHandler) newPodOwnership(ms *workloadv1alpha1.ModelServing) *podOwnership {
+	return &podOwnership{handler: h, ms: ms, servingGroups: map[servingGroupReference]bool{}}
+}
+
+func (o *podOwnership) owns(ctx context.Context, pod *corev1.Pod) bool {
+	if isOwnedByCurrentModelServing(pod, o.ms) {
+		return true
 	}
+	owner := metav1.GetControllerOfNoCopy(pod)
+	if owner == nil || owner.APIVersion != workloadv1alpha1.SchemeGroupVersion.String() || owner.Kind != workloadv1alpha1.ServingGroupKind.Kind {
+		return false
+	}
+	ref := servingGroupReference{namespace: pod.Namespace, name: owner.Name, uid: owner.UID}
+	owned, resolved := o.servingGroups[ref]
+	if !resolved {
+		owned = o.handler.isServingGroupOfModelServing(ctx, ref, o.ms)
+		o.servingGroups[ref] = owned
+	}
+	return owned
+}
+
+func (o *podOwnership) filter(ctx context.Context, pods []*corev1.Pod) []*corev1.Pod {
 	filtered := make([]*corev1.Pod, 0, len(pods))
 	for _, pod := range pods {
-		if isOwnedByCurrentModelServing(pod, ms) {
+		if o.owns(ctx, pod) {
 			filtered = append(filtered, pod)
 		}
 	}
 	return filtered
+}
+
+// isServingGroupOfModelServing reports whether the ServingGroup that a Pod
+// references as its controller still exists with the referenced UID and is
+// controlled by ms.
+func (h *EvictionHandler) isServingGroupOfModelServing(ctx context.Context, ref servingGroupReference, ms *workloadv1alpha1.ModelServing) bool {
+	sg, err := h.sgLister.ServingGroups(ref.namespace).Get(ref.name)
+	if err != nil || sg.UID != ref.uid {
+		// The cache may be behind the Pod: the ServingGroup was just created, or
+		// replaced by one of the same name. It stays empty while the ServingGroup
+		// CRD is not installed.
+		sg, err = h.kthenaClient.WorkloadV1alpha1().ServingGroups(ref.namespace).Get(ctx, ref.name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			klog.V(2).Infof("Pods controlled by ServingGroup %s/%s uid=%s are not counted for ModelServing %s/%s because the ServingGroup does not exist",
+				ref.namespace, ref.name, ref.uid, ms.Namespace, ms.Name)
+			return false
+		}
+		if err != nil {
+			// Without an answer the Pod keeps its protection: the labels that led to
+			// this ModelServing are the best evidence left, and a read that fails
+			// must not turn into an eviction that bypasses the budget.
+			klog.Warningf("Counting Pods controlled by ServingGroup %s/%s uid=%s for ModelServing %s/%s although the ServingGroup cannot be read: %v",
+				ref.namespace, ref.name, ref.uid, ms.Namespace, ms.Name, err)
+			return true
+		}
+	}
+	if sg.UID != ref.uid {
+		klog.V(2).Infof("Pods controlled by ServingGroup %s/%s uid=%s are not counted for ModelServing %s/%s because the current ServingGroup of that name has uid=%s",
+			ref.namespace, ref.name, ref.uid, ms.Namespace, ms.Name, sg.UID)
+		return false
+	}
+	owner := metav1.GetControllerOfNoCopy(sg)
+	if owner == nil || owner.Kind != workloadv1alpha1.ModelServingKind.Kind || owner.UID != ms.UID {
+		klog.V(2).Infof("Pods controlled by ServingGroup %s/%s uid=%s are not counted for ModelServing %s/%s because the ServingGroup is not controlled by ModelServing uid=%s",
+			ref.namespace, ref.name, ref.uid, ms.Namespace, ms.Name, ms.UID)
+		return false
+	}
+	return true
 }
 
 func isOwnedByCurrentModelServing(obj metav1.Object, ms *workloadv1alpha1.ModelServing) bool {

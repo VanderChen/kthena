@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -36,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	kthenafake "github.com/volcano-sh/kthena/client-go/clientset/versioned/fake"
 	kthenainformers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
@@ -78,8 +80,9 @@ func TestEvictionHandler(t *testing.T) {
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister)
 
 	t.Run("Allow when above minAvailable", func(t *testing.T) {
 		// 3 groups ready, minAvailable 2. Evicting one group leaves 2. Allowed.
@@ -103,7 +106,7 @@ func TestEvictionHandler(t *testing.T) {
 		pods[0].DeletionTimestamp = nil
 		podInformer.Informer().GetStore().Update(pods[0])
 		clearTracker(t, fakeKubeClient, ms)
-		anotherHandler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+		anotherHandler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister)
 
 		// 1. Evict pod-g1. Should be allowed and recorded in tracker.
 		resp1 := handleEvictionRequest(handler, "pod-g1")
@@ -370,8 +373,9 @@ func TestEvictionHandlerDeniesWhenTargetPodMissingFromLister(t *testing.T) {
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister)
 
 	resp := handleEvictionRequest(handler, "pod-g1")
 	assert.False(t, resp.Allowed)
@@ -866,8 +870,9 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister)
 
 	resp1 := handleEvictionRequest(handler, "decode-0-entry")
 	assert.True(t, resp1.Allowed)
@@ -1133,8 +1138,9 @@ func TestEvictionHandlerTrackerTTL(t *testing.T) {
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), time.Millisecond)
+	handler := NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister, time.Millisecond)
 
 	resp1 := handleEvictionRequest(handler, "pod-g1")
 	assert.True(t, resp1.Allowed)
@@ -1209,6 +1215,340 @@ func TestEvictionHandlerAllowsZeroRoleReplicas(t *testing.T) {
 	assert.True(t, resp.Allowed)
 }
 
+func TestEvictionHandlerPodOwnershipForms(t *testing.T) {
+	ms := &workloadv1alpha1.ModelServing{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-ms",
+			Namespace: "default",
+			UID:       types.UID("current-ms-uid"),
+		},
+		Spec: workloadv1alpha1.ModelServingSpec{
+			Replicas: int32Ptr(2),
+			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
+				EvictionStrategy: &workloadv1alpha1.EvictionStrategySpec{
+					ProtectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+					MinAvailable:    intstrPtr(intstr.FromInt(2)),
+				},
+			},
+		},
+	}
+	otherMS := ms.DeepCopy()
+	otherMS.UID = types.UID("other-ms-uid")
+
+	const groupName = "test-ms-0"
+	groupUID := types.UID("group-uid")
+	controlledBy := func(owner *workloadv1alpha1.ModelServing) metav1.OwnerReference {
+		return *metav1.NewControllerRef(owner, workloadv1alpha1.ModelServingKind)
+	}
+	group := createServingGroup(groupName, groupUID, controlledBy(ms))
+	groupOwner := []metav1.OwnerReference{servingGroupOwnerReference(groupName, groupUID)}
+	isController := true
+
+	tests := []struct {
+		name string
+		// podOwners are the ownerReferences of the Pod that is evicted.
+		podOwners []metav1.OwnerReference
+		// cachedGroups are known to the lister, liveGroups to the API server.
+		cachedGroups []*workloadv1alpha1.ServingGroup
+		liveGroups   []*workloadv1alpha1.ServingGroup
+		getFails     bool
+		protected    bool
+		expectedGets int
+	}{
+		{
+			name:      "owned by the ModelServing",
+			podOwners: []metav1.OwnerReference{modelServingOwnerReference(ms)},
+			protected: true,
+		},
+		{
+			name:      "owned by the ModelServing while ServingGroups cannot be read",
+			podOwners: []metav1.OwnerReference{modelServingOwnerReference(ms)},
+			getFails:  true,
+			protected: true,
+		},
+		{
+			name:         "controlled by a ServingGroup of the ModelServing",
+			podOwners:    groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{group},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+			protected:    true,
+		},
+		{
+			name:         "ServingGroup missing from the cache is read from the API server",
+			podOwners:    groupOwner,
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+			protected:    true,
+			expectedGets: 1,
+		},
+		{
+			name:         "ServingGroup replaced under the same name is read from the API server",
+			podOwners:    groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, "previous-group-uid", controlledBy(ms))},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+			protected:    true,
+			expectedGets: 1,
+		},
+		{
+			name:         "ServingGroup controlled by another ModelServing",
+			podOwners:    groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID, controlledBy(otherMS))},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID, controlledBy(otherMS))},
+		},
+		{
+			name:         "ServingGroup owned but not controlled by the ModelServing",
+			podOwners:    groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID, modelServingOwnerReference(ms))},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID, modelServingOwnerReference(ms))},
+		},
+		{
+			name:      "ServingGroup controlled by another kind with the UID of the ModelServing",
+			podOwners: groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID,
+				*metav1.NewControllerRef(ms, workloadv1alpha1.ModelKind))},
+			liveGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, groupUID,
+				*metav1.NewControllerRef(ms, workloadv1alpha1.ModelKind))},
+		},
+		{
+			name:         "ServingGroup with another UID than the Pod references",
+			podOwners:    groupOwner,
+			cachedGroups: []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, "other-group-uid", controlledBy(ms))},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{createServingGroup(groupName, "other-group-uid", controlledBy(ms))},
+			expectedGets: 1,
+		},
+		{
+			name:         "ServingGroup missing",
+			podOwners:    groupOwner,
+			expectedGets: 1,
+		},
+		{
+			name:         "ServingGroup cannot be read: the Pod keeps its protection",
+			podOwners:    groupOwner,
+			getFails:     true,
+			protected:    true,
+			expectedGets: 1,
+		},
+		{
+			name: "ServingGroup referenced without being the controller",
+			podOwners: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       workloadv1alpha1.ServingGroupKind.Kind,
+				Name:       groupName,
+				UID:        groupUID,
+			}},
+			cachedGroups: []*workloadv1alpha1.ServingGroup{group},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+		},
+		{
+			name: "controller of an unrelated kind",
+			podOwners: []metav1.OwnerReference{{
+				APIVersion: "apps/v1",
+				Kind:       "ReplicaSet",
+				Name:       groupName,
+				UID:        groupUID,
+				Controller: &isController,
+			}},
+			cachedGroups: []*workloadv1alpha1.ServingGroup{group},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+		},
+		{
+			name: "controller of another kind of the same API group",
+			podOwners: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(),
+				Kind:       workloadv1alpha1.ModelKind.Kind,
+				Name:       groupName,
+				UID:        groupUID,
+				Controller: &isController,
+			}},
+			cachedGroups: []*workloadv1alpha1.ServingGroup{group},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+		},
+		{
+			name: "controller of the ServingGroup kind of another API group",
+			podOwners: []metav1.OwnerReference{{
+				APIVersion: "example.com/v1alpha1",
+				Kind:       workloadv1alpha1.ServingGroupKind.Kind,
+				Name:       groupName,
+				UID:        groupUID,
+				Controller: &isController,
+			}},
+			cachedGroups: []*workloadv1alpha1.ServingGroup{group},
+			liveGroups:   []*workloadv1alpha1.ServingGroup{group},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pods := []*corev1.Pod{
+				withOwnerReferences(createRolePodWithUID("pod-g1", groupName, "worker", "worker-0", "g1-uid", true), tt.podOwners...),
+				withModelServingOwner(createRolePodWithUID("pod-g2", "test-ms-1", "worker", "worker-0", "g2-uid", true), ms),
+			}
+			handler, kubeClient, kthenaClient := newTestEvictionHandlerWithServingGroups(ms, pods, pods, tt.cachedGroups, tt.liveGroups)
+			if tt.getFails {
+				kthenaClient.PrependReactor("get", "servinggroups", func(k8stesting.Action) (bool, runtime.Object, error) {
+					return true, nil, apierrors.NewServiceUnavailable("ServingGroups are not served")
+				})
+			}
+
+			resp := handleEvictionRequest(handler, "pod-g1")
+
+			assert.Equal(t, tt.expectedGets, servingGroupGets(kthenaClient))
+			if tt.protected {
+				// Both groups are ready and both are needed, so the budget of the
+				// ModelServing denies the eviction of any of its Pods.
+				if assert.False(t, resp.Allowed) {
+					assert.Contains(t, resp.Result.Message, "Current ready groups (2) <= minAvailable (2)")
+				}
+				return
+			}
+			assert.True(t, resp.Allowed)
+			_, err := kubeClient.CoreV1().ConfigMaps(ms.Namespace).Get(context.Background(), trackerConfigMapName(ms.Name), metav1.GetOptions{})
+			assert.True(t, apierrors.IsNotFound(err), "the budget must not be evaluated for a Pod of another owner")
+		})
+	}
+}
+
+func TestEvictionHandlerCountsPodsOfBothOwnershipForms(t *testing.T) {
+	servingGroupDenied := "Current ready groups (2) <= minAvailable (2)"
+	roleDenied := "ServingGroup test-ms-0 role decode ready instances (2) <= minAvailable (2)"
+
+	tests := []struct {
+		name            string
+		protectionLevel workloadv1alpha1.ProtectionLevelType
+		// target is evicted. Entry Pods (-0) are owned by the ModelServing, worker
+		// Pods (-1) are controlled by the ServingGroup.
+		target string
+		// notReady names the only Pod of the ModelServing that is not ready.
+		notReady string
+		// stalePod adds a not ready Pod of a ServingGroup that was replaced.
+		stalePod bool
+		// cacheLag leaves the Pod and ServingGroup listers empty.
+		cacheLag     bool
+		allowed      bool
+		message      string
+		expectedGets int
+	}{
+		{
+			name:            "ServingGroup budget with every Pod ready",
+			protectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+			target:          "test-ms-0-decode-0-0",
+			allowed:         true,
+		},
+		{
+			name:            "ServingGroup-controlled Pod makes its group not ready",
+			protectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+			target:          "test-ms-0-decode-0-0",
+			notReady:        "test-ms-1-decode-2-1",
+			message:         servingGroupDenied,
+		},
+		{
+			name:            "ModelServing-owned Pod makes the group of a ServingGroup-controlled target count",
+			protectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+			target:          "test-ms-0-decode-0-1",
+			notReady:        "test-ms-1-decode-2-0",
+			message:         servingGroupDenied,
+		},
+		{
+			name:            "Pod of a replaced ServingGroup is not counted",
+			protectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+			target:          "test-ms-0-decode-0-0",
+			stalePod:        true,
+			allowed:         true,
+			expectedGets:    1,
+		},
+		{
+			name:            "ServingGroup budget from live Pods reads every ServingGroup once",
+			protectionLevel: workloadv1alpha1.ProtectionLevelServingGroup,
+			target:          "test-ms-0-decode-0-0",
+			notReady:        "test-ms-1-decode-2-1",
+			cacheLag:        true,
+			message:         servingGroupDenied,
+			expectedGets:    3,
+		},
+		{
+			name:            "Role budget with every Pod ready",
+			protectionLevel: workloadv1alpha1.ProtectionLevelRole,
+			target:          "test-ms-0-decode-0-0",
+			allowed:         true,
+		},
+		{
+			name:            "ServingGroup-controlled Pod makes its Role instance not ready",
+			protectionLevel: workloadv1alpha1.ProtectionLevelRole,
+			target:          "test-ms-0-decode-0-0",
+			notReady:        "test-ms-0-decode-2-1",
+			message:         roleDenied,
+		},
+		{
+			name:            "ModelServing-owned Pod makes the Role of a ServingGroup-controlled target count",
+			protectionLevel: workloadv1alpha1.ProtectionLevelRole,
+			target:          "test-ms-0-decode-0-1",
+			notReady:        "test-ms-0-decode-2-0",
+			message:         roleDenied,
+		},
+		{
+			name:            "Role budget from live Pods reads every ServingGroup once",
+			protectionLevel: workloadv1alpha1.ProtectionLevelRole,
+			target:          "test-ms-0-decode-0-0",
+			notReady:        "test-ms-0-decode-2-1",
+			cacheLag:        true,
+			message:         roleDenied,
+			expectedGets:    3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			strategy := &workloadv1alpha1.EvictionStrategySpec{ProtectionLevel: tt.protectionLevel}
+			if tt.protectionLevel == workloadv1alpha1.ProtectionLevelRole {
+				strategy.RoleMinAvailable = map[string]intstr.IntOrString{"decode": intstr.FromInt(2)}
+			} else {
+				strategy.MinAvailable = intstrPtr(intstr.FromInt(2))
+			}
+			ms := &workloadv1alpha1.ModelServing{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-ms",
+					Namespace: "default",
+					UID:       types.UID("current-ms-uid"),
+				},
+				Spec: workloadv1alpha1.ModelServingSpec{
+					Replicas:        int32Ptr(3),
+					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{EvictionStrategy: strategy},
+					Template: workloadv1alpha1.ServingGroupTemplate{
+						Roles: []workloadv1alpha1.Role{
+							{
+								Name:     "decode",
+								Replicas: int32Ptr(3),
+							},
+						},
+					},
+				},
+			}
+			groups := make([]*workloadv1alpha1.ServingGroup, 0, 3)
+			for i := range 3 {
+				name := fmt.Sprintf("test-ms-%d", i)
+				groups = append(groups, createServingGroup(name, types.UID(name+"-uid"), *metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)))
+			}
+			pods := mixedOwnershipPods(ms, groups, tt.notReady)
+			if tt.stalePod {
+				pods = append(pods, withOwnerReferences(
+					createRolePodWithUID("stale-pod", "test-ms-1", "decode", "decode-0", "stale-pod-uid", false),
+					servingGroupOwnerReference("test-ms-1", "previous-group-uid")))
+			}
+			cachedPods, cachedGroups := pods, groups
+			if tt.cacheLag {
+				cachedPods, cachedGroups = nil, nil
+			}
+			handler, _, kthenaClient := newTestEvictionHandlerWithServingGroups(ms, cachedPods, pods, cachedGroups, groups)
+
+			resp := handleEvictionRequest(handler, tt.target)
+
+			assert.Equal(t, tt.expectedGets, servingGroupGets(kthenaClient))
+			if assert.Equal(t, tt.allowed, resp.Allowed) && !tt.allowed {
+				assert.Contains(t, resp.Result.Message, tt.message)
+			}
+		})
+	}
+}
+
 func newTestEvictionHandler(ms *workloadv1alpha1.ModelServing, pods []*corev1.Pod) *EvictionHandler {
 	fakeKubeClient := fake.NewSimpleClientset()
 	fakeKthenaClient := kthenafake.NewSimpleClientset(ms)
@@ -1222,8 +1562,9 @@ func newTestEvictionHandler(ms *workloadv1alpha1.ModelServing, pods []*corev1.Po
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister())
+	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister)
 }
 
 func newTestEvictionHandlerWithLivePods(ms *workloadv1alpha1.ModelServing, cachePods, livePods []*corev1.Pod, objects ...runtime.Object) (*EvictionHandler, *fake.Clientset) {
@@ -1244,8 +1585,48 @@ func newTestEvictionHandlerWithLivePods(ms *workloadv1alpha1.ModelServing, cache
 	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
 	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
 	msInformer.Informer().GetStore().Add(ms)
+	sgLister := kthenaInformerFactory.Workload().V1alpha1().ServingGroups().Lister()
 
-	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister()), fakeKubeClient
+	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgLister), fakeKubeClient
+}
+
+func newTestEvictionHandlerWithServingGroups(ms *workloadv1alpha1.ModelServing, cachePods, livePods []*corev1.Pod, cachedGroups, liveGroups []*workloadv1alpha1.ServingGroup) (*EvictionHandler, *fake.Clientset, *kthenafake.Clientset) {
+	kubeObjects := make([]runtime.Object, 0, len(livePods))
+	for _, pod := range livePods {
+		kubeObjects = append(kubeObjects, pod)
+	}
+	fakeKubeClient := fake.NewSimpleClientset(kubeObjects...)
+	kthenaObjects := []runtime.Object{ms}
+	for _, sg := range liveGroups {
+		kthenaObjects = append(kthenaObjects, sg)
+	}
+	fakeKthenaClient := kthenafake.NewSimpleClientset(kthenaObjects...)
+
+	kubeInformerFactory := informers.NewSharedInformerFactory(fakeKubeClient, 0)
+	podInformer := kubeInformerFactory.Core().V1().Pods()
+	for _, p := range cachePods {
+		podInformer.Informer().GetStore().Add(p)
+	}
+
+	kthenaInformerFactory := kthenainformers.NewSharedInformerFactory(fakeKthenaClient, 0)
+	msInformer := kthenaInformerFactory.Workload().V1alpha1().ModelServings()
+	msInformer.Informer().GetStore().Add(ms)
+	sgInformer := kthenaInformerFactory.Workload().V1alpha1().ServingGroups()
+	for _, sg := range cachedGroups {
+		sgInformer.Informer().GetStore().Add(sg)
+	}
+
+	return NewEvictionHandler(fakeKubeClient, fakeKthenaClient, podInformer.Lister(), msInformer.Lister(), sgInformer.Lister()), fakeKubeClient, fakeKthenaClient
+}
+
+func servingGroupGets(client *kthenafake.Clientset) int {
+	gets := 0
+	for _, action := range client.Actions() {
+		if action.Matches("get", "servinggroups") {
+			gets++
+		}
+	}
+	return gets
 }
 
 func trackerConfigMap(ms *workloadv1alpha1.ModelServing, entries disruptionEntries) *corev1.ConfigMap {
@@ -1320,6 +1701,46 @@ func withModelServingOwner(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing) *
 	ownedPod := pod.DeepCopy()
 	ownedPod.OwnerReferences = []metav1.OwnerReference{modelServingOwnerReference(ms)}
 	return ownedPod
+}
+
+func withOwnerReferences(pod *corev1.Pod, owners ...metav1.OwnerReference) *corev1.Pod {
+	ownedPod := pod.DeepCopy()
+	ownedPod.OwnerReferences = owners
+	return ownedPod
+}
+
+func createServingGroup(name string, uid types.UID, owners ...metav1.OwnerReference) *workloadv1alpha1.ServingGroup {
+	return &workloadv1alpha1.ServingGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            name,
+			Namespace:       "default",
+			UID:             uid,
+			OwnerReferences: owners,
+		},
+	}
+}
+
+func servingGroupOwnerReference(name string, uid types.UID) metav1.OwnerReference {
+	return *metav1.NewControllerRef(createServingGroup(name, uid), workloadv1alpha1.ServingGroupKind)
+}
+
+// mixedOwnershipPods returns three decode instances for every group. The entry
+// Pod of an instance is owned by the ModelServing and its worker Pod is
+// controlled by the ServingGroup, as in a group whose Pods are half handed over.
+func mixedOwnershipPods(ms *workloadv1alpha1.ModelServing, groups []*workloadv1alpha1.ServingGroup, notReady string) []*corev1.Pod {
+	pods := make([]*corev1.Pod, 0, len(groups)*6)
+	for _, sg := range groups {
+		for i := range 3 {
+			roleID := fmt.Sprintf("decode-%d", i)
+			entry := fmt.Sprintf("%s-%s-0", sg.Name, roleID)
+			worker := fmt.Sprintf("%s-%s-1", sg.Name, roleID)
+			pods = append(pods,
+				withModelServingOwner(createRolePodWithUID(entry, sg.Name, "decode", roleID, entry+"-uid", entry != notReady), ms),
+				withOwnerReferences(createRolePodWithUID(worker, sg.Name, "decode", roleID, worker+"-uid", worker != notReady), servingGroupOwnerReference(sg.Name, sg.UID)),
+			)
+		}
+	}
+	return pods
 }
 
 func handleEvictionRequest(handler *EvictionHandler, podName string) *admissionv1.AdmissionResponse {
