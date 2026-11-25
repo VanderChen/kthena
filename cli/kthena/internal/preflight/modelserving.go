@@ -204,6 +204,9 @@ func analyzeModelServing(in modelServingInput) ModelServingReport {
 		a.surgeMarks()
 		a.podStates()
 		a.strayPods()
+		a.existingObjects()
+		a.dryRunResult()
+		a.environment()
 	}
 
 	a.groupInfo()
