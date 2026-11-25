@@ -1,0 +1,518 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.17.2
+  name: servinggroups.workload.serving.volcano.sh
+spec:
+  group: workload.serving.volcano.sh
+  names:
+    kind: ServingGroup
+    listKind: ServingGroupList
+    plural: servinggroups
+    shortNames:
+    - sg
+    singular: servinggroup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - description: Revision that every Pod of the group runs
+      jsonPath: .status.revision
+      name: Revision
+      type: string
+    - description: Whether every Role instance of the group is ready
+      jsonPath: .status.conditions[?(@.type=='Ready')].status
+      name: Ready
+      type: string
+    - description: Number of ready Pods
+      jsonPath: .status.readyPods
+      name: Pods
+      type: integer
+    - description: Number of Pods of a complete group
+      jsonPath: .spec.expectedPods
+      name: Expected
+      type: integer
+    - description: Whether the group is to be replaced as a whole
+      jsonPath: .status.conditions[?(@.type=='Failed')].status
+      name: Failed
+      priority: 1
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          ServingGroup is one replica of a ModelServing. It is named
+          <ModelServing name>-<ordinal>, is owned by the ModelServing and owns the Pods,
+          the PodGroup and the headless Services of the group. ServingGroups are created,
+          updated and deleted by the ModelServing controller; a manual change of the spec
+          is overwritten.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              ServingGroupSpec is written by the ModelServing controller. It carries the
+              revision of the group and the settings of the ModelServing that apply inside
+              one group and are not part of a revision. Pod templates, plugins and the
+              scheduler name are not copied here; they are read from the ControllerRevision
+              of the revision.
+
+              A revision is identified as in the status of the ModelServing and in the
+              revision label of a Pod.
+
+              No field has a schema default: the stored spec is exactly what the
+              ModelServing controller wrote, so it can be compared with the desired spec.
+            properties:
+              baselineRevision:
+                description: |-
+                  BaselineRevision is a copy of the currentRevision of the ModelServing status.
+                  Role instances protected by a Role partition are created from it, and the
+                  ModelServing controller reads it back when its own status was lost.
+                type: string
+              expectedPods:
+                description: |-
+                  ExpectedPods is the number of Pods of the group when it is complete. It is the
+                  replica count of the scale subresource.
+                format: int32
+                minimum: 0
+                type: integer
+              gangPolicy:
+                description: GangPolicy is the gang scheduling configuration of the
+                  ModelServing template.
+                properties:
+                  minRoleReplicas:
+                    additionalProperties:
+                      format: int32
+                      type: integer
+                    description: |-
+                      MinRoleReplicas defines the minimum number of replicas required for each role
+                      in gang scheduling, pods in each role are strictly gang required.
+                      This map allows users to specify different minimum replica requirements for different roles.
+                      If this field is not set, all roles in the ServingGroup are considered gang required by default.
+                      For example if you specify a 2P(prefill) 4D(decode) serving group and set the below gangPolicy:
+                      ```yaml
+                      gangPolicy:
+                        minRoleReplicas:
+                          prefill: 1
+                          decode: 1
+                      ```
+                      It will result in the following behavior:
+                      At least one prefill and one decode must be scheduled before any of the pods in the serving group can run.
+                      And pods within a role must be scheduled together.
+                    type: object
+                    x-kubernetes-validations:
+                    - message: minRoleReplicas is immutable
+                      rule: self == oldSelf
+                type: object
+              networkTopology:
+                description: NetworkTopology is the network topology configuration
+                  of the ModelServing template.
+                properties:
+                  groupPolicy:
+                    description: GroupPolicy defines the network topology scheduling
+                      requirement of  all the instances within the `ServingGroup`.
+                    properties:
+                      highestTierAllowed:
+                        description: HighestTierAllowed specifies the highest tier
+                          that a job allowed to cross when scheduling.
+                        minimum: 0
+                        type: integer
+                      highestTierName:
+                        description: |-
+                          HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
+                          HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                        maxLength: 253
+                        type: string
+                      mode:
+                        default: hard
+                        description: Mode specifies the mode of the network topology
+                          constrain.
+                        enum:
+                        - hard
+                        - soft
+                        type: string
+                    type: object
+                  rolePolicy:
+                    description: RolePolicy defines the fine-grained network topology
+                      scheduling requirement for instances of a `role`.
+                    properties:
+                      highestTierAllowed:
+                        description: HighestTierAllowed specifies the highest tier
+                          that a job allowed to cross when scheduling.
+                        minimum: 0
+                        type: integer
+                      highestTierName:
+                        description: |-
+                          HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
+                          HighestTierName and HighestTierAllowed cannot be set simultaneously.
+                        maxLength: 253
+                        type: string
+                      mode:
+                        default: hard
+                        description: Mode specifies the mode of the network topology
+                          constrain.
+                        enum:
+                        - hard
+                        - soft
+                        type: string
+                    type: object
+                type: object
+              queueName:
+                description: QueueName is the scheduling queue of the PodGroup of
+                  the group.
+                type: string
+              recoveryPolicy:
+                description: RecoveryPolicy is the recovery policy of the ModelServing.
+                enum:
+                - ServingGroupRecreate
+                - RoleRecreate
+                - None
+                type: string
+              restartGracePeriodSeconds:
+                description: RestartGracePeriodSeconds is the restart grace period
+                  of the ModelServing template.
+                format: int64
+                minimum: -1
+                type: integer
+              revision:
+                description: |-
+                  Revision is the revision this group runs as a whole. It is set under
+                  ServingGroupRollingUpdate and empty under RoleRollingUpdate.
+                type: string
+              roles:
+                description: |-
+                  Roles carries, for every Role of the ModelServing template, the settings that
+                  are not part of a revision.
+                items:
+                  description: ServingGroupRole carries the settings of one Role that
+                    are not part of a revision.
+                  properties:
+                    baselineReplicas:
+                      description: |-
+                        BaselineReplicas is the replica count of the Role recorded with the baseline
+                        revision. Only a coordinated Role rolling update reads it.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    maxSurge:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: MaxSurge of the Role, used under RoleRollingUpdate.
+                      x-kubernetes-int-or-string: true
+                    maxUnavailable:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: MaxUnavailable of the Role, used under RoleRollingUpdate.
+                      x-kubernetes-int-or-string: true
+                    name:
+                      description: Name of the Role.
+                      type: string
+                    partition:
+                      anyOf:
+                      - type: integer
+                      - type: string
+                      description: Partition of the Role, used under RoleRollingUpdate.
+                      x-kubernetes-int-or-string: true
+                    replicas:
+                      description: Replicas is the number of instances of the Role
+                        in this group.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                  required:
+                  - name
+                  - replicas
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              rolloutStrategy:
+                description: |-
+                  RolloutStrategy carries the rollout settings of the ModelServing that apply
+                  inside a group.
+                properties:
+                  progressDeadlineSeconds:
+                    description: ProgressDeadlineSeconds is the progress deadline
+                      of an in-place update.
+                    format: int32
+                    type: integer
+                  roleCoordination:
+                    description: RoleCoordination is the cross-Role coordination configuration.
+                    properties:
+                      dependencies:
+                        description: |-
+                          Dependencies defines rollout startup dependencies. A graph root waits for
+                          target-version Ready capacity throughout its dependency closure before its
+                          first target start. Internal Roles may start together; old dependency
+                          capacity is retained while old callers remain.
+                        items:
+                          properties:
+                            dependsOn:
+                              description: DependsOn lists the downstream Roles required
+                                by Role.
+                              items:
+                                type: string
+                              type: array
+                              x-kubernetes-list-type: set
+                            role:
+                              description: Role is the dependent Role.
+                              type: string
+                          required:
+                          - dependsOn
+                          - role
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - role
+                        x-kubernetes-list-type: map
+                      maxSkew:
+                        anyOf:
+                        - type: integer
+                        - type: string
+                        description: |-
+                          MaxSkew is the maximum percentage-point difference allowed between the
+                          target-version Ready ratios of participating Roles, using their entire formal
+                          replica count, including partition-protected capacity. Only percentage values,
+                          for example "10%", are accepted.
+                        x-kubernetes-int-or-string: true
+                      roles:
+                        description: |-
+                          Roles selects the Roles participating in coordinated rolling update. An
+                          empty list selects every Role in spec.template.roles.
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: set
+                    required:
+                    - maxSkew
+                    type: object
+                  type:
+                    description: Type is the rollout granularity of the ModelServing.
+                    enum:
+                    - ServingGroupRollingUpdate
+                    - RoleRollingUpdate
+                    type: string
+                  updateMethod:
+                    description: |-
+                      UpdateMethod is the update method that takes effect: InPlace only when the
+                      ModelServing asks for it and its rollout budget and plugins allow it.
+                    enum:
+                    - Recreate
+                    - InPlace
+                    type: string
+                required:
+                - type
+                type: object
+              sourceGeneration:
+                description: |-
+                  SourceGeneration is the generation of the ModelServing this spec was derived
+                  from. The ModelServing controller never replaces a spec with one derived from
+                  a lower generation.
+                format: int64
+                type: integer
+              targetRevision:
+                description: |-
+                  TargetRevision is the revision the Role instances of this group are rolled
+                  to under RoleRollingUpdate.
+                type: string
+            required:
+            - expectedPods
+            type: object
+          status:
+            description: ServingGroupStatus is written by the ServingGroup controller.
+            properties:
+              conditions:
+                description: Conditions of the group. See ServingGroupConditionType.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              faultyMembers:
+                description: |-
+                  FaultyMembers is the number of member Pods that are in a terminal phase or in
+                  a restart failure that counts as a fault. For display.
+                format: int32
+                type: integer
+              labelSelector:
+                description: LabelSelector selects the Pods of the group. It is the
+                  selector of the scale subresource.
+                type: string
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the generation of the spec the decisions behind this
+                  status were made from. While it is lower than metadata.generation the
+                  ModelServing controller does not rely on the conditions.
+                format: int64
+                type: integer
+              observedPods:
+                description: |-
+                  ObservedPods is a digest of the member Pods this status was computed from.
+                  The ModelServing controller computes the same digest from its own view of the
+                  Pods; while the two differ it does not rely on the conditions.
+                type: string
+              pods:
+                description: |-
+                  Pods is the number of Pods of the group, including terminating Pods and Pods
+                  the controller has decided to create but not created yet. A group with zero
+                  Pods here and no member Pod has no member: its revision can still be changed
+                  without replacing anything.
+                format: int32
+                type: integer
+              readyPods:
+                description: ReadyPods is the number of member Pods that are running
+                  and ready. For display.
+                format: int32
+                type: integer
+              referencedRevisions:
+                description: |-
+                  ReferencedRevisions lists every revision referenced by a Pod of the group,
+                  including terminating Pods. ControllerRevisions listed here are retained.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
+              revision:
+                description: |-
+                  Revision is the revision that every Pod of the group runs, read from the
+                  Pods and not from the spec. It is empty when the Pods run different
+                  revisions or the group has no Pod.
+                type: string
+              roleInstances:
+                description: |-
+                  RoleInstances is the ledger: one entry for every Role instance the controller
+                  has started to create and not finished removing.
+                items:
+                  description: |-
+                    RoleInstanceStatus is the ledger entry of one Role instance. Unlike the rest
+                    of the status it cannot be rebuilt from the Pods: it records what the
+                    controller has committed to.
+                  properties:
+                    generation:
+                      description: |-
+                        Generation numbers the successive sets of Pods of the instance. A Pod carries
+                        the generation it was created for in the instance-generation label.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    index:
+                      description: Index is the ordinal of the instance within its
+                        Role.
+                      format: int32
+                      minimum: 0
+                      type: integer
+                    phase:
+                      description: Phase is Creating, Established or Draining. An
+                        absent phase means Creating.
+                      enum:
+                      - Creating
+                      - Established
+                      - Draining
+                      type: string
+                    role:
+                      description: Role is the name of the Role.
+                      type: string
+                  required:
+                  - index
+                  - role
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - role
+                - index
+                x-kubernetes-list-type: map
+              terminatingPods:
+                description: TerminatingPods is the number of member Pods that are
+                  being deleted. For display.
+                format: int32
+                type: integer
+            required:
+            - faultyMembers
+            - pods
+            - readyPods
+            - terminatingPods
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.labelSelector
+        specReplicasPath: .spec.expectedPods
+        statusReplicasPath: .status.pods
+      status: {}

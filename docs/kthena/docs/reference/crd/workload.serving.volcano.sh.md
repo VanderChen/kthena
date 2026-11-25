@@ -14,6 +14,8 @@
 - [ModelBoosterList](#modelboosterlist)
 - [ModelServing](#modelserving)
 - [ModelServingList](#modelservinglist)
+- [ServingGroup](#servinggroup)
+- [ServingGroupList](#servinggrouplist)
 
 
 
@@ -305,6 +307,7 @@ GangPolicy defines the gang scheduling configuration.
 
 
 _Appears in:_
+- [ServingGroupSpec](#servinggroupspec)
 - [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
@@ -777,6 +780,7 @@ NetworkTopologySpec defines the network topology affinity scheduling policy for 
 
 
 _Appears in:_
+- [ServingGroupSpec](#servinggroupspec)
 - [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
@@ -979,6 +983,7 @@ _Underlying type:_ _string_
 
 _Appears in:_
 - [ModelServingSpec](#modelservingspec)
+- [ServingGroupSpec](#servinggroupspec)
 
 | Field | Description |
 | --- | --- |
@@ -1021,12 +1026,52 @@ in each ServingGroup. Its presence and policy are immutable after creation.
 
 _Appears in:_
 - [RolloutStrategy](#rolloutstrategy)
+- [ServingGroupRolloutStrategy](#servinggrouprolloutstrategy)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
 | `roles` _string array_ | Roles selects the Roles participating in coordinated rolling update. An<br />empty list selects every Role in spec.template.roles. |  |  |
 | `maxSkew` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSkew is the maximum percentage-point difference allowed between the<br />target-version Ready ratios of participating Roles, using their entire formal<br />replica count, including partition-protected capacity. Only percentage values,<br />for example "10%", are accepted. |  | XIntOrString: \{\} <br /> |
 | `dependencies` _[RoleRolloutDependency](#rolerolloutdependency) array_ | Dependencies defines rollout startup dependencies. A graph root waits for<br />target-version Ready capacity throughout its dependency closure before its<br />first target start. Internal Roles may start together; old dependency<br />capacity is retained while old callers remain. |  |  |
+
+
+#### RoleInstancePhase
+
+_Underlying type:_ _string_
+
+RoleInstancePhase is the phase of a Role instance recorded in the ledger.
+
+
+
+_Appears in:_
+- [RoleInstanceStatus](#roleinstancestatus)
+
+| Field | Description |
+| --- | --- |
+| `Creating` | RoleInstanceCreating is the zero value: the instance is being created. A<br />member that is missing is created, and nothing else is deleted.<br /> |
+| `Established` | RoleInstanceEstablished: all members of the instance were observed. A member<br />that is missing or terminating was lost and is recovered by the recovery policy.<br /> |
+| `Draining` | RoleInstanceDraining: every Pod of the instance whose generation is not<br />greater than the recorded one is being deleted.<br /> |
+
+
+#### RoleInstanceStatus
+
+
+
+RoleInstanceStatus is the ledger entry of one Role instance. Unlike the rest
+of the status it cannot be rebuilt from the Pods: it records what the
+controller has committed to.
+
+
+
+_Appears in:_
+- [ServingGroupStatus](#servinggroupstatus)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `role` _string_ | Role is the name of the Role. |  |  |
+| `index` _integer_ | Index is the ordinal of the instance within its Role. |  | Minimum: 0 <br /> |
+| `phase` _[RoleInstancePhase](#roleinstancephase)_ | Phase is Creating, Established or Draining. An absent phase means Creating. |  | Enum: [Creating Established Draining] <br /> |
+| `generation` _integer_ | Generation numbers the successive sets of Pods of the instance. A Pod carries<br />the generation it was created for in the instance-generation label. |  | Minimum: 0 <br /> |
 
 
 #### RoleRatioConstraint
@@ -1157,6 +1202,7 @@ to be recreated.
 
 _Appears in:_
 - [RolloutStrategy](#rolloutstrategy)
+- [ServingGroupRolloutStrategy](#servinggrouprolloutstrategy)
 
 | Field | Description |
 | --- | --- |
@@ -1180,6 +1226,151 @@ _Appears in:_
 | --- | --- |
 | `Or` |  |
 | `And` |  |
+
+
+#### ServingGroup
+
+
+
+ServingGroup is one replica of a ModelServing. It is named
+<ModelServing name>-<ordinal>, is owned by the ModelServing and owns the Pods,
+the PodGroup and the headless Services of the group. ServingGroups are created,
+updated and deleted by the ModelServing controller; a manual change of the spec
+is overwritten.
+
+
+
+_Appears in:_
+- [ServingGroupList](#servinggrouplist)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ServingGroup` | | |
+| `spec` _[ServingGroupSpec](#servinggroupspec)_ |  |  |  |
+| `status` _[ServingGroupStatus](#servinggroupstatus)_ |  |  |  |
+
+
+
+
+#### ServingGroupList
+
+
+
+ServingGroupList contains a list of ServingGroup
+
+
+
+
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `apiVersion` _string_ | `workload.serving.volcano.sh/v1alpha1` | | |
+| `kind` _string_ | `ServingGroupList` | | |
+| `items` _[ServingGroup](#servinggroup) array_ |  |  |  |
+
+
+#### ServingGroupRole
+
+
+
+ServingGroupRole carries the settings of one Role that are not part of a revision.
+
+
+
+_Appears in:_
+- [ServingGroupSpec](#servinggroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `name` _string_ | Name of the Role. |  |  |
+| `replicas` _integer_ | Replicas is the number of instances of the Role in this group. |  | Minimum: 0 <br /> |
+| `maxUnavailable` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxUnavailable of the Role, used under RoleRollingUpdate. |  | XIntOrString: \{\} <br /> |
+| `maxSurge` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | MaxSurge of the Role, used under RoleRollingUpdate. |  | XIntOrString: \{\} <br /> |
+| `partition` _[IntOrString](https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.33/#intorstring-intstr-util)_ | Partition of the Role, used under RoleRollingUpdate. |  | XIntOrString: \{\} <br /> |
+| `baselineReplicas` _integer_ | BaselineReplicas is the replica count of the Role recorded with the baseline<br />revision. Only a coordinated Role rolling update reads it. |  | Minimum: 0 <br /> |
+
+
+#### ServingGroupRolloutStrategy
+
+
+
+ServingGroupRolloutStrategy is the part of the ModelServing rollout strategy
+that takes effect inside one ServingGroup.
+
+
+
+_Appears in:_
+- [ServingGroupSpec](#servinggroupspec)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `type` _[RolloutStrategyType](#rolloutstrategytype)_ | Type is the rollout granularity of the ModelServing. |  | Enum: [ServingGroupRollingUpdate RoleRollingUpdate] <br /> |
+| `updateMethod` _[UpdateMethod](#updatemethod)_ | UpdateMethod is the update method that takes effect: InPlace only when the<br />ModelServing asks for it and its rollout budget and plugins allow it. |  | Enum: [Recreate InPlace] <br /> |
+| `progressDeadlineSeconds` _integer_ | ProgressDeadlineSeconds is the progress deadline of an in-place update. |  |  |
+| `roleCoordination` _[RoleCoordination](#rolecoordination)_ | RoleCoordination is the cross-Role coordination configuration. |  |  |
+
+
+#### ServingGroupSpec
+
+
+
+ServingGroupSpec is written by the ModelServing controller. It carries the
+revision of the group and the settings of the ModelServing that apply inside
+one group and are not part of a revision. Pod templates, plugins and the
+scheduler name are not copied here; they are read from the ControllerRevision
+of the revision.
+
+A revision is identified as in the status of the ModelServing and in the
+revision label of a Pod.
+
+No field has a schema default: the stored spec is exactly what the
+ModelServing controller wrote, so it can be compared with the desired spec.
+
+
+
+_Appears in:_
+- [ServingGroup](#servinggroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `revision` _string_ | Revision is the revision this group runs as a whole. It is set under<br />ServingGroupRollingUpdate and empty under RoleRollingUpdate. |  |  |
+| `targetRevision` _string_ | TargetRevision is the revision the Role instances of this group are rolled<br />to under RoleRollingUpdate. |  |  |
+| `baselineRevision` _string_ | BaselineRevision is a copy of the currentRevision of the ModelServing status.<br />Role instances protected by a Role partition are created from it, and the<br />ModelServing controller reads it back when its own status was lost. |  |  |
+| `sourceGeneration` _integer_ | SourceGeneration is the generation of the ModelServing this spec was derived<br />from. The ModelServing controller never replaces a spec with one derived from<br />a lower generation. |  |  |
+| `expectedPods` _integer_ | ExpectedPods is the number of Pods of the group when it is complete. It is the<br />replica count of the scale subresource. |  | Minimum: 0 <br /> |
+| `rolloutStrategy` _[ServingGroupRolloutStrategy](#servinggrouprolloutstrategy)_ | RolloutStrategy carries the rollout settings of the ModelServing that apply<br />inside a group. |  |  |
+| `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy is the recovery policy of the ModelServing. |  | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
+| `restartGracePeriodSeconds` _integer_ | RestartGracePeriodSeconds is the restart grace period of the ModelServing template. |  | Minimum: -1 <br /> |
+| `gangPolicy` _[GangPolicy](#gangpolicy)_ | GangPolicy is the gang scheduling configuration of the ModelServing template. |  |  |
+| `networkTopology` _[NetworkTopology](#networktopology)_ | NetworkTopology is the network topology configuration of the ModelServing template. |  |  |
+| `queueName` _string_ | QueueName is the scheduling queue of the PodGroup of the group. |  |  |
+| `roles` _[ServingGroupRole](#servinggrouprole) array_ | Roles carries, for every Role of the ModelServing template, the settings that<br />are not part of a revision. |  |  |
+
+
+#### ServingGroupStatus
+
+
+
+ServingGroupStatus is written by the ServingGroup controller.
+
+
+
+_Appears in:_
+- [ServingGroup](#servinggroup)
+
+| Field | Description | Default | Validation |
+| --- | --- | --- | --- |
+| `observedGeneration` _integer_ | ObservedGeneration is the generation of the spec the decisions behind this<br />status were made from. While it is lower than metadata.generation the<br />ModelServing controller does not rely on the conditions. |  |  |
+| `observedPods` _string_ | ObservedPods is a digest of the member Pods this status was computed from.<br />The ModelServing controller computes the same digest from its own view of the<br />Pods; while the two differ it does not rely on the conditions. |  |  |
+| `revision` _string_ | Revision is the revision that every Pod of the group runs, read from the<br />Pods and not from the spec. It is empty when the Pods run different<br />revisions or the group has no Pod. |  |  |
+| `referencedRevisions` _string array_ | ReferencedRevisions lists every revision referenced by a Pod of the group,<br />including terminating Pods. ControllerRevisions listed here are retained. |  |  |
+| `pods` _integer_ | Pods is the number of Pods of the group, including terminating Pods and Pods<br />the controller has decided to create but not created yet. A group with zero<br />Pods here and no member Pod has no member: its revision can still be changed<br />without replacing anything. |  |  |
+| `readyPods` _integer_ | ReadyPods is the number of member Pods that are running and ready. For display. |  |  |
+| `faultyMembers` _integer_ | FaultyMembers is the number of member Pods that are in a terminal phase or in<br />a restart failure that counts as a fault. For display. |  |  |
+| `terminatingPods` _integer_ | TerminatingPods is the number of member Pods that are being deleted. For display. |  |  |
+| `labelSelector` _string_ | LabelSelector selects the Pods of the group. It is the selector of the scale subresource. |  |  |
+| `roleInstances` _[RoleInstanceStatus](#roleinstancestatus) array_ | RoleInstances is the ledger: one entry for every Role instance the controller<br />has started to create and not finished removing. |  |  |
 
 
 #### ServingGroupTemplate
@@ -1262,6 +1453,7 @@ UpdateMethod defines how outdated Pods are moved to the desired revision.
 
 _Appears in:_
 - [RolloutStrategy](#rolloutstrategy)
+- [ServingGroupRolloutStrategy](#servinggrouprolloutstrategy)
 
 | Field | Description |
 | --- | --- |

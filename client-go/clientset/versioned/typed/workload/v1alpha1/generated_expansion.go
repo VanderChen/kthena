@@ -23,3 +23,5 @@ type AutoscalingPolicyExpansion interface{}
 type ModelBoosterExpansion interface{}
 
 type ModelServingExpansion interface{}
+
+type ServingGroupExpansion interface{}

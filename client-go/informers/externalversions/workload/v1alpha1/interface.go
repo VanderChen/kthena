@@ -30,6 +30,8 @@ type Interface interface {
 	ModelBoosters() ModelBoosterInformer
 	// ModelServings returns a ModelServingInformer.
 	ModelServings() ModelServingInformer
+	// ServingGroups returns a ServingGroupInformer.
+	ServingGroups() ServingGroupInformer
 }
 
 type version struct {
@@ -56,4 +58,9 @@ func (v *version) ModelBoosters() ModelBoosterInformer {
 // ModelServings returns a ModelServingInformer.
 func (v *version) ModelServings() ModelServingInformer {
 	return &modelServingInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// ServingGroups returns a ServingGroupInformer.
+func (v *version) ServingGroups() ServingGroupInformer {
+	return &servingGroupInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

@@ -31,6 +31,7 @@ type WorkloadV1alpha1Interface interface {
 	AutoscalingPoliciesGetter
 	ModelBoostersGetter
 	ModelServingsGetter
+	ServingGroupsGetter
 }
 
 // WorkloadV1alpha1Client is used to interact with features provided by the workload.serving.volcano.sh group.
@@ -48,6 +49,10 @@ func (c *WorkloadV1alpha1Client) ModelBoosters(namespace string) ModelBoosterInt
 
 func (c *WorkloadV1alpha1Client) ModelServings(namespace string) ModelServingInterface {
 	return newModelServings(c, namespace)
+}
+
+func (c *WorkloadV1alpha1Client) ServingGroups(namespace string) ServingGroupInterface {
+	return newServingGroups(c, namespace)
 }
 
 // NewForConfig creates a new WorkloadV1alpha1Client for the given config.

@@ -41,6 +41,7 @@ func Resource(resource string) schema.GroupResource {
 var (
 	ModelServingKind                = SchemeGroupVersion.WithKind("ModelServing")
 	ModelServingListKind            = SchemeGroupVersion.WithKind("ModelServingList")
+	ServingGroupKind                = SchemeGroupVersion.WithKind("ServingGroup")
 	ModelKind                       = SchemeGroupVersion.WithKind("ModelBooster")
 	AutoscalingPolicyKind           = SchemeGroupVersion.WithKind("AutoscalingPolicy")
 	ModelServingEntryPodLeaderLabel = "leader"
@@ -67,6 +68,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&ModelServing{},
 		&ModelServingList{},
+		&ServingGroup{},
+		&ServingGroupList{},
 		&ModelBooster{},
 		&ModelBoosterList{},
 		&AutoscalingPolicy{},

@@ -160,6 +160,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RoleApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleCoordination"):
 		return &applyconfigurationworkloadv1alpha1.RoleCoordinationApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleInstanceStatus"):
+		return &applyconfigurationworkloadv1alpha1.RoleInstanceStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioConstraint"):
 		return &applyconfigurationworkloadv1alpha1.RoleRatioConstraintApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RoleRatioStatus"):
@@ -172,6 +174,16 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationworkloadv1alpha1.RollingUpdateConfigurationApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("RolloutStrategy"):
 		return &applyconfigurationworkloadv1alpha1.RolloutStrategyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroup"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupRole"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupRoleApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupRolloutStrategy"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupRolloutStrategyApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupSpec"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupSpecApplyConfiguration{}
+	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupStatus"):
+		return &applyconfigurationworkloadv1alpha1.ServingGroupStatusApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("ServingGroupTemplate"):
 		return &applyconfigurationworkloadv1alpha1.ServingGroupTemplateApplyConfiguration{}
 	case workloadv1alpha1.SchemeGroupVersion.WithKind("Target"):

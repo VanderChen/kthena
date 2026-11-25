@@ -41,3 +41,11 @@ type ModelServingListerExpansion interface{}
 // ModelServingNamespaceListerExpansion allows custom methods to be added to
 // ModelServingNamespaceLister.
 type ModelServingNamespaceListerExpansion interface{}
+
+// ServingGroupListerExpansion allows custom methods to be added to
+// ServingGroupLister.
+type ServingGroupListerExpansion interface{}
+
+// ServingGroupNamespaceListerExpansion allows custom methods to be added to
+// ServingGroupNamespaceLister.
+type ServingGroupNamespaceListerExpansion interface{}
