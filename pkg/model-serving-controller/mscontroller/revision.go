@@ -24,7 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // recorded is the target revision that was resolved for one generation of a
@@ -89,10 +91,21 @@ func (c *Controller) forget(uid types.UID) {
 // there is no such group. That is what an earlier version would have written
 // into the status with its next round; it is only missing when that version
 // was stopped before it got there.
+//
+// Only Pods that would be taken over count, and only a revision of this
+// ModelServing that can be read: Pods that a ModelServing of the same name
+// left behind, which was deleted since, run revisions this one never had. A
+// baseline taken from them could not be created from, and nothing below a
+// partition would ever become ready.
 func (c *Controller) legacyBaseline(ms *workloadv1alpha1.ModelServing, target string) string {
+	parent := servinggroup.ParentOf(ms)
+	history := workload.NewHistory(ms, c.caches.ControllerRevision)
 	revisions := map[string]map[string]bool{}
 	for _, pod := range c.caches.UnadoptedPodsOf(ms.Namespace, ms.Name) {
 		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if !servinggroup.MembershipOf(pod, group, "", parent).Adoptable() {
+			continue
+		}
 		if revisions[group] == nil {
 			revisions[group] = map[string]bool{}
 		}
@@ -104,7 +117,10 @@ func (c *Controller) legacyBaseline(ms *workloadv1alpha1.ModelServing, target st
 			continue
 		}
 		for revision := range of {
-			if revision != "" && revision != target {
+			if revision == "" || revision == target {
+				continue
+			}
+			if _, err := history.At(revision); err == nil {
 				count[revision]++
 			}
 		}

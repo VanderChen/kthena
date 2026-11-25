@@ -340,3 +340,44 @@ func TestTheBaselineOfAnEarlierVersionIsReadFromItsPods(t *testing.T) {
 		t.Errorf("revisions = %s, %s", status.CurrentRevision, status.UpdateRevision)
 	}
 }
+
+// Pods that a ModelServing of the same name left behind, which was deleted
+// since, are not the Pods of this one, and the revision they run is none of
+// its revisions. They say nothing about its baseline: a baseline taken from
+// them could not be created from.
+func TestTheBaselineIsNotReadFromPodsOfAnotherModelServing(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		// recorded: this ModelServing has the revision the Pods run.
+		recorded bool
+		alter    func(*corev1.Pod)
+	}{
+		{name: "Pods that a ModelServing of the same name controlled", recorded: true,
+			alter: func(pod *corev1.Pod) { pod.OwnerReferences[0].UID = "previous-ms-uid" }},
+		{name: "Pods that are being deleted", recorded: true, alter: func(pod *corev1.Pod) {
+			pod.DeletionTimestamp, pod.Finalizers = ptr.To(metav1.Now()), []string{"example.com/hold"}
+		}},
+		{name: "Pods of a revision this ModelServing does not have", alter: func(*corev1.Pod) {}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ms := modelServing(rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
+				config.Partition = ptr.To(intstr.FromInt32(1))
+			}))
+			ms.UID = "ms-uid"
+			objects := []runtime.Object{ms}
+			if tt.recorded {
+				objects = append(objects, legacyRevision(t, ms, "rev-of-another", false))
+			}
+			for _, object := range legacyPods(ms, 1, "rev-of-another", "model:other", false) {
+				tt.alter(object.(*corev1.Pod))
+				objects = append(objects, object)
+			}
+			s := newSystem(t, objects...)
+			caches, snapshot := s.caches()
+			s.ms.SetCaches(caches, snapshot.Listers().Services)
+			if got := s.ms.legacyBaseline(ms, "rev-target"); got != "rev-target" {
+				t.Errorf("baseline = %q, want the target: nothing of this ModelServing runs anything else", got)
+			}
+		})
+	}
+}
