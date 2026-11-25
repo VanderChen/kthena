@@ -28,13 +28,10 @@ import (
 	apiextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apiextinformers "k8s.io/apiextensions-apiserver/pkg/client/informers/externalversions"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
@@ -44,7 +41,6 @@ import (
 	volcanoschedulerlister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
-	"github.com/volcano-sh/kthena/pkg/model-serving-controller/datastore"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -160,10 +156,6 @@ func (m *Manager) handlePodGroupCRDDelete(obj interface{}) {
 	m.handlePodGroupCRDChange(crd, true)
 }
 
-func (m *Manager) HasPodGroupCRD() bool {
-	return m.hasPodGroupCRD.Load()
-}
-
 func (m *Manager) GetPodGroupInformer() cache.SharedIndexInformer {
 	m.lock.Lock()
 	defer m.lock.Unlock()
@@ -240,33 +232,6 @@ func (m *Manager) stopPodGroupInformer() {
 	}
 }
 
-// CreateOrUpdatePodGroup creates a PodGroup for the given ServingGroup if it doesn't exist,
-// or updates it if it does.
-// Returns an error and a requeue duration if there is an error.
-func (m *Manager) CreateOrUpdatePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, pgName string) (error, time.Duration) {
-	if !m.shouldCreatePodGroup(ms) {
-		return nil, 0
-	}
-
-	podGroupLister := m.GetPodGroupLister()
-	if podGroupLister == nil {
-		return errPodGroupInformerNotInitialized, enqueueAfter
-	}
-	podGroup, err := podGroupLister.PodGroups(ms.Namespace).Get(pgName)
-	if err != nil {
-		if !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to get PodGroup %s: %v", pgName, err), 0
-		}
-		return m.createPodGroup(ctx, ms, pgName), 0
-	}
-
-	if !utils.IsOwnedByModelServingWithUID(podGroup, ms.UID) {
-		return fmt.Errorf("PodGroup %s is not owned by ModelServing %s", pgName, ms.Name), enqueueAfter
-	}
-
-	return m.updatePodGroupIfNeeded(ctx, podGroup, ms), 0
-}
-
 // shouldCreatePodGroup checks if gang scheduling or networkTopology scheduling is enabled for the ModelServing.
 // These advanced scheduling features are only effective when used with the "volcano" scheduler.
 func (m *Manager) shouldCreatePodGroup(ms *workloadv1alpha1.ModelServing) bool {
@@ -287,66 +252,6 @@ func extractQueueName(ms *workloadv1alpha1.ModelServing) string {
 	}
 
 	return ms.Annotations[schedulingv1beta1.QueueNameAnnotationKey]
-}
-
-// createPodGroup creates a PodGroup for group-level gang scheduling
-func (m *Manager) createPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, podGroupName string) error {
-	// Calculate total pods and resources for this ServingGroup
-	// minMember: total pods across all roles
-	// minRoleMember: map of roleName to number of pods in that role
-	// minResources: aggregated resource requirements of all pods in the ServingGroup
-	minMember, minRoleMember, minResources := m.calculateRequirements(ms)
-
-	podGroup := &schedulingv1beta1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podGroupName,
-			Namespace: ms.Namespace,
-			Labels: map[string]string{
-				workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-				workloadv1alpha1.GroupNameLabelKey:        podGroupName,
-			},
-			Annotations: map[string]string{
-				schedulingv1beta1.KubeGroupNameAnnotationKey: podGroupName,
-			},
-			OwnerReferences: m.buildOwnerReference(ms),
-		},
-		Spec: schedulingv1beta1.PodGroupSpec{
-			MinMember:    int32(minMember),
-			MinResources: &minResources,
-		},
-	}
-
-	// Inherit queue name from ModelServing annotations if configured.
-	if queue := extractQueueName(ms); queue != "" {
-		podGroup.Spec.Queue = queue
-	}
-
-	syncPodGroupNetworkTopology(ms, &podGroup.Spec)
-
-	if m.hasSubGroupPolicy.Load() {
-		podGroup = appendSubGroupPolicy(ms, podGroup, minRoleMember)
-	}
-
-	_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Create(ctx, podGroup, metav1.CreateOptions{})
-	if err != nil && !apierrors.IsAlreadyExists(err) {
-		return err
-	}
-
-	klog.V(2).Infof("Created PodGroup %s for group-level gang scheduling", podGroupName)
-	return nil
-}
-
-// To build ownerReferences of PodGroup
-func (m *Manager) buildOwnerReference(ms *workloadv1alpha1.ModelServing) []metav1.OwnerReference {
-	return []metav1.OwnerReference{
-		{
-			APIVersion: workloadv1alpha1.GroupVersion.String(),
-			Kind:       workloadv1alpha1.ModelServingKind.Kind,
-			Name:       ms.Name,
-			UID:        ms.UID,
-			Controller: ptr.To(true),
-		},
-	}
 }
 
 // calculateRequirements calculates requirements for role-level gang scheduling
@@ -411,142 +316,6 @@ func (m *Manager) aggregateResources(total corev1.ResourceList, podSpec *corev1.
 // GenerateTaskName generates task name
 func (m *Manager) GenerateTaskName(roleName string, roleIndex int) string {
 	return fmt.Sprintf("%s-%d", roleName, roleIndex)
-}
-
-// getExistingPodGroups gets existing PodGroups for a ModelServing
-func (m *Manager) getExistingPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) (map[string]*schedulingv1beta1.PodGroup, error) {
-	selector := labels.SelectorFromSet(map[string]string{
-		workloadv1alpha1.ModelServingNameLabelKey: ms.Name,
-	})
-
-	if podGroupLister := m.GetPodGroupLister(); podGroupLister != nil {
-		podGroups, err := podGroupLister.PodGroups(ms.Namespace).List(selector)
-		if err != nil {
-			return nil, err
-		}
-
-		result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroups))
-		for _, pg := range podGroups {
-			result[pg.Name] = pg
-		}
-
-		return result, nil
-	}
-
-	podGroupList, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string]*schedulingv1beta1.PodGroup, len(podGroupList.Items))
-	for i := range podGroupList.Items {
-		pg := &podGroupList.Items[i]
-		result[pg.Name] = pg
-	}
-
-	return result, nil
-}
-
-// updatePodGroupIfNeeded updates a PodGroup if needed for group-level scheduling
-func (m *Manager) updatePodGroupIfNeeded(ctx context.Context, existing *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		// Get latest podgroup from informer store
-		podGroupLister := m.GetPodGroupLister()
-		if podGroupLister == nil {
-			return errPodGroupInformerNotInitialized
-		}
-		currentPodGroup, getErr := podGroupLister.PodGroups(existing.GetNamespace()).Get(existing.GetName())
-		if getErr != nil {
-			return getErr
-		}
-
-		// Calculate current requirements
-		minMember, minRoleMember, minResources := m.calculateRequirements(ms)
-
-		updated := currentPodGroup.DeepCopy()
-		updated.Spec.MinMember = int32(minMember)
-		updated.Spec.MinResources = &minResources
-
-		// Preserve the server-assigned queue unless ModelServing explicitly overrides it.
-		if queue := extractQueueName(ms); queue != "" {
-			updated.Spec.Queue = queue
-		}
-
-		syncPodGroupNetworkTopology(ms, &updated.Spec)
-
-		// Apply network topology policy
-		if m.hasSubGroupPolicy.Load() {
-			updated = appendSubGroupPolicy(ms, updated, minRoleMember)
-		}
-
-		if hasPodGroupChanged(currentPodGroup, updated) {
-			_, err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
-			if err != nil {
-				return err
-			}
-			klog.V(2).Infof("Updated PodGroup %s for group-level gang scheduling", currentPodGroup.Name)
-		}
-
-		return nil
-	})
-}
-
-func (m *Manager) DeletePodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, servingGroupName string) error {
-	if !m.hasPodGroupCRD.Load() {
-		return nil
-	}
-
-	if err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, servingGroupName, metav1.DeleteOptions{}); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-// cleanupPodGroups cleans up all PodGroups for a ModelServing
-func (m *Manager) CleanupPodGroups(ctx context.Context, ms *workloadv1alpha1.ModelServing) error {
-	existingPodGroups, err := m.getExistingPodGroups(ctx, ms)
-	if err != nil {
-		return fmt.Errorf("failed to get existing PodGroups for cleanup: %v", err)
-	}
-
-	for _, podGroup := range existingPodGroups {
-		err := m.volcanoClient.SchedulingV1beta1().PodGroups(ms.Namespace).Delete(ctx, podGroup.Name, metav1.DeleteOptions{})
-		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("failed to delete PodGroup %s: %v", podGroup.Name, err)
-		}
-		klog.V(2).Infof("Deleted PodGroup %s (gang scheduling disabled)", podGroup.Name)
-	}
-
-	return nil
-}
-
-// calculateRequiredRoleNames is used in Role scale up scenario to get the roleName list that need scale up.
-// Therefore, the default value for `expectedReplicas` is greater than `length(RoleList)`.
-// Or the Role update scenario. (This scenario is This scenario is relatively rare. Since it is not permitted to modify an already configured gangPolicy,
-// and in practical applications, the workerReplicas within a deployed role are rarely altered.)
-func calculateRequiredRoleNames(expectedReplicas int, existRoleList []datastore.Role, roleName string) []datastore.Role {
-	maxIndex := -1
-	if len(existRoleList) > 0 {
-		// As the existRoleList is already sorted in ascending order by index, the maxIndex represents the index of the last role.
-		_, maxIndex = utils.GetParentNameAndOrdinal(existRoleList[len(existRoleList)-1].Name)
-	}
-
-	toCreate := expectedReplicas - len(existRoleList)
-	if toCreate <= 0 {
-		return existRoleList
-	}
-
-	for i := 0; i < toCreate; i++ {
-		newIndex := maxIndex + 1 + i
-		existRoleList = append(existRoleList, datastore.Role{
-			Name: utils.GenerateRoleID(roleName, newIndex),
-		})
-	}
-	return existRoleList
 }
 
 // AnnotatePodWithPodGroup annotates a pod with the appropriate PodGroup information
@@ -628,10 +397,6 @@ func syncPodGroupNetworkTopology(ms *workloadv1alpha1.ModelServing, spec *schedu
 		return
 	}
 	spec.NetworkTopology = nil
-}
-
-func hasPodGroupChanged(current, updated *schedulingv1beta1.PodGroup) bool {
-	return !apiequality.Semantic.DeepEqual(current.Spec, updated.Spec)
 }
 
 func appendSubGroupPolicy(ms *workloadv1alpha1.ModelServing, podGroup *schedulingv1beta1.PodGroup, minRoleMember map[string]int32) *schedulingv1beta1.PodGroup {
