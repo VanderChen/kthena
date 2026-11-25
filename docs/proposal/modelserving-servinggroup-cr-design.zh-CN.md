@@ -901,6 +901,17 @@ ModelServing controller 每一轮先把当前模板记成 ControllerRevision，�
 | `observedGeneration` 的含义、plugin 钩子的四点、Role 一级沿用组一级的规则、九个小项（U-4、U-5、U-7、U-8） | 设计的直接后果，或者上游就有而没有写明。写进升级指南和 1.4（I-59） |
 | 上游就已经没有人引用的四个 `utils` 函数 | 不删（I-57） |
 
+### 9A.3 行为规范测试之后
+
+runner 在 `258927f7` 的构建上跑了 220 例，与变更前的基线逐例对比，查出下面几处。前三处是回归，都修了；第四处是加固；第五处没有改，见第 10 章。
+
+| 规则 | 没有它会怎样 | 来源 | 测试 |
+| --- | --- | --- | --- |
+| 「同名的上一个对象还留着 Pod 就不建成员」这个判断要在直读上做（3.5） | Pod 的删除事件没有到达缓存时（watch 丢事件），新的组永远停在 `NameOccupied` | runner F6（`lost-deletion` RUN-443…445）；I-63 | `sgcontroller.TestAPodOfAnEarlierObjectThatIsGoneDoesNotHoldTheGroup` |
+| ModelServing（generation 比组的 `spec.sourceGeneration` 新）声明的某个 Role 的实例数比组被告知的少时，组不建这个 Role 的实例；取两个数里保守的一个，与恢复策略的取法相同（4.2） | 组的 `spec` 比 ModelServing 晚一步到。controller 停着的时候用户调小了副本数，新进程起来时组里还是旧的数，丢掉的实例被照旧的数建回来，随后又被删掉：要 3 个而一度有 5 个 | runner F10（`boundary-sparse` RUN-584、589，`history-sparse` RUN-498，基线上通过）；I-64 | `sgcontroller.TestNoInstanceIsCreatedFromACountTheModelServingHasLowered` |
+| 同一轮里离开的同一个 Role 的实例，按序号从大到小删 | 上游和契约 2.2 都是降序；原先按升序发 DELETE | runner F7（`boundary-numeric` RUN-560）；I-65 | `sgcontroller.TestInstancesOfABatchLeaveInDescendingOrder` |
+| ModelServing controller 的一轮在每个写之前看一眼缓存：ModelServing 的 generation 已经变了就结束这一轮，不写 `status`，下一轮在新的 `spec` 上计划 | 一轮是在读到的 ModelServing 上计划的，写是一个一个发的。中间用户改了模板，剩下的写照旧发出去：新的要求被接受几十毫秒之后，还按旧版本建出一个组，随后要再换掉。窗口缩到 informer 送达变更的那几毫秒，没有消除 | runner F8（`servinggroup-compound-v2` RUN-637，三次里失败两次；基线上也失败）；I-66 | `mscontroller.TestARoundStopsWritingWhenTheModelServingHasChanged` |
+
 ## 10. 没有解决的
 
 | 项 | 内容 |
@@ -913,6 +924,7 @@ ModelServing controller 每一轮先把当前模板记成 ControllerRevision，�
 | 重启故障的 grace 在新进程里重新计 | D9。重启的间隔一直短于 grace 时一直不恢复 |
 | 回退与换主重叠 | 交还之前等的是本进程里各组的轮次（6.8 的读写锁）。失主的旧进程发出去而还没落地的那一个写不在其中；靠失主退出把窗口压到一次请求 |
 | 组被整个删除时的 `OnRoleDelete` | 只是尽力，并且只对前台删除的组调（7.2）：对象可能在调用它的那一轮之前就没了，也可能被调不止一次。plugin 为组建的资源要以组为 owner |
+| 不就绪的 surge 组在正式的组还没补齐时就被回收（runner F9，`grace-restart` RUN-431，基线上通过）| `N=3`、`maxSurge=1`、`maxUnavailable=1`，surge 组一直不就绪。最后一个旧组开始终止、它的替代还没建出来的时候，controller 把 surge 组删掉了，新的 0 号组建出来之前只有两个组。可用的组数没有低于下限。这是组一级规则 G3b（「确认不就绪的 surge 组立刻回收」），实现与参考模型的 17,504 个向量逐项一致；runner 的账本认为「目标版本的组在不多余的时候被删掉」是违反。上游在滚动完成之前留着它。改成「只在组数多于 N 时回收不就绪的 surge 组」会与参考模型有 201 个向量不同，要连模型一起改。这是一处没有被已批准的条款覆盖的行为差别，留给用户裁决（I-67） |
 | roleCoordination 的两种停住，condition 不说 | 都是从上游逐字搬来的规则带来的，上游读代码也是这样；第二轮评审用临时测试复现过（R2-S7）。改规则会改变契约约束的行为，不在这次批准的范围里，原样保留。(1) 一个序号较低的旧版本实例未就绪，又不算故障（没有 `Failed`，没有计划外的重启），恢复不会动它。协调只按序号从高到低放行旧实例的替换，低序号的不越过还在等的高序号的；比它序号高的旧实例要占健康的额度，而额度被这个未就绪的实例占着（比如 `maxUnavailable` 是 1）。于是每一轮都不换任何实例。(2) 某个参加协调的 Role，基线和目标对它渲染相同，它名下却有中间版本的实例（上一次滚动没做完又改了模板留下的）。协调按「这个 Role 的模板没有变」算，给它的替换额度是 0，这些实例一直留在中间版本。两种情形下 `CoordinatedRoleRolloutBlocked` 都不是真，reason 是 `ProgressAvailable`（「可以推进」），没有 reason 说它在等什么。两种情形各自为什么停住，是读 `roleplan.go` 的 `constrain` 和 `coordination.go` 的 `calculateRoleRolloutLimits` 得出的，评审记录里只写了这两种状态 |
 | 只做删除的轮次里，这一轮自己发起的排空照做 | 没有 PodGroup 的轮次（同步不上，或者布局读不出来）不建、不打补丁，但是这一轮写下的 Draining 照样删 Pod：实例恢复、Role 的滚动替换、Role 的缩容都是这样。PodGroup 一直同步不上的话，清空了的实例要等它恢复才建得回来。接受：已经失败的组要靠这条路清空才能被替换（3.7） |
 | Pod 模板的协议标签是必需的 | 进程给自己的 Pod 补标签只是兜底（6.3 的 X1）。Deployment 的 Pod 模板上没有 `modelserving.volcano.sh/controller-protocol: servinggroup` 时，每个新副本从被建出来到它的进程补上标签为止没有标签；正在工作的主把它当成旧版本，退出，等它补上标签再重新参选。扩副本、滚动重启、节点故障后的重建都会这样。chart 和发布的清单带着这个标签；自己写清单部署的，升级指南写明要加 |
