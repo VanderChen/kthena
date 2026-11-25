@@ -145,6 +145,10 @@ func (c *Controller) decide(obs observation, now time.Time) *round {
 	identity := servinggroup.ParentOf(parent)
 	r.members = servinggroup.Members(obs.pods, group.Name, group.UID, identity)
 	r.predecessors = predecessors(obs.pods, group)
+	// Holding back for a Pod of an earlier object rests on that Pod being
+	// there. A deletion the cache never heard of would hold the group back for
+	// good: the round is decided again on a direct read.
+	r.confirm = len(r.predecessors) > 0
 	// An in-place update that ran past its progress deadline is a fault of the
 	// Pods that keep it from finishing.
 	r.deadlines = servinggroup.CheckInPlaceDeadlines(group, r.members, recovery.Enabled, now)

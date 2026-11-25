@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -363,6 +364,41 @@ func (c *Controller) readDirect(ctx context.Context, obs observation) (observati
 	return observation{group: group, parent: parent, pods: pods}, true, nil
 }
 
+// withoutOutdatedCounts drops the creations for the Roles of which the
+// ModelServing now declares fewer instances than the spec of the group does.
+//
+// The spec of a group is handed down by the ModelServing controller, a moment
+// after the ModelServing changed. Until then the group knows the count it was
+// told before. Acting on it is harmless except for creating: an instance that
+// was lost is created again although the ModelServing asks for fewer, and
+// taken away right after. The more cautious of the two counts decides. The
+// group is told the new count soon, and that brings the next round.
+func withoutOutdatedCounts(r *round, creations []creation) []creation {
+	group, parent := r.group, r.parent
+	if len(creations) == 0 || parent.Generation <= group.Spec.SourceGeneration {
+		return creations
+	}
+	declared := map[string]int32{}
+	for _, role := range parent.Spec.Template.Roles {
+		declared[role.Name] = workload.RoleReplicas(role)
+	}
+	told := map[string]int32{}
+	for _, role := range group.Spec.Roles {
+		told[role.Name] = role.Replicas
+	}
+	kept := creations[:0:0]
+	for _, creation := range creations {
+		role := creation.step.key.Role
+		if declared[role] < told[role] {
+			klog.V(2).InfoS("No instance of a Role is created: the ModelServing declares fewer than the group was told, and the group has not been told yet",
+				"servingGroup", klog.KObj(group), "role", role, "told", told[role], "declared", declared[role])
+			continue
+		}
+		kept = append(kept, creation)
+	}
+	return kept
+}
+
 // creation is the members one step creates.
 type creation struct {
 	step     *instanceStep
@@ -466,6 +502,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	// of an object that was deleted without waiting for them are gone, or
 	// released and adopted, before a member is created. Creating each member
 	// as soon as its own name is free would mix the two.
+	creations = withoutOutdatedCounts(r, creations)
 	var predecessorFailure error
 	if len(r.predecessors) > 0 && len(creations) > 0 {
 		creations = nil
@@ -533,8 +570,22 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 //
 // deletionsOnly ends it after the deletions: the round has no PodGroup.
 func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.ServingGroup, owner metav1.OwnerReference, creations []creation, now time.Time, deletionsOnly bool) error {
+	// The instances of a Role that leave in one round leave in descending
+	// order of their index, as they are chosen.
+	leaving := make([]*instanceStep, 0, len(r.steps))
 	for i := range r.steps {
-		for _, pod := range r.steps[i].step.Delete {
+		if len(r.steps[i].step.Delete) > 0 {
+			leaving = append(leaving, &r.steps[i])
+		}
+	}
+	sort.SliceStable(leaving, func(a, b int) bool {
+		if leaving[a].key.Role != leaving[b].key.Role {
+			return leaving[a].key.Role < leaving[b].key.Role
+		}
+		return leaving[a].key.Index > leaving[b].key.Index
+	})
+	for _, s := range leaving {
+		for _, pod := range s.step.Delete {
 			if err := c.deletePod(ctx, pod); err != nil {
 				return fmt.Errorf("delete Pod %s: %w", pod.Name, err)
 			}
