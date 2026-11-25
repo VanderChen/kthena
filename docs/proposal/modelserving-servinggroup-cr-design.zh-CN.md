@@ -796,12 +796,17 @@ roleCoordination 另有一条，与变更前相同：配了依赖、调度器是
 
 ModelServing controller 每一轮先把当前模板记成 ControllerRevision，由此得到目标版本。这次写被拒绝时没有目标版本，不能建、也不能换任何东西。副本数的减少不需要模板，照做。这是上游的 `scaleDownOnRevisionError`，搬成 `mscontroller` 里一个受限的轮次（决策 I-56）：
 
-- 组：多于 `replicas` 的删到 `replicas`。`ServingGroupRollingUpdate`、不是原地更新时另留出配置的 `maxSurge`：目标读不出来，不能断定 surge 的组已经没有用。
-- Role 实例：没有配 `roleCoordination` 的 ModelServing，Role 副本数调小的部分照做。配了的不做：多出来的实例可能是协调滚动的 surge，不能绕过协调的检查。
-- 不建任何东西，不替换任何东西。
-- 在 ModelServing 上发 Warning 事件 `RevisionUnresolved`，这一轮按出错返回，由队列重试，到版本记得下来为止。
+受限的一轮（`mscontroller/scalein.go`）用上一次记下来的目标（`status.updateRevision`）顶替缺的那个来做计划，计划里只留「把组数减下去」的删除，别的动作都丢掉：
 
-第一版在版本记不下来时整轮直接返回，缩容也不做。上游有专门的测试断言缩容照做，提案阶段的分析已经指出设计里缺这一条（旧代码覆盖表的 MB-1）。
+- 组：多于 `replicas` 的删到 `replicas`。`ServingGroupRollingUpdate`、不是原地更新、`replicas` 大于 0 时另留出配置的 `maxSurge`：目标读不出来，不能断定 surge 的组已经没有用。先删正式的组，带 surge 标记的排在后面；`replicas` 为 0 时全部删掉，带标记的也删。删除之前照常直读、在读到的东西上重新计划。
+- Role 实例：没有配 `roleCoordination` 的 ModelServing，留下的每个组里 Role 的副本数调小的部分下发（只改这个数、与之对应的 `expectedPods` 和 `sourceGeneration`），partition 之下的组也一样：副本数不属于版本，正常的一轮也把当前的数下发给每个组。调大的、新增或去掉的 Role 不下发。组自己的版本读不出来时不动它，在错误里点名。配了 `roleCoordination` 的不动：多出来的实例可能是协调滚动的 surge，不能绕过协调的检查。
+- 不建任何东西，不替换任何东西，不改任何组的版本，不写 ModelServing 的 `status`（`observedGeneration` 留在后面）。
+- 在 ModelServing 上发 Warning 事件 `RevisionUnresolved`，每个 generation 每个进程一次。这一轮总是按出错返回（版本的错误连同缩容中出的错），由队列重试，到版本记得下来为止。
+- 不做的情形：从来没有记下过目标（`status.updateRevision` 为空或读不出来）；存量还没有接管完（接管注解不是 `Done`）；`maxSurge` 或 partition 解析不出来。
+
+与上游的差别：上游在 Role 逐个滚动时给 Role 留 `replicas + maxSurge` 个实例，这里下发确切的数，组在自己的滚动还需要时留着带 surge 标记的实例；上游在 `maxSurge` 写错时仍然下调 Role，这里整轮不做；「算出来的名字上已有一个内容不同的 ControllerRevision」在上游是错误，这里按碰撞换名记下来，是正常的一轮。
+
+第一版在版本记不下来时整轮直接返回，缩容也不做。上游有专门的测试断言缩容照做，提案阶段的分析已经指出设计里缺这一条（旧代码覆盖表的 MB-1、GAP-9）。测试在 `mscontroller/scalein_test.go`，18 个，逐条对应上面的规则，也断言这期间没有 `create servinggroups`、没有 `create pods`、没有改版本的写。
 
 ## 8. 测试和验收
 
