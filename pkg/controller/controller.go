@@ -28,7 +28,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/kube"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
-	modelserving "github.com/volcano-sh/kthena/pkg/model-serving-controller/controller"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/lws"
 	msmanager "github.com/volcano-sh/kthena/pkg/model-serving-controller/manager"
 	apiextclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -83,7 +83,7 @@ func SetupController(ctx context.Context, cc Config) {
 
 	var mc *modelbooster.ModelBoosterController
 	var msm *msmanager.Manager
-	var lwsc *modelserving.LWSController
+	var lwsc *lws.LWSController
 	var ac *autoscaler.AutoscaleController
 
 	for ctrl, enable := range cc.Controllers {
@@ -96,7 +96,7 @@ func SetupController(ctx context.Context, cc Config) {
 				if err != nil {
 					klog.Fatalf("failed to create ModelServing controllers: %v", err)
 				}
-				lwsc, err = modelserving.InitializeLWSController(config, kubeClient, client)
+				lwsc, err = lws.InitializeLWSController(config, kubeClient, client)
 				if err != nil {
 					klog.Errorf("Failed to initialize LWS controller: %v", err)
 				} else if lwsc == nil {
