@@ -463,6 +463,79 @@ func TestServingGroupRecreateReplacesGroupObject(t *testing.T) {
 	utils.WaitForModelServingReady(t, ctx, kthenaClient, testNamespace, ms.Name)
 }
 
+// TestServingGroupSurgePromotedByScaleUp verifies that the temporary ServingGroup of a rolling
+// update with maxSurge becomes a regular replica when the ModelServing is scaled up to its
+// ordinal: the surge mark is removed from the group and from its Pods, and the Pods stay.
+func TestServingGroupSurgePromotedByScaleUp(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const replicas = 2
+	gate := corev1.PodConditionType("kthena.e2e/surge-ready")
+	modelServing := createBasicModelServing("test-sg-surge-promotion", replicas, 0)
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable = ptr.To(intstr.FromInt(0))
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge = ptr.To(intstr.FromInt(1))
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.TerminationGracePeriodSeconds = ptr.To(int64(1))
+	t.Logf("Creating ModelServing with %d replicas, maxUnavailable=0 and maxSurge=1", replicas)
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+	waitForServingGroups(t, ctx, kthenaClient, ms, replicas)
+
+	// With maxUnavailable 0 no old group is replaced before the surge group is Ready, and the
+	// readiness gate of the new template keeps it from being Ready: the update stands there.
+	t.Log("Starting a rolling update whose surge ServingGroup waits behind a readiness gate")
+	updateModelServingWithRetry(t, ctx, kthenaClient, ms.Name, func(current *workload.ModelServing) {
+		current.Spec.Template.Roles[0].EntryTemplate.Spec.ReadinessGates = []corev1.PodReadinessGate{{ConditionType: gate}}
+	})
+	surgeName := controllerutils.GenerateServingGroupName(ms.Name, replicas)
+	var surge *workload.ServingGroup
+	var surgePods []corev1.Pod
+	require.Eventually(t, func() bool {
+		group, err := kthenaClient.WorkloadV1alpha1().ServingGroups(testNamespace).Get(ctx, surgeName, metav1.GetOptions{})
+		if err != nil || !metav1.IsControlledBy(group, ms) {
+			return false
+		}
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: workload.GroupNameLabelKey + "=" + surgeName})
+		if err != nil || len(pods.Items) != 1 || pods.Items[0].Status.Phase != corev1.PodRunning || len(pods.Items[0].Status.ContainerStatuses) == 0 {
+			return false
+		}
+		surge, surgePods = group, pods.Items
+		return true
+	}, servingGroupTimeout, time.Second, "the rolling update should create ServingGroup %s as surge capacity", surgeName)
+	assert.Equal(t, workload.SurgeScopeServingGroup, surge.Annotations[workload.SurgeAnnotationKey], "ServingGroup %s should carry the surge mark", surgeName)
+	for _, pod := range surgePods {
+		assert.Equal(t, workload.SurgeScopeServingGroup, pod.Annotations[workload.SurgeAnnotationKey], "Pod %s should carry a copy of the surge mark of its group", pod.Name)
+	}
+
+	t.Logf("Scaling up to %d replicas: ServingGroup %s takes a regular place", replicas+1, surgeName)
+	updateModelServingWithRetry(t, ctx, kthenaClient, ms.Name, func(current *workload.ModelServing) {
+		current.Spec.Replicas = ptr.To(int32(replicas + 1))
+	})
+	var promoted *workload.ServingGroup
+	require.Eventually(t, func() bool {
+		group, err := kthenaClient.WorkloadV1alpha1().ServingGroups(testNamespace).Get(ctx, surgeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		if _, marked := group.Annotations[workload.SurgeAnnotationKey]; marked {
+			return false
+		}
+		pods, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: workload.GroupNameLabelKey + "=" + surgeName})
+		if err != nil {
+			return false
+		}
+		for _, pod := range pods.Items {
+			if _, marked := pod.Annotations[workload.SurgeAnnotationKey]; marked {
+				return false
+			}
+		}
+		promoted = group
+		return true
+	}, servingGroupTimeout, time.Second, "the surge mark should be removed from ServingGroup %s and from its Pods once it is a regular replica", surgeName)
+	assert.Equal(t, surge.UID, promoted.UID, "ServingGroup %s should be promoted, not replaced", surgeName)
+	assertPodsUntouched(t, ctx, kubeClient, surgeName, surgePods)
+}
+
 // scaleControllerManager sets the number of controller manager replicas and waits until exactly
 // that many Pods exist and all of them are ready.
 func scaleControllerManager(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, replicas int32) {
