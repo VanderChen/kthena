@@ -74,6 +74,13 @@ type Controller struct {
 	// being handed back to a version without group objects, and this
 	// controller keeps its hands off them.
 	rollingBack func() bool
+	// rounds is held for reading by every round. The ModelServing controller
+	// takes it for writing before it hands workloads back: by then every round
+	// that began before the rollback switch was set has ended, and every later
+	// one sees the switch. Without it, a round in flight could adopt or create
+	// a Pod for a group after the hand-back had found the group empty; the Pod
+	// would lose its owner with the group, or be collected with it.
+	rounds *sync.RWMutex
 
 	// faults remembers since when this process has seen the fault of a member.
 	// It is the only input of a round that is not on an object: a new process
@@ -105,6 +112,10 @@ type Options struct {
 	Now func() time.Time
 	// RollingBack reports whether the rollback switch is set; nil means never.
 	RollingBack func() bool
+	// Rounds is shared with the ModelServing controller, which waits on it for
+	// the rounds of this controller to end before it hands workloads back; nil
+	// means that no such controller runs next to this one.
+	Rounds *sync.RWMutex
 }
 
 // New returns a Controller.
@@ -119,6 +130,7 @@ func New(options Options) *Controller {
 		recorder:      options.Recorder,
 		now:           options.Now,
 		rollingBack:   options.RollingBack,
+		rounds:        options.Rounds,
 		faults:        servinggroup.NewFaultTracker(),
 		readyNotified: sets.New[types.UID](),
 		known:         map[types.UID]sets.Set[types.UID]{},
@@ -135,6 +147,9 @@ func New(options Options) *Controller {
 	}
 	if c.rollingBack == nil {
 		c.rollingBack = func() bool { return false }
+	}
+	if c.rounds == nil {
+		c.rounds = &sync.RWMutex{}
 	}
 	return c
 }

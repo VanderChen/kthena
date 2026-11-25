@@ -71,6 +71,10 @@ func OwnerReference(group *workloadv1alpha1.ServingGroup) metav1.OwnerReference 
 // Reconcile runs one round for a ServingGroup. The returned duration, when
 // positive, is when the next round is due even if nothing changes.
 func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (time.Duration, error) {
+	// Held to the end of the round; the rollback switch is read under it.
+	c.rounds.RLock()
+	defer c.rounds.RUnlock()
+
 	group, err := c.caches.ServingGroup(namespace, name)
 	if apierrors.IsNotFound(err) {
 		return 0, nil

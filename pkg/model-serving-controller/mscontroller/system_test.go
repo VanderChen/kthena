@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/apitest"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/sgcontroller"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
@@ -113,6 +115,8 @@ type system struct {
 	stuck func(*corev1.Pod) bool
 	// rollback is the rollback switch.
 	rollback bool
+	// registry, when set, holds the plugins of both controllers.
+	registry *plugins.Registry
 }
 
 func newSystem(t *testing.T, objects ...runtime.Object) *system {
@@ -126,9 +130,15 @@ func newSystem(t *testing.T, objects ...runtime.Object) *system {
 func (s *system) restart() {
 	now := func() time.Time { return s.cluster.Now() }
 	rollingBack := func() bool { return s.rollback }
-	s.ms = New(Options{Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, Volcano: s.cluster.Volcano, Now: now, RollingBack: rollingBack})
+	// As in the manager: the two controllers share the lock of the rounds.
+	rounds := &sync.RWMutex{}
+	s.ms = New(Options{
+		Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, Volcano: s.cluster.Volcano, Now: now,
+		RollingBack: rollingBack, Rounds: rounds, Registry: s.registry,
+	})
 	s.sg = sgcontroller.New(sgcontroller.Options{
-		Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, PodGroups: noPodGroups{}, Now: now, RollingBack: rollingBack,
+		Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, PodGroups: noPodGroups{}, Now: now,
+		RollingBack: rollingBack, Rounds: rounds, Registry: s.registry,
 	})
 }
 

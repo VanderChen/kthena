@@ -53,6 +53,9 @@ type Controller struct {
 	volcano volcano.Interface
 	// rollingBack reports whether the rollback switch is set.
 	rollingBack func() bool
+	// rounds is held for reading by every round of the ServingGroup
+	// controller (see sgcontroller.Options.Rounds).
+	rounds *sync.RWMutex
 
 	mu sync.Mutex
 	// targets caches the target revision resolved for a ModelServing, by UID.
@@ -79,6 +82,9 @@ type Options struct {
 	// RollingBack reports whether the rollback switch is set (see
 	// RollbackSwitch); nil means never.
 	RollingBack func() bool
+	// Rounds is the lock every round of the ServingGroup controller holds for
+	// reading; nil means that no such controller runs in this process.
+	Rounds *sync.RWMutex
 }
 
 // New returns a Controller.
@@ -95,6 +101,7 @@ func New(options Options) *Controller {
 		targets:  map[types.UID]recorded{},
 
 		rollingBack: options.RollingBack,
+		rounds:      options.Rounds,
 
 		unsettled:   map[types.UID]time.Time{},
 		unsettledOf: map[types.UID]map[types.UID]bool{},
@@ -110,6 +117,9 @@ func New(options Options) *Controller {
 	}
 	if c.rollingBack == nil {
 		c.rollingBack = func() bool { return false }
+	}
+	if c.rounds == nil {
+		c.rounds = &sync.RWMutex{}
 	}
 	return c
 }

@@ -388,3 +388,18 @@ func TestAGroupThatIsGoneIsForgotten(t *testing.T) {
 		t.Errorf("after: known = %d, notified = %d", len(c.known), c.readyNotified.Len())
 	}
 }
+
+// Every group is given a round when the rollback switch is removed.
+func TestEnqueueAll(t *testing.T) {
+	h := standard(t)
+	h.useSnapshot(h.cluster.Snapshot())
+	runner := NewRunner(h.controller)
+	defer runner.queue.ShutDown()
+	runner.EnqueueAll()
+	if runner.queue.Len() != 1 {
+		t.Fatalf("%d keys are queued, want the one group", runner.queue.Len())
+	}
+	if key, _ := runner.queue.Get(); key != testNamespace+"/"+testGroup {
+		t.Errorf("queued %q", key)
+	}
+}

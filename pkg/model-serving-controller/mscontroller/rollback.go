@@ -92,6 +92,13 @@ func metadataPatch(object metav1.Object, metadata map[string]any) ([]byte, error
 // from the API server and is safe to repeat, so a rollback that was
 // interrupted is continued by the next round, of this process or another.
 func (c *Controller) rollBack(ctx context.Context, cached *workloadv1alpha1.ModelServing) (time.Duration, error) {
+	// A round of the ServingGroup controller that began before the switch was
+	// set may still be adopting or creating Pods. It ends before anything is
+	// handed back; every round after it sees the switch and does nothing.
+	c.rounds.Lock()
+	//nolint:staticcheck // Nothing is done under the lock: taking it is the wait.
+	c.rounds.Unlock()
+
 	ms, groups, ok, err := c.readDirect(ctx, cached)
 	if err != nil || !ok {
 		return 0, err

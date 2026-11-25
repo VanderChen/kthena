@@ -19,6 +19,7 @@ package mscontroller
 import (
 	"context"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,6 +29,8 @@ import (
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/apitest"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 )
 
 // podOwners returns, by Pod name, the UID of the Pod and the kind of its controller.
@@ -235,5 +238,98 @@ func TestRollbackWaitsAndResumes(t *testing.T) {
 	}
 	if total < 6 {
 		t.Errorf("the rollback of two groups made %d writes; the test does not exercise it", total)
+	}
+}
+
+// gatePlugin stops the creation of a Pod until it is released.
+type gatePlugin struct {
+	armed            bool
+	entered, release chan struct{}
+}
+
+func (p *gatePlugin) Name() string { return "gate" }
+func (p *gatePlugin) OnModelServingSync(context.Context, *plugins.HookRequest) plugins.HookResult {
+	return plugins.HookResult{}
+}
+func (p *gatePlugin) OnPodCreate(context.Context, *plugins.HookRequest) error {
+	if p.armed {
+		p.armed = false
+		close(p.entered)
+		<-p.release
+	}
+	return nil
+}
+func (p *gatePlugin) OnPodReady(context.Context, *plugins.HookRequest) error   { return nil }
+func (p *gatePlugin) OnRoleSync(context.Context, *plugins.HookRequest) error   { return nil }
+func (p *gatePlugin) OnRoleDelete(context.Context, *plugins.HookRequest) error { return nil }
+
+// The rollback switch is set while a round of a group is creating a Pod. The
+// hand-back waits for that round: a Pod created for a group after the group
+// was found empty would lose its owner with the group, or be collected.
+func TestRollbackWaitsForARoundInFlight(t *testing.T) {
+	gate := &gatePlugin{entered: make(chan struct{}), release: make(chan struct{})}
+	s := &system{t: t, registry: plugins.NewRegistry()}
+	s.registry.Register("gate", func(workloadv1alpha1.PluginSpec) (plugins.Plugin, error) { return gate, nil })
+	s.cluster = apitest.New(modelServing(func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+		ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "gate", Type: workloadv1alpha1.PluginTypeBuiltIn}}
+	}))
+	s.restart()
+	s.settle()
+
+	// A member is lost; the round that creates it again is held in the
+	// middle, after it has seen that the switch is not set.
+	lost := s.pods()[0]
+	if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), lost.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.cluster.Settle()
+	group := lost.Labels[workloadv1alpha1.GroupNameLabelKey]
+	caches, snapshot := s.caches()
+	s.sg.SetCaches(caches, snapshot.Listers().Services)
+	s.ms.SetCaches(caches, snapshot.Listers().Services)
+	gate.armed = true
+	roundDone := make(chan error, 1)
+	go func() {
+		_, err := s.sg.Reconcile(context.Background(), testNamespace, group)
+		roundDone <- err
+	}()
+	<-gate.entered
+
+	s.rollback = true
+	handedBack := make(chan error, 1)
+	go func() {
+		_, err := s.ms.Reconcile(context.Background(), testNamespace, testName)
+		handedBack <- err
+	}()
+	select {
+	case err := <-handedBack:
+		t.Fatalf("the rollback went ahead while a round was in flight (error: %v)", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, kinds := s.podOwners(); len(s.groups()) != 3 || kinds[s.pods()[0].Name] != "ServingGroup" {
+		t.Fatalf("something was handed back while a round was in flight: %d groups, owners %v", len(s.groups()), kinds)
+	}
+
+	close(gate.release)
+	if err := <-roundDone; err != nil {
+		t.Fatalf("the round in flight: %v", err)
+	}
+	if err := <-handedBack; err != nil {
+		t.Fatalf("the rollback: %v", err)
+	}
+	s.settle()
+
+	if groups := s.groups(); len(groups) != 0 {
+		t.Errorf("%d ServingGroup objects are left after the rollback", len(groups))
+	}
+	uids, kinds := s.podOwners()
+	if len(uids) != 6 {
+		t.Errorf("%d Pods after the rollback, want the six of three groups: %v", len(uids), kinds)
+	}
+	for name := range uids {
+		if kinds[name] != "ModelServing" {
+			t.Errorf("Pod %s is controlled by %q after the rollback", name, kinds[name])
+		}
 	}
 }

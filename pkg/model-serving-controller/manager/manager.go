@@ -149,9 +149,12 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 	watch := &podGroupWatch{}
 	m.podGroups = podgroupmanager.NewManager(kube, volcanoClient, apiext, watch.started)
 
+	// Every round of the ServingGroup controller holds this lock for reading;
+	// the ModelServing controller waits on it before it hands workloads back.
+	rounds := &sync.RWMutex{}
 	m.groups = sgcontroller.NewRunner(sgcontroller.New(sgcontroller.Options{
 		Kube: kube, Kthena: kthena, Caches: caches, Services: services.Lister(),
-		PodGroups: m.podGroups, Recorder: recorder, RollingBack: rollingBack,
+		PodGroups: m.podGroups, Recorder: recorder, RollingBack: rollingBack, Rounds: rounds,
 	}))
 	watch.bind(m.groups)
 	watch.started(m.podGroups.GetPodGroupInformer())
@@ -164,7 +167,7 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 
 	m.servings = mscontroller.NewRunner(mscontroller.New(mscontroller.Options{
 		Kube: kube, Kthena: kthena, Caches: caches, Services: services.Lister(), Recorder: recorder,
-		Volcano: volcanoClient, RollingBack: rollingBack,
+		Volcano: volcanoClient, RollingBack: rollingBack, Rounds: rounds,
 	}))
 	if err := m.servings.Register(mscontroller.Informers{
 		ModelServings: modelServings, ServingGroups: servingGroups, Pods: pods.Informer(), ControllerRevisions: revisions,
@@ -187,6 +190,9 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 		removed := func(any) {
 			klog.InfoS("Rollback mode is off: workloads are taken over again", "switch", mscontroller.RollbackSwitch)
 			m.servings.EnqueueAll()
+			// While the mode was on, the rounds of the groups ended without
+			// doing anything, and the events that started them do not come again.
+			m.groups.EnqueueAll()
 		}
 		if _, err := rollbackSwitch.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: set, DeleteFunc: removed}); err != nil {
 			return nil, fmt.Errorf("watch the rollback switch: %w", err)

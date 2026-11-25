@@ -117,6 +117,15 @@ func (r *Runner) forgetGroup(obj any) {
 	}
 }
 
+// EnqueueAll puts every ServingGroup on the queue. Rounds that ended without
+// doing anything while the rollback switch was set are made up this way when
+// it is removed: the events that started them do not come again.
+func (r *Runner) EnqueueAll() {
+	for _, obj := range r.controller.caches.ServingGroups.List() {
+		r.enqueueGroup(obj)
+	}
+}
+
 // Register adds the event handlers.
 func (r *Runner) Register(informers Informers) error {
 	handlers := []struct {
