@@ -85,7 +85,7 @@ Kthena is modular: the **workload** controllers and the **networking** router ar
 
 | Subchart     | Component                                                  | CRDs installed                                       |
 | :----------- | :--------------------------------------------------------- | :--------------------------------------------------- |
-| `workload`   | `kthena-controller-manager` (model lifecycle, autoscaling) | `ModelServing`, `ModelBooster`, `AutoscalingPolicy`  |
+| `workload`   | `kthena-controller-manager` (model lifecycle, autoscaling) | `ModelServing`, `ServingGroup`, `ModelBooster`, `AutoscalingPolicy`  |
 | `networking` | `kthena-router` (inference traffic routing)                | `ModelRoute`, `ModelServer`, `ExternalModelProvider` |
 
 **Workload controllers only** — manage model workloads with Kthena while keeping your existing gateway for traffic:
@@ -168,6 +168,8 @@ helm upgrade kthena oci://ghcr.io/volcano-sh/charts/kthena \
 ```
 
 This order is required for releases that add a CRD, including the release that introduces `ExternalModelProvider`. If the Router starts before that CRD exists, its informer cannot finish its initial sync and the Router does not begin serving requests.
+
+The release that introduces `ServingGroup` objects also takes over the workloads of running ModelServings. When you upgrade from a version without `ServingGroup` objects, such as v1.1.0, follow [Upgrading to ServingGroup Objects](../user-guide/servinggroup-upgrade.md), which also describes how to roll back.
 
 ## Verification
 

@@ -67,6 +67,8 @@ const sidebars: SidebarsConfig = {
           type: 'category',
           label: 'Workload',
           items: [
+            'user-guide/servinggroup',
+            'user-guide/servinggroup-upgrade',
             'user-guide/inplace-update',
             'user-guide/binpack-scale-down',
             'user-guide/gang-scheduling',
