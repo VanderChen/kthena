@@ -131,8 +131,12 @@ func newCoordinatedE2E(t *testing.T, name string, prefill, decode, prefillUnavai
 		if err != nil || len(pods) != r.expected {
 			return false
 		}
+		belongs, err := belongsToModelServing(ctx, client, ms)
+		if err != nil {
+			return false
+		}
 		for _, pod := range pods {
-			if !utils.IsPodReady(pod) || !controllerutils.IsOwnedByModelServingWithUID(&pod, ms.UID) {
+			if !utils.IsPodReady(pod) || !belongs(&pod) {
 				return false
 			}
 			r.original[pod.Name] = pod.UID
@@ -175,10 +179,14 @@ func (r *coordinatedE2E) snapshot() (*coordinatedSnapshot, error) {
 	if len(pods) != r.expected {
 		return nil, fmt.Errorf("Pod count %d, want %d", len(pods), r.expected)
 	}
+	belongs, err := belongsToModelServing(r.ctx, r.client, r.ms)
+	if err != nil {
+		return nil, err
+	}
 	s := &coordinatedSnapshot{targets: map[string][]corev1.Pod{}, started: map[string]int{}, ready: map[string]int{}}
 	byInstance := map[string][]corev1.Pod{}
 	for _, pod := range pods {
-		if _, exists := r.original[pod.Name]; !exists || pod.DeletionTimestamp != nil || !controllerutils.IsOwnedByModelServingWithUID(&pod, r.ms.UID) {
+		if _, exists := r.original[pod.Name]; !exists || pod.DeletionTimestamp != nil || !belongs(&pod) {
 			return nil, fmt.Errorf("unexpected, deleting or foreign Pod %s", pod.Name)
 		}
 		byInstance[pod.Labels[workload.RoleIDKey]] = append(byInstance[pod.Labels[workload.RoleIDKey]], pod)

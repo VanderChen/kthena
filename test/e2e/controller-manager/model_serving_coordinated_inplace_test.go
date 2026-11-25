@@ -195,11 +195,15 @@ func newCoordinatedInPlaceE2E(t *testing.T) *coordinatedInPlaceE2E {
 		if err != nil {
 			return false, err
 		}
+		belongs, err := belongsToModelServing(ctx, client, created)
+		if err != nil {
+			return false, err
+		}
 		membersReady := len(pods) == r.expected
 		ready, containersReady, gatesReady, scheduled := 0, 0, 0, 0
 		phases := map[corev1.PodPhase]int{}
 		for _, pod := range pods {
-			if !controllerutils.IsOwnedByModelServingWithUID(&pod, created.UID) || pod.DeletionTimestamp != nil {
+			if !belongs(&pod) || pod.DeletionTimestamp != nil {
 				return false, fmt.Errorf("unexpected owner or deletion of initial Pod %s", pod.Name)
 			}
 			phases[pod.Status.Phase]++
@@ -338,10 +342,14 @@ func (r *coordinatedInPlaceE2E) snapshotInPlace() (*coordinatedInPlaceSnapshot, 
 	if len(pods) != r.expected {
 		return nil, fmt.Errorf("Pod count %d, want %d", len(pods), r.expected)
 	}
+	belongs, err := belongsToModelServing(r.ctx, r.client, r.ms)
+	if err != nil {
+		return nil, err
+	}
 	s := &coordinatedInPlaceSnapshot{pods: map[string]corev1.Pod{}, started: map[string]int{}, ready: map[string]int{}}
 	for _, pod := range pods {
 		uid, exists := r.original[pod.Name]
-		if !exists || uid != pod.UID || pod.DeletionTimestamp != nil || !controllerutils.IsOwnedByModelServingWithUID(&pod, r.ms.UID) {
+		if !exists || uid != pod.UID || pod.DeletionTimestamp != nil || !belongs(&pod) {
 			return nil, fmt.Errorf("Pod %s was replaced, deleted, added or changed owner", pod.Name)
 		}
 		if len(pod.Spec.Containers) != 1 {

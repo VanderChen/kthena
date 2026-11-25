@@ -402,10 +402,14 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 		if err != nil {
 			return false
 		}
+		belongs, err := belongsToModelServing(ctx, kthenaClient, ms)
+		if err != nil {
+			return false
+		}
 		groups := map[string]bool{}
 		for i := range pods.Items {
 			pod := &pods.Items[i]
-			if metav1.IsControlledBy(pod, ms) && pod.DeletionTimestamp == nil && pod.Labels[workload.GroupNameLabelKey] != "" {
+			if belongs(pod) && pod.DeletionTimestamp == nil && pod.Labels[workload.GroupNameLabelKey] != "" {
 				groups[pod.Labels[workload.GroupNameLabelKey]] = true
 			}
 		}
@@ -428,7 +432,7 @@ func TestModelServingHeadlessServiceDeleteOnServingGroupDelete(t *testing.T) {
 		seen := 0
 		for i := range services.Items {
 			svc := &services.Items[i]
-			if !metav1.IsControlledBy(svc, ms) {
+			if !belongs(svc) {
 				continue
 			}
 			entryOnly, ok := expected[svc.Name]
@@ -564,17 +568,13 @@ func TestModelServingServiceRecovery(t *testing.T) {
 	require.NoError(t, err, "Failed to list Services in namespace")
 
 	// Filter Services owned by this ModelServing and find the headless one
+	belongs, err := belongsToModelServing(ctx, kthenaClient, ms)
+	require.NoError(t, err, "Failed to list ServingGroups in namespace")
 	var originalService *corev1.Service
 	var originalServiceUID string
 	for _, svc := range serviceList.Items {
 		// Check if service is owned by the ModelServing
-		ownedByMS := false
-		for _, ref := range svc.OwnerReferences {
-			if ref.UID == ms.UID {
-				ownedByMS = true
-				break
-			}
-		}
+		ownedByMS := belongs(&svc)
 		// Select if it's owned by the ModelServing and is headless
 		if ownedByMS && svc.Spec.ClusterIP == corev1.ClusterIPNone {
 			originalService = &svc
@@ -603,15 +603,13 @@ func TestModelServingServiceRecovery(t *testing.T) {
 		if err != nil {
 			return false
 		}
+		belongs, err := belongsToModelServing(ctx, kthenaClient, ms)
+		if err != nil {
+			return false
+		}
 		for _, svc := range serviceList.Items {
 			// Check if service is owned by the same ModelServing
-			ownedByMS := false
-			for _, ref := range svc.OwnerReferences {
-				if ref.UID == ms.UID {
-					ownedByMS = true
-					break
-				}
-			}
+			ownedByMS := belongs(&svc)
 			// Return true if it's a new service (different UID) owned by the ModelServing and is headless
 			if ownedByMS && svc.Name == originalService.Name && string(svc.UID) != originalServiceUID && svc.Spec.ClusterIP == corev1.ClusterIPNone {
 				t.Logf("New Service created: %s (UID: %s)", svc.Name, svc.UID)
@@ -766,6 +764,27 @@ func TestModelServingRoleStatusEvents(t *testing.T) {
 // modelServingLabelSelector returns the label selector for resources belonging to a ModelServing.
 func modelServingLabelSelector(msName string) string {
 	return "modelserving.volcano.sh/name=" + msName
+}
+
+// belongsToModelServing returns a predicate that reports whether an object belongs to ms:
+// ms controls it directly, or ms controls the ServingGroup that controls it. The ServingGroups
+// are read once, when the predicate is built, so it is built after the objects it is applied to
+// were read and is not kept across polls.
+func belongsToModelServing(ctx context.Context, kthenaClient *clientset.Clientset, ms *workload.ModelServing) (func(metav1.Object) bool, error) {
+	groups, err := kthenaClient.WorkloadV1alpha1().ServingGroups(ms.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	controlled := make(map[types.UID]bool, len(groups.Items))
+	for i := range groups.Items {
+		if metav1.IsControlledBy(&groups.Items[i], ms) {
+			controlled[groups.Items[i].UID] = true
+		}
+	}
+	return func(obj metav1.Object) bool {
+		owner := metav1.GetControllerOfNoCopy(obj)
+		return owner != nil && (owner.UID == ms.UID || controlled[owner.UID])
+	}, nil
 }
 
 // createAndWaitForModelServing creates a ModelServing, registers a cleanup function, and waits for it to be ready.
@@ -1588,9 +1607,13 @@ func TestModelServingStatusAwarePriorityScaleDownRole(t *testing.T) {
 		if listErr != nil || len(pods.Items) != int(initialRoleReplicas) {
 			return false
 		}
+		belongs, ownerErr := belongsToModelServing(ctx, kthenaClient, ms)
+		if ownerErr != nil {
+			return false
+		}
 		unhealthy := 0
 		for _, pod := range pods.Items {
-			if !metav1.IsControlledBy(&pod, ms) || pod.DeletionTimestamp != nil || originalUIDs[pod.Name] != pod.UID {
+			if !belongs(&pod) || pod.DeletionTimestamp != nil || originalUIDs[pod.Name] != pod.UID {
 				return false
 			}
 			if pod.Labels[workload.RoleIDKey] == unhealthyRoleID {
