@@ -108,13 +108,6 @@ func roleSelector(req *HookRequest) map[string]string {
 	}
 }
 
-// Capture freezes auxiliary UIDs before any Pod deletion can trigger callbacks.
-func (c *RoleCleanup) Capture(ctx context.Context, req *HookRequest) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.capture(ctx, req)
-}
-
 func (c *RoleCleanup) capture(ctx context.Context, req *HookRequest) error {
 	if req.KubeClient == nil {
 		return fmt.Errorf("Kubernetes client is not initialized")
