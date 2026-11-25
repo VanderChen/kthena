@@ -40,8 +40,11 @@ type ServingGroupSpecApplyConfiguration struct {
 	// Revision is the revision this group runs as a whole. It is set under
 	// ServingGroupRollingUpdate and empty under RoleRollingUpdate.
 	Revision *string `json:"revision,omitempty"`
-	// TargetRevision is the revision the Role instances of this group are rolled
-	// to under RoleRollingUpdate.
+	// TargetRevision is the revision the rollout of the ModelServing moves to.
+	// Under RoleRollingUpdate the Role instances of this group are rolled to it.
+	// Under ServingGroupRollingUpdate a group whose revision differs from it is
+	// one of an earlier revision: it starts no update of its Pods until the
+	// ModelServing controller changes its revision or replaces it.
 	TargetRevision *string `json:"targetRevision,omitempty"`
 	// BaselineRevision is a copy of the currentRevision of the ModelServing status.
 	// Role instances protected by a Role partition are created from it, and the
