@@ -25,6 +25,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -84,8 +85,43 @@ func identity() (namespace, name string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
+	// The host name is the Pod name unless the Pod uses the network of its node.
+	if name = os.Getenv("POD_NAME"); name != "" {
+		return namespace, name, true
+	}
 	name, err = os.Hostname()
 	return namespace, name, err == nil
+}
+
+// labelSelf puts the protocol label on the Pod of this process and repeats
+// until that has worked. The chart puts it on the Pod template, but a
+// Deployment that was written by hand may not: its replicas would take each
+// other for a controller manager of an earlier version, and none would ever
+// start. What a process knows about itself does not depend on who deployed it.
+func labelSelf(ctx context.Context, kube kubernetes.Interface) {
+	namespace, self, ok := identity()
+	if !ok {
+		return
+	}
+	_ = wait.PollUntilContextCancel(ctx, predecessorPeriod, true, func(ctx context.Context) (bool, error) {
+		if err := labelPod(ctx, kube, namespace, self); err != nil {
+			klog.ErrorS(err, "Cannot label the Pod of this process; other replicas of this version wait for it as for an earlier version",
+				"pod", klog.KRef(namespace, self), "label", ControllerProtocolLabel)
+			return false, nil
+		}
+		return true, nil
+	})
+}
+
+// labelPod puts the protocol label on a Pod that does not carry it.
+func labelPod(ctx context.Context, kube kubernetes.Interface, namespace, name string) error {
+	pod, err := kube.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil || pod.Labels[ControllerProtocolLabel] == ControllerProtocolServingGroup {
+		return err
+	}
+	patch := []byte(`{"metadata":{"labels":{"` + ControllerProtocolLabel + `":"` + ControllerProtocolServingGroup + `"}}}`)
+	_, err = kube.CoreV1().Pods(namespace).Patch(ctx, name, types.MergePatchType, patch, metav1.PatchOptions{})
+	return err
 }
 
 // waitForPredecessors blocks until no controller manager of an earlier version

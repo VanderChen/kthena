@@ -123,6 +123,9 @@ func SetupController(ctx context.Context, cc Config) {
 	if msm == nil {
 		ready.Store(true)
 	} else {
+		// Before it stands for election: a replica that waits for the lease
+		// must not look like an earlier version to the one that holds it.
+		go labelSelf(ctx, kubeClient)
 		go func() {
 			if msm.WaitForServingGroups(ctx) == nil {
 				ready.Store(true)

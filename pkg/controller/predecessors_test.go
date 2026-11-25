@@ -78,3 +78,39 @@ func TestPredecessors(t *testing.T) {
 		t.Errorf("predecessors() of an unlabelled process = %v, want the two other Pods without the label", got)
 	}
 }
+
+func TestLabelPod(t *testing.T) {
+	kube := fake.NewSimpleClientset(
+		// Two replicas of a Deployment whose Pod template lacks the label.
+		managerPod("kthena-system", "self"),
+		managerPod("kthena-system", "peer"),
+	)
+	ctx := context.Background()
+	if got, _ := predecessors(ctx, kube, "kthena-system", "peer"); !reflect.DeepEqual(got, []string{"self"}) {
+		t.Fatalf("before: the peer waits for %v, want [self]", got)
+	}
+
+	// Twice: the second time there is nothing to do.
+	for range 2 {
+		if err := labelPod(ctx, kube, "kthena-system", "self"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := labelPod(ctx, kube, "kthena-system", "gone"); err == nil {
+		t.Error("labelling a Pod that does not exist reported success")
+	}
+
+	pod, err := kube.CoreV1().Pods("kthena-system").Get(ctx, "self", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Labels[ControllerProtocolLabel] != ControllerProtocolServingGroup || pod.Labels[componentLabel] != componentManager {
+		t.Errorf("labels of the Pod of the process = %v", pod.Labels)
+	}
+	if got, _ := predecessors(ctx, kube, "kthena-system", "peer"); len(got) != 0 {
+		t.Errorf("after: the peer still waits for %v", got)
+	}
+	if other, _ := kube.CoreV1().Pods("kthena-system").Get(ctx, "peer", metav1.GetOptions{}); other.Labels[ControllerProtocolLabel] != "" {
+		t.Errorf("the process labelled another Pod: %v", other.Labels)
+	}
+}
