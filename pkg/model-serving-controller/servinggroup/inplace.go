@@ -254,7 +254,12 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 			}
 		}
 	}
-	if len(patched) == 0 && !stale && !unpatched {
+	if len(patched) == 0 && !stale && !differs {
+		// No update is under way and no Pod differs from what the target
+		// renders: nothing is patched and no label is changed, whatever the
+		// update method is. A Pod whose revision cannot be read is no reason to
+		// take the unit for one that is being updated.
+		step.Waiting = unread
 		return step
 	}
 	step.Active = true
@@ -273,23 +278,24 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 	}
 
 	if stale || unpatched {
-		if !unit.Allowed {
-			switch {
-			case stale || differs:
-				step.Obstacle = "the update method that takes effect is not InPlace"
-			case unread != "":
-				// A revision that cannot be read is no reason to recreate.
-				step.Waiting = unread
-			default:
-				// Every Pod is what the target renders. Nothing is to be done
-				// about them, and no label is changed without an update.
-				return InPlaceStep{Revision: unit.Target}
-			}
+		switch {
+		case unit.Allowed:
+			step.Patch, step.Obstacle, step.Waiting = checkInPlace(members, unit.Role, unit.Target, revisions)
+			step.Fallback = step.Obstacle != ""
+			// A unit that waits before its first Pod is patched is not being
+			// updated yet.
+			step.Active = len(patched) > 0 || stale || len(step.Patch) > 0 || step.Obstacle != ""
+			return step
+		case stale || differs:
+			step.Obstacle = "the update method that takes effect is not InPlace"
+			return step
+		case unread != "":
+			// A revision that cannot be read is no reason to recreate.
+			step.Waiting = unread
 			return step
 		}
-		step.Patch, step.Obstacle, step.Waiting = checkInPlace(members, unit.Role, unit.Target, revisions)
-		step.Fallback = step.Obstacle != ""
-		return step
+		// The Pods that are not patched are what the target renders. The
+		// update of the others is brought to its end.
 	}
 
 	for _, member := range patched {
@@ -329,7 +335,8 @@ func checkInPlace(members []Member, role, target string, revisions Revisions) (p
 	if err != nil {
 		return nil, "", fmt.Sprintf("revision %s, which cannot be resolved", target)
 	}
-	imagesOnly := map[string]bool{}
+	type judged struct{ revision, role string }
+	imagesOnly := map[judged]bool{}
 	for _, member := range members {
 		pod := member.Pod
 		if reason := restartPolicyBlocksInPlace(pod); reason != "" {
@@ -346,15 +353,23 @@ func checkInPlace(members []Member, role, target string, revisions Revisions) (p
 		if err != nil {
 			return nil, "", fmt.Sprintf("revision %q of Pod %s, which cannot be resolved", source, pod.Name)
 		}
-		same, known := imagesOnly[source]
+		key := judged{revision: source, role: pod.Labels[workloadv1alpha1.RoleLabelKey]}
+		same, known := imagesOnly[key]
 		if !known {
-			if role == "" {
+			switch {
+			case revisions.CompareRole(source, target, key.role) == workload.Equivalent:
+				// The Pod is what the target renders, under the label of an
+				// earlier revision: a rollout Role by Role left its Role
+				// alone. What other Roles went through since does not count
+				// against it.
+				same = true
+			case role == "":
 				only, err := inplace.OnlyImagesChanged(sourceView, targetView)
 				same = err == nil && only
-			} else {
+			default:
 				same = inplace.OnlyRoleImagesChanged(sourceView, targetView, role)
 			}
-			imagesOnly[source] = same
+			imagesOnly[key] = same
 		}
 		if !same {
 			return nil, "changes other than container images", ""

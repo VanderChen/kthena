@@ -213,6 +213,9 @@ func TestCheckInPlaceDeadlines(t *testing.T) {
 // unit without an update.
 func stepOf(step InPlaceStep) string {
 	if !step.Active {
+		if step.Waiting != "" {
+			return "idle waiting[" + step.Waiting + "]"
+		}
 		return "idle"
 	}
 	short := func(pod *corev1.Pod) string { return strings.TrimPrefix(pod.Name, testGroup+"-serve-") }
@@ -254,6 +257,12 @@ func TestPlanInPlace(t *testing.T) {
 		return u
 	}
 	patched, done := patchedFor("rev-b"), func(pod *corev1.Pod) { patchedFor("rev-b")(pod); restartedOnce(pod) }
+	// earlier: rev-0 renders the Pods of the Role as rev-c does. As a whole
+	// the two differ in more than images: another Role was changed in between.
+	earlier := fakeRevisions{
+		class: map[string]string{"rev-0": "same", "rev-c": "same"},
+		image: map[string]string{"rev-0": "model:rev-c"}, env: map[string]string{"rev-0": "old"},
+	}
 
 	tests := []struct {
 		name      string
@@ -296,10 +305,24 @@ func TestPlanInPlace(t *testing.T) {
 		{name: "by recreation, Pods that the target renders the same are left alone, labels and all",
 			unit:      change(unit("rev-b", servePod(0, 0), servePod(0, 1, labelled("rev-b"))), func(u *InPlaceUnit) { u.Allowed = false }),
 			revisions: fakeRevisions{class: map[string]string{"rev-a": "same", "rev-b": "same"}}, want: "idle"},
-		{name: "by recreation, a Pod of a revision that cannot be read is no reason to recreate",
+		{name: "by recreation, a Pod of a revision that cannot be read is no reason to recreate, nor is the unit being updated",
 			unit:      change(unit("rev-b", servePod(0, 0), servePod(0, 1, labelled("rev-b"))), func(u *InPlaceUnit) { u.Allowed = false }),
 			revisions: fakeRevisions{missing: map[string]bool{"rev-a": true}},
-			want:      `waiting[revision "rev-a" of Pod llama-0-serve-0-0, which cannot be resolved]`},
+			want:      `idle waiting[revision "rev-a" of Pod llama-0-serve-0-0, which cannot be resolved]`},
+		{name: "by recreation, an update that was started is finished beside Pods that the target renders the same",
+			unit:      change(unit("rev-b", servePod(0, 0, done), servePod(0, 1, labelled("rev-0"))), func(u *InPlaceUnit) { u.Allowed = false }),
+			revisions: fakeRevisions{class: map[string]string{"rev-0": "same", "rev-b": "same"}}, want: "complete[0-0]"},
+		{name: "in place, Pods that the target renders the same are left alone as well",
+			unit:      unit("rev-b", servePod(0, 0), servePod(0, 1, labelled("rev-b"))),
+			revisions: fakeRevisions{class: map[string]string{"rev-a": "same", "rev-b": "same"}, env: map[string]string{"rev-a": "old"}}, want: "idle"},
+		{name: "in place, such a Pod takes part in the update of the others, whatever other Roles went through since its label",
+			unit:      unit("rev-c", servePod(0, 0), servePod(0, 1, labelled("rev-0"), func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "model:rev-c" })),
+			revisions: earlier,
+			want:      "patch[0-0=model:rev-c 0-1=]"},
+		{name: "in place, a unit that is patched in part includes such a Pod",
+			unit:      unit("rev-c", servePod(0, 0, patchedFor("rev-c")), servePod(0, 1, labelled("rev-0"), func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "model:rev-c" })),
+			revisions: earlier,
+			want:      "patch[0-1=]"},
 		{name: "by recreation, a Pod of a revision that differs asks for the unit to be recreated",
 			unit: change(unit("rev-b", servePod(0, 0), servePod(0, 1, labelled("rev-b"))), func(u *InPlaceUnit) { u.Allowed = false }),
 			want: "obstacle[the update method that takes effect is not InPlace]"},
@@ -321,12 +344,15 @@ func TestPlanInPlace(t *testing.T) {
 		{name: "the image of a Pod is neither the old nor the new one",
 			unit: unit("rev-b", servePod(0, 0), servePod(0, 1, func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "model:rewritten" })),
 			want: "obstacle[pod llama-0-serve-0-1 runs images of containers [model] that match neither the old nor the new template] fallback"},
-		{name: "a revision that cannot be read is no reason to recreate",
+		{name: "a revision that cannot be read is no reason to recreate, and no update either",
 			unit: unit("rev-b", servePod(0, 0), servePod(0, 1)), revisions: fakeRevisions{missing: map[string]bool{"rev-a": true}},
-			want: `waiting[revision "rev-a" of Pod llama-0-serve-0-0, which cannot be resolved]`},
+			want: `idle waiting[revision "rev-a" of Pod llama-0-serve-0-1, which cannot be resolved]`},
 		{name: "nor is a target that cannot be read",
 			unit: unit("rev-b", servePod(0, 0), servePod(0, 1)), revisions: fakeRevisions{missing: map[string]bool{"rev-b": true}},
-			want: "waiting[revision rev-b, which cannot be resolved]"},
+			want: `idle waiting[revision "rev-a" of Pod llama-0-serve-0-1, which cannot be resolved]`},
+		{name: "an update under way waits for a revision that cannot be read",
+			unit: unit("rev-b", servePod(0, 0, patched), servePod(0, 1, labelled("rev-0"))), revisions: fakeRevisions{missing: map[string]bool{"rev-0": true}},
+			want: `waiting[revision "rev-0" of Pod llama-0-serve-0-1, which cannot be resolved]`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -130,6 +130,9 @@ func (r *round) planInPlace(recoveryEnabled bool) {
 	for i, unit := range units {
 		step := servinggroup.PlanInPlace(unit, r.history)
 		if !step.Active {
+			if step.Waiting != "" {
+				klog.V(4).InfoS("The revision of a Pod cannot be compared with the one of its unit", "servingGroup", klog.KObj(group), "revision", step.Revision, "for", step.Waiting)
+			}
 			continue
 		}
 		if step.Obstacle != "" {

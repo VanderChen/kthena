@@ -44,6 +44,9 @@ type fakeRevisions struct {
 	absent map[string]string
 	// unchanged names the Roles that render the same Pods in every revision.
 	unchanged map[string]bool
+	// image is, by revision, the image the revision renders when it is not
+	// the one named after it.
+	image map[string]string
 }
 
 func (f fakeRevisions) At(revision string) (*workloadv1alpha1.ModelServing, error) {
@@ -51,8 +54,12 @@ func (f fakeRevisions) At(revision string) (*workloadv1alpha1.ModelServing, erro
 	if err != nil {
 		return nil, err
 	}
+	image, ok := f.image[revision]
+	if !ok {
+		image = "model:" + revision
+	}
 	template := workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
-		Name: "model", Image: "model:" + revision, Env: []corev1.EnvVar{{Name: "MODE", Value: f.env[revision]}},
+		Name: "model", Image: image, Env: []corev1.EnvVar{{Name: "MODE", Value: f.env[revision]}},
 	}}}}
 	role.EntryTemplate, role.WorkerTemplate = template, template.DeepCopy()
 	return &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
