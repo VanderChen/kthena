@@ -113,7 +113,7 @@ func (r *Runner) enqueueGroupsOf(namespace, modelServing string) {
 // background is gone at once.
 func (r *Runner) forgetGroup(obj any) {
 	if accessor := object(obj); accessor != nil {
-		r.controller.forget(accessor.GetUID(), nil)
+		r.controller.drop(accessor.GetUID())
 	}
 }
 

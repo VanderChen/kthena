@@ -96,6 +96,11 @@ type Controller struct {
 	readyNotified sets.Set[types.UID]
 	known         map[types.UID]sets.Set[types.UID]
 	timeouts      map[types.UID]time.Time
+	// roleStates holds, by the UID of a group, the state that was reported
+	// last for each of its Role instances. unresolved holds the revision of a
+	// group that was reported last as one that cannot be resolved.
+	roleStates map[types.UID]map[servinggroup.InstanceKey]string
+	unresolved map[types.UID]string
 }
 
 // Options are the dependencies of a Controller.
@@ -135,6 +140,8 @@ func New(options Options) *Controller {
 		readyNotified: sets.New[types.UID](),
 		known:         map[types.UID]sets.Set[types.UID]{},
 		timeouts:      map[types.UID]time.Time{},
+		roleStates:    map[types.UID]map[servinggroup.InstanceKey]string{},
+		unresolved:    map[types.UID]string{},
 	}
 	if c.registry == nil {
 		c.registry = plugins.DefaultRegistry

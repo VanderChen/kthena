@@ -107,6 +107,20 @@ func eventsOf(recorder *record.FakeRecorder) []string {
 	}
 }
 
+// updateEventsOf returns the events recorded since the last call, without the
+// ones about the states of Role instances: an instance whose Pods are updated
+// is reported as not running until they are ready again, like one whose Pods
+// are created.
+func updateEventsOf(recorder *record.FakeRecorder) []string {
+	var out []string
+	for _, event := range eventsOf(recorder) {
+		if fields := strings.SplitN(event, " ", 3); len(fields) < 2 || !strings.HasPrefix(fields[1], "Role") {
+			out = append(out, event)
+		}
+	}
+	return out
+}
+
 // retarget sets the revision the group is to run: spec.revision of a group
 // that is replaced as a whole, spec.targetRevision of one that is rolled Role
 // by Role. That is what the ModelServing controller does to start an in-place
@@ -244,7 +258,7 @@ func TestAGroupIsUpdatedInPlace(t *testing.T) {
 	if got := h.podFacts(); got != allV1 {
 		t.Fatalf("created: %s", got)
 	}
-	eventsOf(recorder)
+	updateEventsOf(recorder)
 
 	h.retarget("rev-b")
 	writes := h.mustRound()
@@ -258,7 +272,7 @@ func TestAGroupIsUpdatedInPlace(t *testing.T) {
 	if h.isReady() || status.ObservedGeneration != 2 || status.Revision != "rev-a" {
 		t.Errorf("status after the patch: ready %t, observedGeneration %d, revision %q; want not ready, 2, rev-a", h.isReady(), status.ObservedGeneration, status.Revision)
 	}
-	if events := eventsOf(recorder); len(events) != 1 || events[0] != "Normal InPlaceUpdateStarted Updating images in place in ServingGroup llama-0 to revision rev-b" {
+	if events := updateEventsOf(recorder); len(events) != 1 || events[0] != "Normal InPlaceUpdateStarted Updating images in place in ServingGroup llama-0 to revision rev-b" {
 		t.Errorf("events = %v", events)
 	}
 
@@ -292,7 +306,7 @@ func TestAGroupIsUpdatedInPlace(t *testing.T) {
 	if h.isReady() {
 		t.Errorf("the group is ready in the status that was written before the labels changed")
 	}
-	if events := eventsOf(recorder); len(events) != 1 || events[0] != "Normal InPlaceUpdateCompleted In-place update of ServingGroup llama-0 to revision rev-b completed" {
+	if events := updateEventsOf(recorder); len(events) != 1 || events[0] != "Normal InPlaceUpdateCompleted In-place update of ServingGroup llama-0 to revision rev-b completed" {
 		t.Errorf("events = %v", events)
 	}
 
@@ -371,7 +385,7 @@ func TestRoleInstancesAreUpdatedInPlace(t *testing.T) {
 	if restarts := decode.Status.ContainerStatuses[0].RestartCount; restarts != 0 {
 		t.Errorf("the Pod of the Role that did not change restarted %d times", restarts)
 	}
-	events := eventsOf(recorder)
+	events := updateEventsOf(recorder)
 	started, completed := 0, 0
 	for _, event := range events {
 		switch {
@@ -460,7 +474,7 @@ func TestAGroupThatCannotBeUpdatedInPlaceAsksToBeRecreated(t *testing.T) {
 				h.settleContainers()
 			}
 			before, uids := h.podFacts(), h.uids()
-			eventsOf(recorder)
+			updateEventsOf(recorder)
 
 			h.retarget(tt.revision)
 			if writes := h.mustRound(); !reflect.DeepEqual(writes, []string{"update servinggroups/status llama-0"}) {
@@ -474,7 +488,7 @@ func TestAGroupThatCannotBeUpdatedInPlaceAsksToBeRecreated(t *testing.T) {
 					t.Errorf("message = %q, want %q", condition.Message, tt.message)
 				}
 			}
-			events := eventsOf(recorder)
+			events := updateEventsOf(recorder)
 			wantEvent := "Normal InPlaceUpdateFallback ServingGroup llama-0 is recreated instead of updated in place: " + tt.message
 			if tt.silent && len(events) != 0 || !tt.silent && !reflect.DeepEqual(events, []string{wantEvent}) {
 				t.Errorf("events = %v", events)
@@ -493,7 +507,7 @@ func TestAGroupThatCannotBeUpdatedInPlaceAsksToBeRecreated(t *testing.T) {
 			if got := h.podFacts(); got != before || !reflect.DeepEqual(h.uids(), uids) {
 				t.Errorf("the Pods were touched: %s, before %s", got, before)
 			}
-			if events := eventsOf(recorder); len(events) != 0 {
+			if events := updateEventsOf(recorder); len(events) != 0 {
 				t.Errorf("events later = %v", events)
 			}
 		})
@@ -535,7 +549,7 @@ func TestARoleInstanceThatCannotBeUpdatedInPlaceIsRecreated(t *testing.T) {
 			h, recorder := inPlaceHarness(t, mutate...)
 			h.settleContainers()
 			before := h.uids()
-			eventsOf(recorder)
+			updateEventsOf(recorder)
 
 			h.retarget(tt.revision)
 			if writes := h.mustRound(); !reflect.DeepEqual(writes, tt.first) {
@@ -560,7 +574,7 @@ func TestARoleInstanceThatCannotBeUpdatedInPlaceIsRecreated(t *testing.T) {
 				t.Errorf("conditions = %q", got)
 			}
 			var fallbacks []string
-			for _, event := range eventsOf(recorder) {
+			for _, event := range updateEventsOf(recorder) {
 				if strings.Contains(event, " InPlaceUpdateFallback ") {
 					fallbacks = append(fallbacks, event)
 				}
@@ -635,7 +649,7 @@ func TestAnUpdateThatMissesItsDeadlineFollowsTheRecoveryPolicy(t *testing.T) {
 				}
 			}
 			patched := h.podFacts()
-			eventsOf(recorder)
+			updateEventsOf(recorder)
 
 			// The round is due again when the deadline passes.
 			if after, err := h.round(); err != nil || after != 600*time.Second {
@@ -645,7 +659,7 @@ func TestAnUpdateThatMissesItsDeadlineFollowsTheRecoveryPolicy(t *testing.T) {
 			if after, err := h.round(); err != nil || after != time.Second || h.podFacts() != patched {
 				t.Fatalf("a second before the deadline: round = %v, %v; Pods %s", after, err, h.podFacts())
 			}
-			if events := eventsOf(recorder); len(events) != 0 {
+			if events := updateEventsOf(recorder); len(events) != 0 {
 				t.Errorf("events before the deadline = %v", events)
 			}
 
@@ -663,7 +677,7 @@ func TestAnUpdateThatMissesItsDeadlineFollowsTheRecoveryPolicy(t *testing.T) {
 			}
 			policy := string(tt.policy)
 			// Next to it there may be the event of a Role instance that is drained.
-			events := eventsOf(recorder)
+			events := updateEventsOf(recorder)
 			var timeouts []string
 			for _, event := range events {
 				if strings.Contains(event, ReasonInPlaceUpdateTimeout) {
@@ -675,7 +689,7 @@ func TestAnUpdateThatMissesItsDeadlineFollowsTheRecoveryPolicy(t *testing.T) {
 			}
 			// The timeout is reported once, not in every round.
 			h.mustRound()
-			if events := eventsOf(recorder); hasEvent(events, ReasonInPlaceUpdateTimeout) {
+			if events := updateEventsOf(recorder); hasEvent(events, ReasonInPlaceUpdateTimeout) {
 				t.Errorf("the timeout was reported again: %v", events)
 			}
 
@@ -858,7 +872,7 @@ func TestTheTargetMovesOnDuringAnUpdate(t *testing.T) {
 	if got := h.podFacts(); got != want || !reflect.DeepEqual(h.uids(), before) || h.conditions() != "Ready=AllInstancesReady" {
 		t.Fatalf("after the update: %s, conditions %q", got, h.conditions())
 	}
-	for _, event := range eventsOf(recorder) {
+	for _, event := range updateEventsOf(recorder) {
 		if strings.Contains(event, "revision rev-b completed") {
 			t.Errorf("the update that was abandoned is reported as completed: %s", event)
 		}
@@ -884,7 +898,7 @@ func TestARevertDuringAnUpdateRecreatesTheGroup(t *testing.T) {
 	h.settleContainers()
 	h.retarget("rev-b")
 	h.mustRound()
-	eventsOf(recorder)
+	updateEventsOf(recorder)
 
 	h.retarget("rev-a")
 	if writes := h.mustRound(); !reflect.DeepEqual(writes, []string{"update servinggroups/status llama-0"}) {
@@ -893,7 +907,7 @@ func TestARevertDuringAnUpdateRecreatesTheGroup(t *testing.T) {
 	if got := h.conditions(); got != "RecreateRequired=InPlaceUpdateNotPossible" || h.podFacts() != patchedV2 {
 		t.Errorf("conditions = %q, Pods %s", got, h.podFacts())
 	}
-	if events := eventsOf(recorder); len(events) != 0 {
+	if events := updateEventsOf(recorder); len(events) != 0 {
 		t.Errorf("events = %v, want none: the update was abandoned, it did not fall back", events)
 	}
 
@@ -1225,7 +1239,7 @@ func TestAGroupThatIsNotAtTheTargetLeavesItsPodsAlone(t *testing.T) {
 				group.Spec.RolloutStrategy.UpdateMethod = method
 			})
 			h.cluster.ResetWrites()
-			eventsOf(recorder)
+			updateEventsOf(recorder)
 
 			writes := h.mustRound()
 			for _, write := range writes {
@@ -1241,7 +1255,7 @@ func TestAGroupThatIsNotAtTheTargetLeavesItsPodsAlone(t *testing.T) {
 			if got := h.conditions(); got != "Ready=AllInstancesReady" {
 				t.Errorf("conditions = %q, want the group ready and not asking to be recreated", got)
 			}
-			if events := eventsOf(recorder); hasEvent(events, ReasonInPlaceUpdateCompleted) || hasEvent(events, ReasonInPlaceUpdateFallback) {
+			if events := updateEventsOf(recorder); hasEvent(events, ReasonInPlaceUpdateCompleted) || hasEvent(events, ReasonInPlaceUpdateFallback) {
 				t.Errorf("events = %v, want none about an update of the group", events)
 			}
 

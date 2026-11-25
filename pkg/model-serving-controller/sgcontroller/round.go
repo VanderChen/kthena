@@ -64,7 +64,9 @@ type round struct {
 	// fail, when not nil, sets the Failed condition in this round.
 	fail *servinggroup.ConditionChange
 	// failure is an error of the decision itself. Nothing is created or deleted.
-	failure error
+	// failureRetry, when positive, is when it is worth deciding again.
+	failure      error
+	failureRetry time.Duration
 	// confirm reports that the round rests on Pods being absent, terminating
 	// or faulty, and has to be decided again on a direct read before it acts.
 	confirm bool

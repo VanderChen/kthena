@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -48,6 +49,12 @@ const (
 	ReasonNameOccupied       = "NameOccupied"
 	ReasonOwnerNotFound      = "OwnerNotFound"
 	ReasonStatusNotPersisted = "StatusNotPersisted"
+	// ReasonPluginError and ReasonRevisionUnresolved are recorded on the
+	// ModelServing, where a version without group objects recorded them: a
+	// plugin refused a Pod that was to be created, and the revision of a group
+	// cannot be resolved.
+	ReasonPluginError        = "PluginError"
+	ReasonRevisionUnresolved = "RevisionUnresolved"
 )
 
 // errNameOccupied reports that the name of a member is held by an object that
@@ -82,17 +89,25 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	if err != nil {
 		return 0, err
 	}
+	// A round that is under way when the group goes away would remember it
+	// for good: the event that drops what is remembered has passed by then.
+	defer func() {
+		if current, err := c.caches.ServingGroup(namespace, name); apierrors.IsNotFound(err) || err == nil && current.UID != group.UID {
+			c.drop(group.UID)
+		}
+	}()
 	if group.DeletionTimestamp != nil {
 		// The garbage collector removes the members. Nothing is created for a
 		// group that is going away.
-		c.forget(group.UID, nil)
+		c.drop(group.UID)
 		c.farewell(ctx, group)
 		return 0, nil
 	}
-	parent := c.parentOf(group)
+	parent, stray := c.parentOf(group)
 	if parent == nil {
-		c.recorder.Eventf(group, corev1.EventTypeWarning, ReasonOwnerNotFound,
-			"no ModelServing controls the group under a name of the form <ModelServing>-<ordinal>; the group is left alone")
+		if stray != "" {
+			c.recorder.Eventf(group, corev1.EventTypeWarning, ReasonOwnerNotFound, "%s; the group is left alone", stray)
+		}
 		return 0, nil
 	}
 
@@ -105,10 +120,10 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	// part of what the round is decided on: nothing is created beside them.
 	pods := append(c.caches.PodsOfGroup(group), c.caches.PodsOfEarlierObjects(group)...)
 	r := c.decide(observation{group: group, parent: parent, pods: pods}, now)
-	if err := c.syncPlugins(ctx, parent); err != nil {
+	if retry, err := c.syncPlugins(ctx, parent); err != nil {
 		// A hook of the ModelServing said that nothing may be done for it:
 		// the round creates, deletes and patches nothing, and says why.
-		r.failure = err
+		r.failure, r.failureRetry = err, retry
 		return c.execute(ctx, r, now)
 	}
 	if r.confirm {
@@ -129,33 +144,42 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 // syncPlugins calls the OnModelServingSync hooks of the ModelServing. Its own
 // controller calls them as well, before it creates or deletes a group; a hook
 // that fails without asking to continue has to stop what happens inside the
-// groups that exist, too.
-func (c *Controller) syncPlugins(ctx context.Context, parent *workloadv1alpha1.ModelServing) error {
+// groups that exist, too. The duration is when such a hook asked to be called
+// again; zero when it did not say.
+func (c *Controller) syncPlugins(ctx context.Context, parent *workloadv1alpha1.ModelServing) (time.Duration, error) {
 	chain, err := c.chain(parent)
 	if err != nil {
-		return fmt.Errorf("build the plugins: %w", err)
+		return 0, fmt.Errorf("build the plugins: %w", err)
 	}
 	if chain == nil {
-		return nil
+		return 0, nil
 	}
 	result := chain.OnModelServingSync(ctx, &plugins.HookRequest{ModelServing: parent, KubeClient: c.kube, ServiceLister: c.services})
 	if result.Err == nil {
-		return nil
+		return 0, nil
 	}
 	if result.Continue {
 		klog.V(2).InfoS("A plugin failed; the round continues", "modelServing", klog.KObj(parent), "err", result.Err)
-		return nil
+		return 0, nil
 	}
-	return fmt.Errorf("plugins of ModelServing %s: %w", parent.Name, result.Err)
+	return max(result.RequeueAfter, 0), fmt.Errorf("plugins of ModelServing %s: %w", parent.Name, result.Err)
 }
 
 // farewell calls the OnRoleDelete hooks for the Role instances of a group
 // that is being deleted, once its Pods are gone. It is an attempt and no more:
 // the object can be gone before the round that would call them. What a plugin
 // creates for a group has to be owned by the group, so that it goes with it.
+//
+// The hooks are for a group whose members are deleted with it. A group that
+// is deleted to release its members, as the hand-back to a version without
+// group objects does, keeps what belongs to them: the hooks of the headless
+// Services would delete Services that were just handed back.
 func (c *Controller) farewell(ctx context.Context, group *workloadv1alpha1.ServingGroup) {
-	parent := c.parentOf(group)
-	if parent == nil || len(group.Status.RoleInstances) == 0 || len(c.caches.PodsOfGroup(group)) > 0 {
+	if !slices.Contains(group.Finalizers, metav1.FinalizerDeleteDependents) || c.rollingBack() {
+		return
+	}
+	parent, _ := c.parentOf(group)
+	if parent == nil || handingBack(parent) || len(group.Status.RoleInstances) == 0 || len(c.caches.PodsOfGroup(group)) > 0 {
 		return
 	}
 	history := workload.NewHistory(workload.Base(parent, group), c.caches.ControllerRevision)
@@ -177,30 +201,77 @@ func (c *Controller) farewell(ctx context.Context, group *workloadv1alpha1.Servi
 	}
 }
 
+// Role states, as the events on the ModelServing name them.
+const (
+	roleCreating = "Creating"
+	roleRunning  = "Running"
+	roleDeleting = "Deleting"
+)
+
 // reportRoles records, on the ModelServing, that a Role instance entered a
-// phase. The events are the ones a version without group objects recorded.
-func (c *Controller) reportRoles(r *round, changes map[servinggroup.InstanceKey]servinggroup.LedgerChange) {
+// state. The events are the ones a version without group objects recorded:
+// Creating while its Pods are created or not all ready, Running when every
+// Pod of it is ready, Creating again when one stops being ready, Deleting
+// when it is drained.
+//
+// What was reported last is remembered in the process and nowhere else. A new
+// process takes an instance it finds running for one that was reported: it
+// does not report every instance of every group again.
+//
+// ledger is the ledger as the round wrote it; creating holds the instances
+// the round creates members for.
+func (c *Controller) reportRoles(r *round, ledger []workloadv1alpha1.RoleInstanceStatus, creating sets.Set[servinggroup.InstanceKey]) {
+	phases := map[servinggroup.InstanceKey]workloadv1alpha1.RoleInstancePhase{}
+	for _, entry := range ledger {
+		phases[servinggroup.InstanceKey{Role: entry.Role, Index: int(entry.Index)}] = entry.Phase
+	}
+	states := map[servinggroup.InstanceKey]string{}
 	for i := range r.steps {
 		s := &r.steps[i]
-		state := ""
-		change, changed := changes[s.key]
+		phase, recorded := phases[s.key]
 		switch {
-		case changed && change.Remove:
-		case changed && change.Phase == workloadv1alpha1.RoleInstanceCreating:
-			state = "Creating"
-		case changed && change.Phase == workloadv1alpha1.RoleInstanceEstablished:
-			state = "Running"
-		case changed && change.Phase == workloadv1alpha1.RoleInstanceDraining:
-			state = "Deleting"
-		case !changed && s.inst.Entry == nil && len(s.inst.Members) == 0 && len(s.step.Create) > 0:
-			// An instance that is created for the first time has no entry in
-			// the ledger until it is established.
-			state = "Creating"
+		case recorded && phase == workloadv1alpha1.RoleInstanceDraining:
+			states[s.key] = roleDeleting
+		case recorded && s.want != nil && s.want.LayoutKnown && s.inst.Ready(s.want.Workers):
+			states[s.key] = roleRunning
+		case recorded || len(s.inst.Members) > 0 || creating.Has(s.key):
+			states[s.key] = roleCreating
 		}
-		if state != "" {
-			c.recorder.Eventf(r.parent, corev1.EventTypeNormal, "Role"+state, "Role %s/%s in ServingGroup %s is now %s",
-				s.key.Role, utils.GenerateRoleID(s.key.Role, s.key.Index), r.group.Name, state)
+	}
+
+	c.readyMu.Lock()
+	reported := c.roleStates[r.group.UID]
+	c.roleStates[r.group.UID] = states
+	c.readyMu.Unlock()
+	for i := range r.steps {
+		key := r.steps[i].key
+		state, known := states[key]
+		before, seen := reported[key]
+		if !known || state == before || state == roleRunning && !seen {
+			continue
 		}
+		c.recorder.Eventf(r.parent, corev1.EventTypeNormal, "Role"+state, "Role %s/%s in ServingGroup %s is now %s",
+			key.Role, utils.GenerateRoleID(key.Role, key.Index), r.group.Name, state)
+	}
+}
+
+// reportUnresolved records, on the ModelServing, that the revision of the
+// group cannot be resolved: nothing is created from it until it can be. It is
+// recorded once for a revision, not in every round that finds it so.
+func (c *Controller) reportUnresolved(r *round) {
+	revision := groupRevision(r.group)
+	_, err := r.history.At(revision)
+	c.readyMu.Lock()
+	reported, known := c.unresolved[r.group.UID]
+	if err == nil {
+		delete(c.unresolved, r.group.UID)
+	} else {
+		c.unresolved[r.group.UID] = revision
+	}
+	c.readyMu.Unlock()
+	if err != nil && !(known && reported == revision) {
+		c.recorder.Eventf(r.parent, corev1.EventTypeWarning, ReasonRevisionUnresolved,
+			"Cannot resolve revision %q of ServingGroup %s; template-driven creation and deletion are paused for it: %v", revision, r.group.Name, err)
 	}
 }
 
@@ -214,23 +285,25 @@ func handingBack(parent *workloadv1alpha1.ModelServing) bool {
 }
 
 // parentOf returns the ModelServing that controls group, from the cache, or
-// nil when there is none.
-func (c *Controller) parentOf(group *workloadv1alpha1.ServingGroup) *workloadv1alpha1.ModelServing {
+// nil when there is none. stray then says what is wrong with a group that
+// will stay as it is; it is empty for a group whose ModelServing is being
+// deleted or is gone, which the garbage collector deletes.
+func (c *Controller) parentOf(group *workloadv1alpha1.ServingGroup) (parent *workloadv1alpha1.ModelServing, stray string) {
 	owner := metav1.GetControllerOfNoCopy(group)
 	if owner == nil || owner.Kind != workloadv1alpha1.ModelServingKind.Kind {
-		return nil
+		return nil, "no ModelServing controls the group"
 	}
 	// A ModelServing only knows the groups that carry its name and an
 	// ordinal. An object under another name that points at it is not counted,
 	// rolled or deleted by it, and gets no Pods either.
 	if prefix, _, ok := objcache.OrdinalName(group.Name); !ok || prefix != owner.Name {
-		return nil
+		return nil, fmt.Sprintf("the name of the group is not of the form %s-<ordinal>, which ModelServing %s takes its groups by", owner.Name, owner.Name)
 	}
 	parent, err := c.caches.ModelServing(group.Namespace, owner.Name)
 	if err != nil || parent.UID != owner.UID || parent.DeletionTimestamp != nil {
-		return nil
+		return nil, ""
 	}
-	return parent
+	return parent, ""
 }
 
 // readDirect reads from the API server what obs holds from the cache. ok is
@@ -321,10 +394,22 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 			// that is patched and not relabelled is in the middle of one.
 			Updating:     servinggroup.UnfinishedUpdates(r.instances),
 			Coordination: coordination,
-			Failure:      &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
+			// No plan says what is still to be created. The count the group
+			// committed to is kept: members that the cache does not show yet
+			// may be among it, and a count of zero would say that the group
+			// has none.
+			PendingCreates: max(0, int(group.Status.Pods)-len(r.members)),
+			Failure:        &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
 		})
 		if _, err := c.writeStatus(ctx, group, status); err != nil {
 			return 0, err
+		}
+		if r.failureRetry > 0 {
+			// The hook said when it is worth asking again. The delays of the
+			// queue grow with every failure; the groups would act long after
+			// the hook lets them.
+			klog.ErrorS(r.failure, "Round failed; retrying later", "servingGroup", klog.KObj(group), "after", r.failureRetry)
+			return r.failureRetry, nil
 		}
 		return 0, r.failure
 	}
@@ -410,8 +495,13 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		return 0, err
 	}
 	input.Group = group
+	c.reportUnresolved(r)
 	c.reportInPlace(r)
-	c.reportRoles(r, changes)
+	creating := sets.New[servinggroup.InstanceKey]()
+	for _, creation := range creations {
+		creating.Insert(creation.step.key)
+	}
+	c.reportRoles(r, ledger, creating)
 
 	actFailure := c.act(ctx, r, group, owner, creations, now, podGroupFailure != nil)
 	failure := errors.Join(podGroupFailure, predecessorFailure, actFailure)
@@ -504,6 +594,16 @@ func (c *Controller) writeStatus(ctx context.Context, group *workloadv1alpha1.Se
 		return nil, fmt.Errorf("the status of ServingGroup %s was not kept as written", group.Name)
 	}
 	return written, nil
+}
+
+// drop drops everything the process remembers about a group that is gone or
+// going away.
+func (c *Controller) drop(group types.UID) {
+	c.forget(group, nil)
+	c.readyMu.Lock()
+	defer c.readyMu.Unlock()
+	delete(c.roleStates, group)
+	delete(c.unresolved, group)
 }
 
 // forget drops what the process remembers about Pods of a group that are not

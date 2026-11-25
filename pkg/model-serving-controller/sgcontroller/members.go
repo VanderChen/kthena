@@ -265,6 +265,7 @@ func (c *Controller) createMembers(ctx context.Context, r *round, group *workloa
 			hook := *request
 			hook.Role, hook.Pod, hook.IsEntry = &role, pod, ordinal == 0
 			if err := chain.OnPodCreate(ctx, &hook); err != nil {
+				c.recorder.Event(r.parent, corev1.EventTypeWarning, ReasonPluginError, err.Error())
 				return fmt.Errorf("prepare Pod %s: %w", pod.Name, err)
 			}
 		}
