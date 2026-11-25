@@ -18,11 +18,13 @@ package mscontroller
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -31,7 +33,9 @@ import (
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/grouplevel"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // roleRolling turns ms into two groups of three instances of the Role, rolled
@@ -510,5 +514,66 @@ func TestASourceGenerationFromNowhereDoesNotStopTheHandDown(t *testing.T) {
 			t.Errorf("group %s: recoveryPolicy %q from generation %d; want None from generation %d",
 				group.Name, group.Spec.RecoveryPolicy, group.Spec.SourceGeneration, generation)
 		}
+	}
+}
+
+// A group that comes from RoleRollingUpdate gets, for its spec, the revision
+// its Pods run. One whose Pods run two revisions is taken for the baseline,
+// so that it is moved or replaced within the budget. When the baseline is the
+// target there is no revision to take it for: handed the target, it would
+// bring all its Pods to it at once, outside the budget. Its spec is left as
+// it is.
+func TestTheRevisionOfAGroupThatComesFromARolloutByRoles(t *testing.T) {
+	ms := modelServing()
+	ms.UID = "ms-uid"
+	changed := modelServing(setImage("model:v2"))
+	changed.UID = ms.UID
+	revisions := map[string]*appsv1.ControllerRevision{}
+	for _, revision := range []*appsv1.ControllerRevision{legacyRevision(t, ms, "rev-a", false), legacyRevision(t, changed, "rev-b", false)} {
+		revisions[revision.Name] = revision
+	}
+	mixed := func() *groupState {
+		return &groupState{
+			object: &workloadv1alpha1.ServingGroup{Status: workloadv1alpha1.ServingGroupStatus{ObservedGeneration: 1, Pods: 2}},
+			unit:   grouplevel.Group{Observed: true, Fresh: true},
+		}
+	}
+	for _, tt := range []struct {
+		name             string
+		baseline, target string
+		state            func(*groupState)
+		want             string
+		ok               bool
+	}{
+		{name: "two revisions, a rollout under way: the baseline", baseline: "rev-a", target: "rev-b", want: "rev-a", ok: true},
+		{name: "two revisions, the baseline is the target: left as it is", baseline: "rev-b", target: "rev-b"},
+		{name: "two revisions, no baseline: left as it is", target: "rev-b"},
+		{name: "two revisions, a baseline that cannot be read: left as it is", baseline: "rev-gone", target: "rev-b"},
+		{name: "one revision: the one its Pods run", baseline: "rev-a", target: "rev-b",
+			state: func(g *groupState) { g.object.Status.Revision = "rev-b" }, want: "rev-b", ok: true},
+		{name: "not reported on its Pods: left as it is", baseline: "rev-a", target: "rev-b",
+			state: func(g *groupState) { g.unit.Fresh = false }},
+		{name: "a spec that names its revision keeps it", baseline: "rev-a", target: "rev-b",
+			state: func(g *groupState) { g.object.Spec.Revision = "rev-0" }, want: "rev-0", ok: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &round{
+				ms: changed, baseline: tt.baseline, target: tt.target,
+				view: &view{spec: grouplevel.Spec{Mode: grouplevel.ModeServingGroup, Target: tt.target, Baseline: tt.baseline}},
+				history: workload.NewHistory(changed, func(_, name string) (*appsv1.ControllerRevision, error) {
+					if revision, ok := revisions[name]; ok {
+						return revision, nil
+					}
+					return nil, errors.New("no such revision")
+				}),
+			}
+			g := mixed()
+			if tt.state != nil {
+				tt.state(g)
+			}
+			if got, ok := r.revisionOf(g); got != tt.want || ok != tt.ok {
+				t.Errorf("revision = %q, %t; want %q, %t", got, ok, tt.want, tt.ok)
+			}
+		})
 	}
 }
