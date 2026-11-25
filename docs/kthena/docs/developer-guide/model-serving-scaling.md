@@ -8,13 +8,13 @@ In modelServing, as has two layers of resource descriptions, `ServingGroup` and 
 
 When the `ModelServing.Replicas` is modified, it triggers the Scaling of the `ServingGroup` granularity.
 
-When scaling is triggered, the status of the entire `ServingGroup` is set to `Creating` or `Deleting`, and then the `ServingGroup` creation or deletion process is performed.
+When scaling is triggered, the ModelServing controller creates or deletes `ServingGroup` objects.
 
 After the `replicas` of `ServingGroups` meets expectations. Then update the status of the ServingGroup based on the status of all the pods in the ServingGroup.
 
 `ServingGroups` use deterministic ordinal-based identities similar to StatefulSet Pods. When scaling up, the controller creates only missing ordinals in `[0, replicas)`, in ascending order. For example, scaling from the contiguous set `G-0`, `G-1` to four replicas creates `G-2` and `G-3`. If the existing set is `G-0`, `G-2`, and `G-3`, scaling to four replicas recreates `G-1` instead of appending `G-4`.
 
-A `ServingGroup` that is being deleted continues to reserve its ordinal in the controller datastore until all of its resources are gone. This prevents a replacement with the same deterministic name from being created too early. After deletion is observed and the datastore entry is removed, a later reconciliation can reuse that ordinal. Existing out-of-range ordinals from an older controller version are not proactively renumbered; the invariant applies to newly created `ServingGroups`.
+A `ServingGroup` that is being deleted keeps its ordinal until all of its resources are gone: its object is deleted in the foreground and exists until its Pods are deleted. This prevents a replacement with the same deterministic name from being created too early. After the object is gone, a later reconciliation can reuse that ordinal. Existing out-of-range ordinals from an older controller version are not proactively renumbered; the invariant applies to newly created `ServingGroups`.
 
 Scale-down selection continues to consider readiness and deletion cost, with the ordinal used as a tie-breaker. It therefore does not always remove the highest ordinal first.
 
@@ -53,7 +53,7 @@ Dynamically adjusting the number of instances not only improves resource utiliza
 
 When the `role.Replicas` is modified, it triggers the Scaling of the role granularity.
 
-When scaling is triggered, the status of the entire `ServingGroup` is set to scaling, and then the pod creation or deletion process is performed.
+When scaling is triggered, the `ServingGroup` reports `Ready=False` until the Role has its declared number of ready instances, and the pod creation or deletion process is performed.
 
 After the replicas of pods meets expectations. Then update the status of the ServingGroup based on the status of all the pods in the `ServingGroup`.
 

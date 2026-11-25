@@ -147,7 +147,7 @@ For LWS-converted workloads, the plugin preserves the shared subdomain and hostn
 
 The plugin accepts `scope.roles`; `scope.target` must be omitted or `All`. A Role without `workerTemplate` gets neither these Services nor the generated DNS settings. A non-nil `workerTemplate` still qualifies when `workerReplicas` is zero. Desired Services are recovered after accidental deletion. They are auxiliary resources: their presence, absence, or terminating state does not establish whether a Role or ServingGroup exists.
 
-Deletion retries retain the original Pod and Service UIDs. If a new Pod has reused an instance identity, the controller reports `DeletionIdentityChanged`, preserves that Pod and its existing networking, and leaves deletion pending. It does not automatically adopt or delete the replacement; resolve the conflicting workload identity before expecting deletion to finish.
+The Services of a Role instance are owned by its `ServingGroup` object and carry the generation of the instance in the `modelserving.volcano.sh/instance-generation` label. When a Role instance is removed or recreated, the plugin deletes only the Services of the generation that was removed, so a retried deletion never removes the Services of the instance that was created after it. When a whole ServingGroup is deleted, its Services are garbage-collected with it.
 
 ### Upgrade and migration
 

@@ -6,7 +6,7 @@ Kthena leverages Volcano to implement gang scheduler capabilities. Additionally,
 
 ## Overview
 
-In kthena, when deploying models via modelServing, Volcano is employed as the default scheduler. The modelServing controller creates a PodGroup for each ServingGroup. Therefore, by default, users require no additional configuration; once the environment is prepared, they can benefit from gang scheduling for Group.
+In kthena, when deploying models via modelServing, Volcano is employed as the default scheduler. The ServingGroup controller creates a PodGroup for each ServingGroup, owned by the `ServingGroup` object. Therefore, by default, users require no additional configuration; once the environment is prepared, they can benefit from gang scheduling for Group.
 
 ## Multi-Dimensional Gang Scheduling
 
