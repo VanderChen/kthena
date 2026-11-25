@@ -434,6 +434,15 @@ func TestComputeStatusConditionLifecycle(t *testing.T) {
 	if ready := meta.FindStatusCondition(status.Conditions, condReady); ready.Status != metav1.ConditionFalse || !ready.LastTransitionTime.Equal(&now) {
 		t.Errorf("Ready = %s since %v, want False since now", ready.Status, ready.LastTransitionTime)
 	}
+
+	// The rollout strategy becomes RoleRollingUpdate. Nothing replaces a
+	// group as a whole then: the condition that asks for it goes away.
+	group.Status = status
+	group.Spec.RolloutStrategy = &workloadv1alpha1.ServingGroupRolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+	status = statusOf(group, ledgerOf(established, 0), threePods())
+	if meta.FindStatusCondition(status.Conditions, condRecreate) != nil {
+		t.Errorf("RecreateRequired stays on a group that is rolled Role by Role")
+	}
 }
 
 func TestEmpty(t *testing.T) {

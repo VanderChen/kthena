@@ -86,7 +86,8 @@ type StatusInput struct {
 
 	// Fail, when not nil, sets the Failed condition. Failed is never cleared.
 	Fail *ConditionChange
-	// RecreateRequired, when not nil, sets the RecreateRequired condition. It is never cleared.
+	// RecreateRequired, when not nil, sets the RecreateRequired condition. It
+	// is not cleared while the group is replaced as a whole.
 	RecreateRequired *ConditionChange
 	// DrainBlocked, when not empty, says which hook keeps an instance from being drained.
 	DrainBlocked string
@@ -198,7 +199,16 @@ func ComputeStatus(in StatusInput) workloadv1alpha1.ServingGroupStatus {
 		set(workloadv1alpha1.ServingGroupConditionDrained, true, ReasonNoFaultyMember,
 			"no member with a fault and no terminating Pod is left")
 	}
-	sticky(workloadv1alpha1.ServingGroupConditionRecreateRequired, in.RecreateRequired)
+	if strategy := group.Spec.RolloutStrategy; strategy != nil && strategy.Type == workloadv1alpha1.RoleRollingUpdate {
+		// The condition asks for the group to be replaced as a whole. A group
+		// that is rolled Role by Role never is: the condition would stay for
+		// good, the group would never count as updated, and it would be
+		// replaced on the day the strategy is changed back, whatever its Pods
+		// run by then.
+		meta.RemoveStatusCondition(&status.Conditions, string(workloadv1alpha1.ServingGroupConditionRecreateRequired))
+	} else {
+		sticky(workloadv1alpha1.ServingGroupConditionRecreateRequired, in.RecreateRequired)
+	}
 
 	var drainBlocked *ConditionChange
 	if in.DrainBlocked != "" {
