@@ -21,11 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 )
 
 // adoption decides whether the round is gated: whether workloads that an
@@ -82,8 +85,17 @@ func (c *Controller) adoption(ctx context.Context, r *round) (bool, error) {
 	return pending, nil
 }
 
-// legacyPods counts, on a direct read, the Pods that the ModelServing itself
-// controls and that are not terminating.
+// ReasonNotTakenOver is the reason of the event about a Pod that the
+// ModelServing controls and that no group takes over.
+const ReasonNotTakenOver = "PodNotTakenOver"
+
+// legacyPods counts, on a direct read, the member Pods that the ModelServing
+// itself controls and that are not terminating.
+//
+// A Pod that the ModelServing controls without being a member of one of its
+// groups, a copy of a member under another name for instance, is not taken
+// over by any group. It is not waited for, or the take-over would never end;
+// it is left as it is, and an event says so.
 func (c *Controller) legacyPods(ctx context.Context, ms *workloadv1alpha1.ModelServing) (int, error) {
 	selector := labels.SelectorFromSet(labels.Set{workloadv1alpha1.ModelServingNameLabelKey: ms.Name})
 	pods, err := c.kube.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: selector.String()})
@@ -93,9 +105,16 @@ func (c *Controller) legacyPods(ctx context.Context, ms *workloadv1alpha1.ModelS
 	legacy := 0
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.UID == ms.UID && pod.DeletionTimestamp == nil {
-			legacy++
+		if owner := metav1.GetControllerOfNoCopy(pod); owner == nil || owner.UID != ms.UID || pod.DeletionTimestamp != nil {
+			continue
 		}
+		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if prefix, _, ok := objcache.OrdinalName(group); ok && prefix == ms.Name && servinggroup.HasMemberIdentity(pod, ms.Name, group) {
+			legacy++
+			continue
+		}
+		c.recorder.Eventf(ms, corev1.EventTypeWarning, ReasonNotTakenOver,
+			"Pod %s is controlled by the ModelServing and is not a member of one of its groups; it is not taken over and not deleted", pod.Name)
 	}
 	return legacy, nil
 }

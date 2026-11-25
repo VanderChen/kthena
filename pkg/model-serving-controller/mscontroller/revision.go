@@ -83,6 +83,41 @@ func (c *Controller) forget(uid types.UID) {
 	delete(c.unsettledOf, uid)
 }
 
+// legacyBaseline returns the baseline of a ModelServing whose status has none
+// and that has no group object: the revision most of the groups that exist as
+// Pods without a group object run, the target left aside, or the target when
+// there is no such group. That is what an earlier version would have written
+// into the status with its next round; it is only missing when that version
+// was stopped before it got there.
+func (c *Controller) legacyBaseline(ms *workloadv1alpha1.ModelServing, target string) string {
+	revisions := map[string]map[string]bool{}
+	for _, pod := range c.caches.UnadoptedPodsOf(ms.Namespace, ms.Name) {
+		group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
+		if revisions[group] == nil {
+			revisions[group] = map[string]bool{}
+		}
+		revisions[group][utils.ObjectRevision(pod)] = true
+	}
+	count := map[string]int{}
+	for _, of := range revisions {
+		if len(of) != 1 {
+			continue
+		}
+		for revision := range of {
+			if revision != "" && revision != target {
+				count[revision]++
+			}
+		}
+	}
+	baseline := target
+	for revision, groups := range count {
+		if baseline == target || groups > count[baseline] || groups == count[baseline] && revision < baseline {
+			baseline = revision
+		}
+	}
+	return baseline
+}
+
 // baselineRevision returns the baseline revision B: the revision the groups
 // were at before the rollout that is under way, from which a group below the
 // partition is created.

@@ -283,6 +283,31 @@ func TestAGroupWithoutItsLabelIsStillCounted(t *testing.T) {
 	}
 }
 
+// A round that is about to write reads the ModelServing and its groups from
+// the API server and decides again on what it read. The cache may be behind:
+// here it still shows a scale-down that was taken back.
+func TestAStaleCacheDoesNotDeleteAGroup(t *testing.T) {
+	s := newSystem(t, modelServing())
+	s.settle()
+	s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](2) })
+	stale, snapshot := s.caches()
+	s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](3) })
+	s.cluster.ResetWrites()
+
+	s.ms.SetCaches(stale, snapshot.Listers().Services)
+	if _, err := s.ms.Reconcile(context.Background(), testNamespace, testName); err != nil && !errors.Is(err, ErrNotSettled) {
+		t.Fatal(err)
+	}
+	for _, write := range s.cluster.Writes() {
+		if write.Verb == "delete" {
+			t.Errorf("a round on a cache that was behind issued: %s", write)
+		}
+	}
+	if got, want := s.images(), "0=model:v1 1=model:v1 2=model:v1"; got != want {
+		t.Errorf("groups = %s, want %s", got, want)
+	}
+}
+
 // A rollout that waits is reported as blocked once the wait has lasted, with
 // what it waits for, and no longer when it moves again.
 func TestRolloutBlocked(t *testing.T) {

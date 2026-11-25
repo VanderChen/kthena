@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -276,5 +277,66 @@ func TestAnInPlaceUpdateUnderWayIsTakenOver(t *testing.T) {
 		if meta.IsStatusConditionTrue(group.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionRecreateRequired)) {
 			t.Errorf("group %s asks to be recreated", group.Name)
 		}
+	}
+}
+
+// A Pod that the ModelServing controls and that is no member of a group, a
+// copy of a member under another name here, is taken over by no group. The
+// take-over does not wait for it; it is left as it is, and an event says so.
+func TestAPodThatIsNoMemberDoesNotHoldUpTheTakeOver(t *testing.T) {
+	ms := modelServing()
+	ms.UID = "ms-uid"
+	ms.Status = workloadv1alpha1.ModelServingStatus{
+		Replicas: 3, UpdatedReplicas: 3, CurrentReplicas: 3, AvailableReplicas: 3, CurrentRevision: "rev-old", UpdateRevision: "rev-old",
+	}
+	objects := []runtime.Object{ms, legacyRevision(t, ms, "rev-old", false)}
+	for ordinal := range 3 {
+		objects = append(objects, legacyPods(ms, ordinal, "rev-old", "model:v1", false)...)
+	}
+	copied := legacyPods(ms, 0, "rev-old", "model:v1", false)[0].(*corev1.Pod)
+	copied.Name = "debug-copy"
+	objects = append(objects, copied)
+	s := newSystem(t, objects...)
+	recorder := s.withEvents()
+
+	s.settle()
+	if state := s.modelServing().Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey]; state != workloadv1alpha1.ServingGroupAdoptionDone {
+		t.Fatalf("the take-over is %q, want it done: %s", state, s.summary())
+	}
+	if got, want := s.summary(), "groups[0=model:v1 1=model:v1 2=model:v1] replicas=3 updated=3 current=3 available=3 Available"; got != want {
+		t.Errorf("after the take-over:\n got %s\nwant %s", got, want)
+	}
+	pod, err := s.cluster.GetPod(testNamespace, "debug-copy")
+	if err != nil || metav1.GetControllerOf(pod) == nil || metav1.GetControllerOf(pod).UID != ms.UID {
+		t.Errorf("the copy was touched: %v, %v", pod, err)
+	}
+	if events := eventsOf(recorder, ReasonNotTakenOver); len(events) == 0 || !strings.Contains(events[0], "debug-copy") {
+		t.Errorf("events about the copy: %v", events)
+	}
+}
+
+// An earlier version was stopped before it wrote the revisions into the
+// status, in the middle of a rollout. The baseline is what most of its groups
+// run: a group that is created below the partition comes from there.
+func TestTheBaselineOfAnEarlierVersionIsReadFromItsPods(t *testing.T) {
+	old := modelServing()
+	old.UID = "ms-uid"
+	ms := modelServing(setImage("model:v2"), rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
+		config.Partition = ptr.To(intstr.FromInt32(2))
+	}))
+	ms.UID = "ms-uid"
+	objects := []runtime.Object{ms, legacyRevision(t, old, "rev-old", false), legacyRevision(t, ms, "rev-new", false)}
+	objects = append(objects, legacyPods(ms, 1, "rev-old", "model:v1", false)...)
+	objects = append(objects, legacyPods(ms, 2, "rev-new", "model:v2", false)...)
+	s := newSystem(t, objects...)
+
+	s.settle()
+	// Group 0 did not exist. It is below the partition: it is created from
+	// the baseline, not from the target.
+	if got, want := s.images(), "0=model:v1 1=model:v1 2=model:v2"; got != want {
+		t.Fatalf("groups: %s, want %s", got, want)
+	}
+	if status := s.modelServing().Status; status.CurrentRevision != "rev-old" || status.UpdateRevision != "rev-new" {
+		t.Errorf("revisions = %s, %s", status.CurrentRevision, status.UpdateRevision)
 	}
 }

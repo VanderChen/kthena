@@ -226,6 +226,10 @@ func (c *Controller) plan(ctx context.Context, ms *workloadv1alpha1.ModelServing
 	}
 	r := &round{ms: ms, target: target, collisions: collisions}
 	r.baseline = baselineRevision(ms, groups.own, target)
+	if ms.Status.CurrentRevision == "" && len(groups.own) == 0 {
+		// Nothing records the baseline. Pods of an earlier version may tell.
+		r.baseline = c.legacyBaseline(ms, target)
+	}
 	if recorded, r.baselineReplicas, err = c.coordinatedReplicas(ctx, ms, target, r.baseline, recorded); err != nil {
 		return nil, err
 	}
