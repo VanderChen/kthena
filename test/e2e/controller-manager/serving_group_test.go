@@ -209,7 +209,7 @@ func TestServingGroupLifecycle(t *testing.T) {
 		assert.NotContains(t, group.Annotations, workload.SurgeAnnotationKey, "ServingGroup %s is a regular replica", group.Name)
 
 		assert.Equal(t, ms.Status.UpdateRevision, group.Spec.Revision, "revision of ServingGroup %s", group.Name)
-		assert.Empty(t, group.Spec.TargetRevision, "targetRevision is only set under RoleRollingUpdate")
+		assert.Equal(t, ms.Status.UpdateRevision, group.Spec.TargetRevision, "targetRevision of ServingGroup %s", group.Name)
 		assert.Equal(t, int32(3), group.Spec.ExpectedPods, "expectedPods of ServingGroup %s", group.Name)
 		assert.Equal(t, ms.Spec.RecoveryPolicy, group.Spec.RecoveryPolicy, "recoveryPolicy of ServingGroup %s", group.Name)
 		if assert.NotNil(t, group.Spec.RolloutStrategy, "rolloutStrategy of ServingGroup %s", group.Name) {
