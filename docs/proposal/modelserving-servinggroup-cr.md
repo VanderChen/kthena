@@ -273,7 +273,12 @@ type ServingGroupSpec struct {
 	// revision label of a Pod. Set under ServingGroupRollingUpdate, empty under
 	// RoleRollingUpdate.
 	Revision string `json:"revision,omitempty"`
-	// TargetRevision is the revision the Role instances of this group roll to under RoleRollingUpdate.
+	// TargetRevision is the revision the rollout of the ModelServing moves to, set
+	// under either strategy. Under RoleRollingUpdate the Role instances of this
+	// group are rolled to it. Under ServingGroupRollingUpdate a group whose
+	// Revision differs from it is a group of an earlier revision: it starts no
+	// update of its Pods until the ModelServing controller changes its revision
+	// or replaces it.
 	TargetRevision string `json:"targetRevision,omitempty"`
 	// BaselineRevision is a copy of ModelServing.status.currentRevision. Role instances
 	// protected by a Role partition are created from it.
@@ -288,7 +293,7 @@ type ServingGroupSpec struct {
 	RolloutStrategy           *ServingGroupRolloutStrategy `json:"rolloutStrategy,omitempty"`
 	RecoveryPolicy            RecoveryPolicy               `json:"recoveryPolicy,omitempty"`
 	RestartGracePeriodSeconds *int64                       `json:"restartGracePeriodSeconds,omitempty"`
-	GangPolicy                *GangPolicy                  `json:"gangPolicy,omitempty"`
+	GangPolicy                *ServingGroupGangPolicy      `json:"gangPolicy,omitempty"`
 	NetworkTopology           *NetworkTopology             `json:"networkTopology,omitempty"`
 	QueueName                 string                       `json:"queueName,omitempty"`
 	// Roles carries the per-Role settings that are not part of a revision:
@@ -339,7 +344,7 @@ Conditions of a ServingGroup:
 | `Ready` | Every Role has `replicas` instances and every instance is running and ready. A group whose Roles all have zero replicas is ready. Same definition as today | ServingGroup controller | ModelServing controller: budgets, status |
 | `Failed` | The group must be deleted and recreated at its ordinal. Never returns to false | ServingGroup controller | ModelServing controller |
 | `Drained` | Meaningful with `Failed`: no faulty member and no terminating Pod is left | ServingGroup controller | ModelServing controller: deletes the object when both are true |
-| `RecreateRequired` | The group can only be brought to its revision by replacing it: its Pods cannot be patched in place, or adopted Pods run another revision | ServingGroup controller | ModelServing controller: the group is a replacement candidate |
+| `RecreateRequired` | The group can only be brought to its revision by replacing it: its Pods cannot be patched in place, or adopted Pods run another revision. Never set on a group of an earlier revision, and removed from a group that is rolled Role by Role | ServingGroup controller | ModelServing controller: the group is a replacement candidate |
 | `DrainBlocked` | A Role instance cannot be drained because `OnRoleDelete` keeps failing | ServingGroup controller | Users |
 | `ReconcileFailed` | The last round ended with an error. `Ready` is still reported as observed | ServingGroup controller | Users |
 | `CoordinatedRoleRolloutBlocked` | As on ModelServing today, reported per group | ServingGroup controller | ModelServing controller: aggregated |
@@ -352,7 +357,7 @@ Other additions:
 | ServingGroup | annotation `modelserving.volcano.sh/surge: serving-group` | Temporary surge group. Set at creation, removed on promotion, never added later |
 | Pod | controller owner is the ServingGroup; `blockOwnerDeletion: true` | Also for the PodGroup and the Services |
 | Pod | label `modelserving.volcano.sh/instance-generation` | Generation of the Role instance the Pod was created for |
-| Pod | annotation `modelserving.volcano.sh/surge: serving-group` | A copy of the group's mark, kept for tools that read it from Pods. Not an input |
+| Pod | annotation `modelserving.volcano.sh/surge: serving-group` | A copy of the group's mark, kept for tools that read it from Pods. Not an input. Removed from the Pods in the group's next round after the group lost the mark |
 | ModelServing | condition `RolloutBlocked` | There is work to do, the plan of this round is empty, and the cause has lasted longer than a threshold. Reasons: `BaselineUnknown`, `OrdinalOccupied`, `WaitingForDeletion`, `GroupNotObserved`, `TargetNotReady`, `BudgetExhausted` |
 | ModelServing | annotation `modelserving.volcano.sh/servinggroup-adoption` | Progress of the takeover of workloads created by an older version: `InProgress`, `Done`, `RollingBack` |
 
@@ -465,12 +470,15 @@ work queues, whether `OnRoleDelete` was already called for a draining instance, 
 
 - The ServingGroup controller calls `OnPodCreate`, `OnPodReady`, `OnRoleSync` and `OnRoleDelete`.
 - `OnModelServingSync` is called by the ModelServing controller before it plans groups, and by the ServingGroup
-  controller before it changes a group. A blocking error stops the writes of that round in either controller, so no
-  Pod is created while the hook blocks, as today.
+  controller in every round of a group before it changes the group. A blocking error ends the round of the
+  ModelServing controller before anything is planned or written, as today. In the ServingGroup controller it lets
+  the round write the status of the group and nothing else. So no Pod is created while the hook blocks.
 - `OnRoleDelete` is guaranteed for an instance that the ServingGroup controller drains: it is called after the Pods
-  of the instance are gone and before the instance is recreated or forgotten. When a whole group is deleted with
-  foreground propagation the hook is called at most once on a best-effort basis; resources created by a plugin must
-  be owned by the ServingGroup so that they are garbage collected with it.
+  of the instance are gone and before the instance is recreated or forgotten. While it fails, that instance stays
+  drained and the group reports `DrainBlocked`; other instances and other groups are not held up. When a whole
+  group is deleted with foreground propagation the hook is called on a best-effort basis: it may not be called at
+  all, and may be called more than once. It is not called while workloads are handed back to an earlier version.
+  Resources created by a plugin must be owned by the ServingGroup so that they are garbage collected with it.
 - The eviction webhook, the autoscaler and ModelBooster find Pods by label and accept both owners: the ModelServing
   (workloads not yet taken over) and a ServingGroup of the ModelServing.
 - A PodDisruptionBudget that selects the Pods of a group resolves the expected count through the `scale`
@@ -504,7 +512,10 @@ at the same time, and the new version enforces this itself:
 | T5 | ServingGroup | The ledger starts at its zero value. An instance whose members are all present is written as `Established` |
 | T7 | ModelServing | No legacy object is left and every taken-over group is observed: annotate `Done` |
 
-Only metadata is written. The kubelet does not read owner references, so containers are not affected.
+Only metadata is written. The kubelet does not read owner references, so containers are not affected. While a
+ModelServing is taken over, its `status` is left as the older version wrote it — counts, conditions and
+`observedGeneration` — until every group has reported: a ModelServing whose Pods all serve does not turn
+unavailable for the time of the upgrade.
 
 The ledger starts empty. A member that was lost while no controller was running *during this first upgrade* is
 therefore only filled in, as it is today. From then on losses during an outage are recovered by policy.
@@ -543,17 +554,24 @@ Operation:
 | # | Today | With this proposal |
 | --- | --- | --- |
 | 11 | Leader election is off by default; a process that loses the lease keeps running | Leader election is on by default; a process that loses the lease exits |
-| 12 | Each whole-group replacement recreates Pods; the PodGroup and the Services are updated in place | The ServingGroup object, its PodGroup and its Services are recreated with the group (new UIDs, same names) |
+| 12 | Each whole-group replacement deletes and recreates the Pods, the PodGroup and the Services of the group | The same, and the ServingGroup object is recreated with them (new UID, same name). The PodGroup and the Services are deleted by the garbage collector with the object |
 | 13 | A PodDisruptionBudget with a percentage resolves the expected count from the ModelServing scale, which counts groups | It resolves it from the ServingGroup scale, which counts Pods |
 
-Everything else — names, labels, the ModelServing API, status counts and conditions, events, rollout order and
-budgets — is unchanged.
+Names, the existing labels, the ModelServing API, the definitions of the status counts and conditions, and the
+order and the budgets of a rollout are otherwise unchanged. Pods and headless Services get one more label,
+`modelserving.volcano.sh/instance-generation`. The Role events (`RoleCreating`, `RoleRunning`, `RoleDeleting`) and
+the in-place update events are recorded on the ModelServing as today; the group-level events are new, and the
+warning `DeletionIdentityChanged` no longer exists because every deletion carries a UID precondition. Smaller
+user-visible differences that follow from the split into two controllers — what `status.observedGeneration` says,
+how often plugin hooks are called — are listed in the upgrade guide,
+`docs/kthena/docs/user-guide/servinggroup-upgrade.md`.
 
 #### Test Plan
 
 - **Unit tests**, table driven: member classification, ledger transitions, status computation, the group-level
-  plan, takeover steps. For every write there is a test that stops after it and continues with a controller that
-  has no memory.
+  plan, takeover steps. For every write of a round there is a test that stops after it and continues with a
+  controller that has no memory. The writes of the takeover are the exception: stopping after each of them is
+  exercised on Kind only.
 - **Differential tests of the group-level plan** against a reference model of the rules, replaying the existing
   rollout scenarios (scale during rollout, repeated updates, partition, sparse ordinals, surge promotion and
   reclaim) step by step.
