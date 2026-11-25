@@ -236,7 +236,7 @@ func semanticRevisionTestModelServing(name, image string) *workloadv1alpha1.Mode
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name:     "decode",
 				Replicas: ptr.To[int32](1),
 				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{

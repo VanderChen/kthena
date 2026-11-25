@@ -37,7 +37,7 @@ import (
 
 func TestProtectedTargetDoesNotRetainPhantomOldDependency(t *testing.T) {
 	role := api.Role{Name: "a", Replicas: ptr.To[int32](2)}
-	ms := &api.ModelServing{Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
+	ms := &api.ModelServing{Spec: api.ModelServingSpec{Template: api.ServingGroupTemplate{Roles: []api.Role{role}}}}
 	hash := utils.CalRoleTemplateHash(role)
 	instances := []datastore.Role{{Name: "a-0", RoleTemplateHash: hash, Status: datastore.RoleRunning}, {Name: "a-1", RoleTemplateHash: hash, Status: datastore.RoleRunning}}
 	ms.Name, ms.Namespace, ms.UID = "model", "default", "model-owner"
@@ -53,7 +53,7 @@ func TestProtectedTargetDoesNotRetainPhantomOldDependency(t *testing.T) {
 
 func TestMissingFormalCapacityDoesNotBypassDependencyStartup(t *testing.T) {
 	role := api.Role{Name: "a", Replicas: ptr.To[int32](2)}
-	ms := &api.ModelServing{Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
+	ms := &api.ModelServing{Spec: api.ModelServingSpec{Template: api.ServingGroupTemplate{Roles: []api.Role{role}}}}
 	state := (&ModelServingController{}).resolveRoleRolloutState(context.Background(), ms, datastore.ServingGroup{Name: "model-0"}, role, 2, nil, 0, true, nil, nil)
 	require.Equal(t, targetNotStarted, state.targetState)
 	coordination := coordinationForTest("100%")

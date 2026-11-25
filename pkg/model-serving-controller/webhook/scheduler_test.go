@@ -55,7 +55,7 @@ func TestSchedulerNameImmutableAdmission(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "scheduler-test"},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					SchedulerName: tc.old, Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 						Name: "decode", Replicas: ptr.To[int32](1),
 						EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 							Containers: []corev1.Container{{Name: "main", Image: "image"}},

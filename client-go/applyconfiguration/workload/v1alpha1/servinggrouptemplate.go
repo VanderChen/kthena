@@ -18,11 +18,11 @@ limitations under the License.
 
 package v1alpha1
 
-// ServingGroupApplyConfiguration represents a declarative configuration of the ServingGroup type for use
+// ServingGroupTemplateApplyConfiguration represents a declarative configuration of the ServingGroupTemplate type for use
 // with apply.
 //
-// ServingGroup is the smallest unit to complete the inference task
-type ServingGroupApplyConfiguration struct {
+// ServingGroupTemplate describes one ServingGroup, the smallest unit to complete the inference task.
+type ServingGroupTemplateApplyConfiguration struct {
 	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
 	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
 	// -1 tolerates a failed or restarted Pod indefinitely: the controller never deletes it,
@@ -37,16 +37,16 @@ type ServingGroupApplyConfiguration struct {
 	Roles           []RoleApplyConfiguration           `json:"roles,omitempty"`
 }
 
-// ServingGroupApplyConfiguration constructs a declarative configuration of the ServingGroup type for use with
+// ServingGroupTemplateApplyConfiguration constructs a declarative configuration of the ServingGroupTemplate type for use with
 // apply.
-func ServingGroup() *ServingGroupApplyConfiguration {
-	return &ServingGroupApplyConfiguration{}
+func ServingGroupTemplate() *ServingGroupTemplateApplyConfiguration {
+	return &ServingGroupTemplateApplyConfiguration{}
 }
 
 // WithRestartGracePeriodSeconds sets the RestartGracePeriodSeconds field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the RestartGracePeriodSeconds field is set to the value of the last call.
-func (b *ServingGroupApplyConfiguration) WithRestartGracePeriodSeconds(value int64) *ServingGroupApplyConfiguration {
+func (b *ServingGroupTemplateApplyConfiguration) WithRestartGracePeriodSeconds(value int64) *ServingGroupTemplateApplyConfiguration {
 	b.RestartGracePeriodSeconds = &value
 	return b
 }
@@ -54,7 +54,7 @@ func (b *ServingGroupApplyConfiguration) WithRestartGracePeriodSeconds(value int
 // WithGangPolicy sets the GangPolicy field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the GangPolicy field is set to the value of the last call.
-func (b *ServingGroupApplyConfiguration) WithGangPolicy(value *GangPolicyApplyConfiguration) *ServingGroupApplyConfiguration {
+func (b *ServingGroupTemplateApplyConfiguration) WithGangPolicy(value *GangPolicyApplyConfiguration) *ServingGroupTemplateApplyConfiguration {
 	b.GangPolicy = value
 	return b
 }
@@ -62,7 +62,7 @@ func (b *ServingGroupApplyConfiguration) WithGangPolicy(value *GangPolicyApplyCo
 // WithNetworkTopology sets the NetworkTopology field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the NetworkTopology field is set to the value of the last call.
-func (b *ServingGroupApplyConfiguration) WithNetworkTopology(value *NetworkTopologyApplyConfiguration) *ServingGroupApplyConfiguration {
+func (b *ServingGroupTemplateApplyConfiguration) WithNetworkTopology(value *NetworkTopologyApplyConfiguration) *ServingGroupTemplateApplyConfiguration {
 	b.NetworkTopology = value
 	return b
 }
@@ -70,7 +70,7 @@ func (b *ServingGroupApplyConfiguration) WithNetworkTopology(value *NetworkTopol
 // WithRoles adds the given value to the Roles field in the declarative configuration
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, values provided by each call will be appended to the Roles field.
-func (b *ServingGroupApplyConfiguration) WithRoles(values ...*RoleApplyConfiguration) *ServingGroupApplyConfiguration {
+func (b *ServingGroupTemplateApplyConfiguration) WithRoles(values ...*RoleApplyConfiguration) *ServingGroupTemplateApplyConfiguration {
 	for i := range values {
 		if values[i] == nil {
 			panic("nil value passed to WithRoles")

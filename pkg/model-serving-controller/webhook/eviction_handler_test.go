@@ -186,7 +186,7 @@ func TestEvictionHandlerRoleMaxUnavailablePercentageRoundsUp(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: int32Ptr(3)}},
 			},
 		},
@@ -218,7 +218,7 @@ func TestEvictionHandlerRoleMaxUnavailableAboveReplicas(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{{Name: "decode", Replicas: int32Ptr(3)}},
 			},
 		},
@@ -589,7 +589,7 @@ func TestEvictionHandlerRefreshesLivePodsForRecoveredRoleTracker(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "decode",
@@ -648,7 +648,7 @@ func TestEvictionHandlerRefreshesLivePodsWhenRoleCacheObservationIncomplete(t *t
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -826,7 +826,7 @@ func TestEvictionHandlerRoleProtection(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "decode",
@@ -903,7 +903,7 @@ func TestEvictionHandlerAllowsNotReadyTargetRoleInstanceAtMinAvailable(t *testin
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "decode",
@@ -952,7 +952,7 @@ func TestEvictionHandlerDeniesReadyTargetWhenOtherNodeMakesRoleInstanceNotReadyA
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "decode",
@@ -997,7 +997,7 @@ func TestEvictionHandlerRoleProtectionIgnoresGlobalMinAvailable(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "decode",
@@ -1035,7 +1035,7 @@ func TestEvictionHandlerRoleProtectionReadsPerRoleMinAvailable(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "decode",
@@ -1081,7 +1081,7 @@ func TestEvictionHandlerRoleProtectionMissingRoleMinAvailableDefaultsToZero(t *t
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "router",
@@ -1189,7 +1189,7 @@ func TestEvictionHandlerAllowsZeroRoleReplicas(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "decode",

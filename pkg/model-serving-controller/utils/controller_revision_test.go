@@ -49,7 +49,7 @@ func TestCreateControllerRevision(t *testing.T) {
 			Kind:       "ModelServing",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name: "prefill",
@@ -96,7 +96,7 @@ func TestGetControllerRevision(t *testing.T) {
 			Kind:       "ModelServing",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name: "prefill",
@@ -171,7 +171,7 @@ func TestCleanupOldControllerRevisions_PreservesCurrentAndUpdateRevisions(t *tes
 			Kind:       "ModelServing",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name: "prefill",
@@ -249,7 +249,7 @@ func TestModelServingAtRevision(t *testing.T) {
 			ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: "default", UID: "test-uid"},
 			Spec: workloadv1alpha1.ModelServingSpec{
 				SchedulerName: schedulerName,
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name: "decode",
 					EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 						Containers: []corev1.Container{{Name: "engine", Image: image}},

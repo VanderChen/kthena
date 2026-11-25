@@ -275,7 +275,7 @@ func modelServingWithValidPodTemplate() *workloadv1alpha1.ModelServing {
 		ObjectMeta: metav1.ObjectMeta{Name: "test"},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To(int32(1)),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{{
 					Name: "inference", Replicas: ptr.To(int32(1)),
 					EntryTemplate: workloadv1alpha1.PodTemplateSpec{

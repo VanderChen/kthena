@@ -48,7 +48,7 @@ func TestRoleTemplateChangedExcludesUnchangedAndNewRoles(t *testing.T) {
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 				role("a", "new"), role("b", "same"), role("c", "new"),
 			}},
 		},
@@ -74,7 +74,7 @@ func TestPersistCoordinatedRoleRevisionRefreshesReplicaBaseline(t *testing.T) {
 				Type:             workloadv1alpha1.RoleRollingUpdate,
 				RoleCoordination: &workloadv1alpha1.RoleCoordination{MaxSkew: &maxSkew},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name:     "a",
 				Replicas: ptr.To[int32](2),
 			}}},
@@ -112,7 +112,7 @@ func resolveRoleRolloutStateWithHistory(t *testing.T, role workloadv1alpha1.Role
 	t.Helper()
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"},
-		Spec:       workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}}},
+		Spec:       workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{role}}},
 	}
 	old := ms.DeepCopy()
 	old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers = []corev1.Container{{Name: "main", Image: "fixture:old"}}
@@ -225,7 +225,7 @@ func TestTerminatingRoleReplicasReadsPodInformerAfterRestart(t *testing.T) {
 	}}
 	require.NoError(t, informer.GetStore().Add(pod))
 	controller := &ModelServingController{podsInformer: informer, kubeClientSet: kubefake.NewSimpleClientset()}
-	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"}, Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{Name: "a"}}}}}
+	ms := &workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-ms", UID: "test-uid"}, Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{Name: "a"}}}}}
 	recordDifferentRevision(t, controller, ms, "legacy")
 
 	replicas := controller.terminatingRoleReplicas(context.Background(), ms, datastore.ServingGroup{Name: "test-ms-0"})
@@ -414,7 +414,7 @@ func TestStableRolePopulationIncludesObservedExpansion(t *testing.T) {
 				}
 				instances = append(instances, datastore.Role{Name: utils.GenerateRoleID(role.Name, ordinal), RoleTemplateHash: hash, Status: datastore.RoleRunning})
 			}
-			ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role}}}}
+			ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{role}}}}
 			c := &ModelServingController{}
 			population, err := c.stableRolePopulation(ms, "expansion-0", role, 5, instances, tt.terminating)
 			require.NoError(t, err)
@@ -557,7 +557,7 @@ func TestResolveRoleRolloutPolicyAppliesDependencyAndSkew(t *testing.T) {
 					},
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 				role("a", "new", 4), role("b", "new", 2),
 			}},
 		},
@@ -618,7 +618,7 @@ func TestCoordinatedRoleSelectionCountsStartedReplicasOutsideEffectiveRange(t *t
 				Type:             workloadv1alpha1.RoleRollingUpdate,
 				RoleCoordination: &workloadv1alpha1.RoleCoordination{MaxSkew: &maxSkew},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{role("a"), role("b")}},
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{role("a"), role("b")}},
 		},
 	}
 	store := datastore.New()

@@ -111,9 +111,9 @@ type Metadata struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
-// ServingGroup is the smallest unit to complete the inference task
+// ServingGroupTemplate describes one ServingGroup, the smallest unit to complete the inference task.
 // +kubebuilder:validation:XValidation:rule="!has(oldSelf.gangPolicy) || has(self.gangPolicy)", message="gangPolicy is required once set"
-type ServingGroup struct {
+type ServingGroupTemplate struct {
 	// RestartGracePeriodSeconds defines the grace time for the controller to rebuild the ServingGroup when an error occurs
 	// Defaults to 0 (ServingGroup will be rebuilt immediately after an error)
 	// -1 tolerates a failed or restarted Pod indefinitely: the controller never deletes it,

@@ -170,7 +170,7 @@ func TestTargetImages(t *testing.T) {
 		return workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: image}}}}
 	}
 	worker := template("worker:v2")
-	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{
+	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{
 		Roles: []workloadv1alpha1.Role{{Name: "r", EntryTemplate: template("entry:v2"), WorkerTemplate: &worker}},
 	}}}
 
@@ -322,7 +322,7 @@ func TestCompletedRequiresLiveSpecToKeepTargetImage(t *testing.T) {
 }
 
 func TestMissingContainers(t *testing.T) {
-	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{
+	ms := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{
 		Roles: []workloadv1alpha1.Role{{Name: "prefill", EntryTemplate: workloadv1alpha1.PodTemplateSpec{
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "a", Image: "i:2"}, {Name: "b", Image: "j:2"}}},
 		}}},

@@ -89,7 +89,7 @@ func TestConstructModelServing(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "default",
@@ -143,7 +143,7 @@ func TestConstructModelServing(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](3),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "default",
@@ -203,7 +203,7 @@ func TestConstructModelServing(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "default",
@@ -259,7 +259,7 @@ func TestConstructModelServing(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "default",
@@ -320,7 +320,7 @@ func TestConstructModelServing(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "default",

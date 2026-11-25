@@ -42,7 +42,7 @@ func TestLWSLabelsPluginRuntimeCompatibility(t *testing.T) {
 			},
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{{Name: "default", WorkerReplicas: 2, WorkerTemplate: &workloadv1alpha1.PodTemplateSpec{}}},
 			},
 		},

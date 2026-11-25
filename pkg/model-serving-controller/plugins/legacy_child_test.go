@@ -63,7 +63,7 @@ func TestPreserveChildPluginConfiguration(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			old := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "old", Namespace: "default", UID: "old-uid"}, Spec: workload.ModelServingSpec{
-				Replicas: ptr.To[int32](2), Template: workload.ServingGroup{Roles: []workload.Role{{Name: "serve", Replicas: ptr.To[int32](2), WorkerReplicas: 1,
+				Replicas: ptr.To[int32](2), Template: workload.ServingGroupTemplate{Roles: []workload.Role{{Name: "serve", Replicas: ptr.To[int32](2), WorkerReplicas: 1,
 					EntryTemplate:  workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "old"}}}},
 					WorkerTemplate: &workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "old"}}}},
 				}}},
@@ -145,7 +145,7 @@ func TestPreserveLegacyChildWithCRDDefaultedPodTemplates(t *testing.T) {
 		},
 	}
 	generated := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "default"}, Spec: workload.ModelServingSpec{
-		Replicas: ptr.To[int32](3), Template: workload.ServingGroup{Roles: []workload.Role{{Name: "serve", Replicas: ptr.To[int32](2), WorkerReplicas: 1,
+		Replicas: ptr.To[int32](3), Template: workload.ServingGroupTemplate{Roles: []workload.Role{{Name: "serve", Replicas: ptr.To[int32](2), WorkerReplicas: 1,
 			EntryTemplate: workload.PodTemplateSpec{Spec: *pod.DeepCopy()}, WorkerTemplate: &workload.PodTemplateSpec{Spec: *pod.DeepCopy()},
 		}}},
 	}}
@@ -214,7 +214,7 @@ func TestPreserveLegacyChildWithCRDDefaultedPodTemplates(t *testing.T) {
 }
 
 func TestPreserveChildWithHeadlessPluginThroughWorkerTransition(t *testing.T) {
-	old := &workload.ModelServing{Spec: workload.ModelServingSpec{Plugins: []workload.PluginSpec{{Name: HeadlessServicePluginName}}, Template: workload.ServingGroup{Roles: []workload.Role{{Name: "serve"}}}}}
+	old := &workload.ModelServing{Spec: workload.ModelServingSpec{Plugins: []workload.PluginSpec{{Name: HeadlessServicePluginName}}, Template: workload.ServingGroupTemplate{Roles: []workload.Role{{Name: "serve"}}}}}
 	desired := old.DeepCopy()
 	desired.Spec.Plugins[0].Type = workload.PluginTypeBuiltIn
 	desired.Spec.Template.Roles[0].WorkerReplicas = 2

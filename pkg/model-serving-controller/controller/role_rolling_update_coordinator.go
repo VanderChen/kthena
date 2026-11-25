@@ -405,7 +405,7 @@ func roleTemplateChanged(oldRoles map[string]workloadv1alpha1.Role, role workloa
 	if !existed {
 		return false
 	}
-	left := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{oldRole}}}}
+	left := &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{oldRole}}}}
 	right := left.DeepCopy()
 	right.Spec.Template.Roles[0] = role
 	equal, err := utils.EqualRoleRevisions("", "", left, right, role.Name)

@@ -790,7 +790,7 @@ func TestCheckServingGroupReady(t *testing.T) {
 					UID:       "test-ms-uid",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -2115,7 +2115,7 @@ func createStandardModelServing(name string, replicas int32, roleReplicas int32)
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](replicas),
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -2368,7 +2368,7 @@ func TestScaleUpServingGroups(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -2465,7 +2465,7 @@ func TestScaleUpServingGroupsStopsWhenControllerRevisionCreationFails(t *testing
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test-revision-failure"},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -2599,7 +2599,7 @@ func TestScaleUpRoles(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](1),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     roleName,
@@ -2726,7 +2726,7 @@ func TestManageRoleReplicasWithPartitionProtectedServingGroupAlignsToControllerR
 					Partition: &partition,
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -2877,7 +2877,7 @@ func TestManageRoleReplicas(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           roleName,
@@ -2994,7 +2994,7 @@ func TestManageRoleReplicasUsesMaxSurgeDuringRoleRollingUpdate(t *testing.T) {
 			Replicas:        ptr.To[int32](1),
 			RecoveryPolicy:  workloadv1alpha1.RoleRecreate,
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name:           "decode",
 				Replicas:       ptr.To[int32](2),
 				WorkerReplicas: 0,
@@ -3057,7 +3057,7 @@ func TestHasUpdateableOutdatedRole(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "test", UID: "test-uid"},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-			Template:        workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{targetRole}},
+			Template:        workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{targetRole}},
 		},
 	}
 	oldRole := *targetRole.DeepCopy()
@@ -3171,7 +3171,7 @@ func TestScaleDownServingGroups(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -3385,7 +3385,7 @@ func TestScaleDownServingGroupsWithPriorityAndDeletionCost(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -3646,7 +3646,7 @@ func TestScaleDownServingGroupsWithPartition(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](int32(tt.expectedCount)),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -3890,7 +3890,7 @@ func TestModelServingVersionControl(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](tt.scaleUpTo),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -4076,7 +4076,7 @@ func TestScaleUpServingGroups_TemplateRecovery(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](5),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: tt.currentTemplateRoles,
 					},
 					RecoveryPolicy: workloadv1alpha1.RoleRecreate,
@@ -4248,7 +4248,7 @@ func TestUpdateModelServingStatusLabelSelector(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To(replicas),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -4310,7 +4310,7 @@ func TestUpdateModelServingStatusCountsAllServingGroups(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "status-surge"},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](2),
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name: "decode", Replicas: ptr.To[int32](1),
 			}}},
 		},
@@ -4381,7 +4381,7 @@ func TestUpdateModelServingStatusDistinguishesScalingFromRollingUpdate(t *testin
 				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "condition-state"},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To(tt.replicas),
-					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+					Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 						Name: "decode", Replicas: ptr.To[int32](1),
 					}}},
 				},
@@ -4507,7 +4507,7 @@ func TestUpdateModelServingStatusRevisionFields(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To(int32(len(tt.existingGroups))),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -4645,7 +4645,7 @@ func TestScaleDownRoles(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](1),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -4735,7 +4735,7 @@ func TestScaleDownRolesSkipsDeletingRolesWhenActiveCountMatchesExpected(t *testi
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](1),
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -4955,7 +4955,7 @@ func TestScaleDownRolesWithPriorityAndDeletionCost(t *testing.T) {
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:      ptr.To[int32](1),
 					SchedulerName: "volcano",
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -5092,7 +5092,7 @@ func TestCalculateRoleScore(t *testing.T) {
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](1),
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -5310,7 +5310,7 @@ func TestScaleDownRolesRunningStatusDeprioritized(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "prefill",
@@ -5451,7 +5451,7 @@ func TestCalculateServingGroupScore(t *testing.T) {
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](1),
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "prefill",
@@ -5604,7 +5604,7 @@ func TestCheckRoleReady(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:           "prefill",
@@ -5753,7 +5753,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -5796,7 +5796,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -5829,7 +5829,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -5893,7 +5893,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -5926,7 +5926,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -5968,7 +5968,7 @@ func TestManageHeadlessService(t *testing.T) {
 						Name: plugins.HeadlessServicePluginName,
 						Type: workloadv1alpha1.PluginTypeBuiltIn,
 					}},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -6006,7 +6006,7 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -6034,7 +6034,7 @@ func TestManageHeadlessService(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           "prefill",
@@ -6288,7 +6288,7 @@ func TestSyncAllWithFailedPods(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -6382,7 +6382,7 @@ func TestSyncAllWithContainerRestartedPods(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -6474,7 +6474,7 @@ func TestSyncAllWithMixedPods(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -6649,7 +6649,7 @@ func TestHandlePodAfterGraceTime(t *testing.T) {
 			Name:      "test-model",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				RestartGracePeriodSeconds: &gracePeriod,
 			},
 		},
@@ -6765,7 +6765,7 @@ func TestHandleErrorPodTracksReplacementByUID(t *testing.T) {
 			Name:      "test-model",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				RestartGracePeriodSeconds: &gracePeriod,
 			},
 		},
@@ -6846,7 +6846,7 @@ func TestHandleErrorPodRecoveryDisabledLeavesPod(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: msName},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					RecoveryPolicy: tt.policy,
-					Template:       workloadv1alpha1.ServingGroup{RestartGracePeriodSeconds: tt.grace},
+					Template:       workloadv1alpha1.ServingGroupTemplate{RestartGracePeriodSeconds: tt.grace},
 				},
 			}
 			controller, kubeClient := newGracePeriodTestController(t, errPod)
@@ -6929,7 +6929,7 @@ func TestSyncAllBeforeFixBehavior(t *testing.T) {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -7013,7 +7013,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						NetworkTopology: &workloadv1alpha1.NetworkTopology{},
 						GangPolicy:      nil, // GangPolicy is nil
 						Roles: []workloadv1alpha1.Role{
@@ -7039,7 +7039,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						NetworkTopology: nil, // NetworkTopology removed
 						GangPolicy:      nil, // GangPolicy is still nil
 						Roles: []workloadv1alpha1.Role{
@@ -7068,7 +7068,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						NetworkTopology: &workloadv1alpha1.NetworkTopology{},
 						GangPolicy: &workloadv1alpha1.GangPolicy{
 							MinRoleReplicas: map[string]int32{"inference": 1},
@@ -7096,7 +7096,7 @@ func TestUpdateModelServingWithNilGangPolicy(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						NetworkTopology: nil, // NetworkTopology removed
 						GangPolicy: &workloadv1alpha1.GangPolicy{
 							MinRoleReplicas: map[string]int32{"inference": 1},
@@ -7539,7 +7539,7 @@ func TestHandleReadyPodRoleStatusUpdate(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:           roleName,
@@ -7744,7 +7744,7 @@ func TestHandleReadyPodEnqueuesIntermediateCoordinatedRole(t *testing.T) {
 						Type:             workloadv1alpha1.RoleRollingUpdate,
 						RoleCoordination: tt.coordination,
 					},
-					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+					Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 						{Name: "a", Replicas: ptr.To[int32](1)},
 						{Name: "b", Replicas: ptr.To[int32](1)},
 					}},
@@ -8174,7 +8174,7 @@ func TestServingGroupMaxSurgeRestoresOrdinals(t *testing.T) {
 					MaxSurge:       &maxSurge,
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name:     "decode",
 				Replicas: ptr.To[int32](1),
 				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
@@ -8711,7 +8711,7 @@ func TestDeleteOutdatedRolesForRoleRollingUpdateWithMaxUnavailable(t *testing.T)
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas:        ptr.To[int32](1),
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "decode",
@@ -9025,7 +9025,7 @@ func TestRolesToDeleteForRoleRollingUpdate(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-					Template:        workloadv1alpha1.ServingGroup{Roles: tt.roles},
+					Template:        workloadv1alpha1.ServingGroupTemplate{Roles: tt.roles},
 				},
 			}
 			store := datastore.New()
@@ -9086,7 +9086,7 @@ func TestRolesToDeleteForRoleRollingUpdate_LegacyRoleTemplateHashFromControllerR
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{newRole}},
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{newRole}},
 		},
 	}
 
@@ -9139,7 +9139,7 @@ func TestRolesToDeleteForRoleRollingUpdate_CoordinatedDependencyStartup(t *testi
 						},
 					},
 				},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 					roleSpec("a"), roleSpec("b"), roleSpec("c"),
 				}},
 			},
@@ -9538,7 +9538,7 @@ func TestFindOutdatedRolesInServingGroups(t *testing.T) {
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: ptr.To[int32](1),
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: tt.msRoles,
 					},
 				},
@@ -9670,7 +9670,7 @@ func TestFindOutdatedRolesInServingGroups_LegacyMissingRoleTemplateHash(t *testi
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas: ptr.To[int32](1),
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     roleName,
@@ -9715,7 +9715,7 @@ func TestResolveRoleTemplateHashForComparison_FromControllerRevision(t *testing.
 			Name:      msName,
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{oldRole},
 			},
 		},
@@ -9756,7 +9756,7 @@ func TestResolveRoleTemplateHash_UsesPodRevisionControllerRevision(t *testing.T)
 	ms := &workloadv1alpha1.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: msName},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{oldRole}},
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{oldRole}},
 		},
 	}
 

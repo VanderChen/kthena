@@ -396,7 +396,7 @@ func (c *LWSController) constructModelServing(lws *lwsv1.LeaderWorkerSet) *workl
 					Type: workloadv1alpha1.PluginTypeBuiltIn,
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{role},
 			},
 		},

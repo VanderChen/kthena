@@ -933,7 +933,7 @@ func createBasicModelServing(name string, servingGroupReplicas, workloadRoleRepl
 					MaxUnavailable: ptr.To(intstr.FromInt(1)),
 				},
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: roles,
 			},
 		},
@@ -949,7 +949,7 @@ func createInvalidModelServing() *workload.ModelServing {
 		},
 		Spec: workload.ModelServingSpec{
 			Replicas: &negativeReplicas,
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "role1",

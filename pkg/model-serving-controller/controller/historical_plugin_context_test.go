@@ -47,7 +47,7 @@ func historicalPluginFixture(t *testing.T) (*ModelServingController, *kubefake.C
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "history", Namespace: "default", UID: "ms-uid"}, Spec: workload.ModelServingSpec{
 		Replicas: ptr.To[int32](1), SchedulerName: "volcano",
 		Plugins:  []workload.PluginSpec{{Name: plugins.HeadlessServicePluginName, Type: workload.PluginTypeBuiltIn}},
-		Template: workload.ServingGroup{Roles: []workload.Role{{Name: "infer", Replicas: ptr.To[int32](1), EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "current"}}}}}}},
+		Template: workload.ServingGroupTemplate{Roles: []workload.Role{{Name: "infer", Replicas: ptr.To[int32](1), EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "current"}}}}}}},
 	}}
 	client := kubefake.NewSimpleClientset()
 	c, err := NewModelServingController(client, kthenafake.NewSimpleClientset(ms), volcanofake.NewSimpleClientset(), apiextfake.NewSimpleClientset())

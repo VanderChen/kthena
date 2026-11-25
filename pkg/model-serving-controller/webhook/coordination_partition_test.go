@@ -59,7 +59,7 @@ func TestCoordinatedPartitionNominalProportions(t *testing.T) {
 }
 
 func TestLegacyPartitionMismatchAllowsOnlyUnrelatedUpdates(t *testing.T) {
-	ms := &api.ModelServing{Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{}}, Template: api.ServingGroup{Roles: []api.Role{
+	ms := &api.ModelServing{Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{}}, Template: api.ServingGroupTemplate{Roles: []api.Role{
 		{Name: "a", Replicas: ptr.To[int32](4), RollingUpdateConfiguration: api.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(2))}}, {Name: "b", Replicas: ptr.To[int32](4)},
 	}}}}
 	require.NotEmpty(t, validateCoordinatedPartitions(nil, ms))

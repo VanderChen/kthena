@@ -39,7 +39,7 @@ type ModelServingSpecApplyConfiguration struct {
 	// for peer-to-peer model weight loading. If unset, creation is unchanged.
 	BootstrapAccelerateStrategy *BootstrapAccelerateStrategyApplyConfiguration `json:"bootstrapAccelerateStrategy,omitempty"`
 	// Template defines the template for ServingGroup
-	Template *ServingGroupApplyConfiguration `json:"template,omitempty"`
+	Template *ServingGroupTemplateApplyConfiguration `json:"template,omitempty"`
 	// RolloutStrategy defines the strategy that will be applied to update replicas
 	RolloutStrategy *RolloutStrategyApplyConfiguration `json:"rolloutStrategy,omitempty"`
 	// RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt
@@ -96,7 +96,7 @@ func (b *ModelServingSpecApplyConfiguration) WithBootstrapAccelerateStrategy(val
 // WithTemplate sets the Template field in the declarative configuration to the given value
 // and returns the receiver, so that objects can be built by chaining "With" function invocations.
 // If called multiple times, the Template field is set to the value of the last call.
-func (b *ModelServingSpecApplyConfiguration) WithTemplate(value *ServingGroupApplyConfiguration) *ModelServingSpecApplyConfiguration {
+func (b *ModelServingSpecApplyConfiguration) WithTemplate(value *ServingGroupTemplateApplyConfiguration) *ModelServingSpecApplyConfiguration {
 	b.Template = value
 	return b
 }

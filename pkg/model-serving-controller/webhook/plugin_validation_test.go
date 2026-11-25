@@ -46,7 +46,7 @@ func pluginImmutableFixture() *workloadv1alpha1.ModelServing {
 					Config: &apiextensionsv1.JSON{Raw: []byte(`{"annotations":{"plugin-value":"old","other":"value"}}`)}},
 				{Name: "lws-standard-labels", Type: workloadv1alpha1.PluginTypeBuiltIn},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name: "predictor", Replicas: ptr.To[int32](1),
 				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Image: "busybox:1.36"}},

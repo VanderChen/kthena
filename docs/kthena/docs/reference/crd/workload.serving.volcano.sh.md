@@ -305,7 +305,7 @@ GangPolicy defines the gang scheduling configuration.
 
 
 _Appears in:_
-- [ServingGroup](#servinggroup)
+- [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -664,7 +664,7 @@ _Appears in:_
 | `schedulerName` _string_ | SchedulerName defines the name of the scheduler used by ModelServing | volcano |  |
 | `plugins` _[PluginSpec](#pluginspec) array_ | Plugins defines optional plugins that customize serving pods or manage<br />auxiliary resources through controller lifecycle hooks. |  |  |
 | `bootstrapAccelerateStrategy` _[BootstrapAccelerateStrategy](#bootstrapacceleratestrategy)_ | BootstrapAccelerateStrategy creates role replicas in source-aware batches<br />for peer-to-peer model weight loading. If unset, creation is unchanged. |  |  |
-| `template` _[ServingGroup](#servinggroup)_ | Template defines the template for ServingGroup |  |  |
+| `template` _[ServingGroupTemplate](#servinggrouptemplate)_ | Template defines the template for ServingGroup |  |  |
 | `rolloutStrategy` _[RolloutStrategy](#rolloutstrategy)_ | RolloutStrategy defines the strategy that will be applied to update replicas |  |  |
 | `recoveryPolicy` _[RecoveryPolicy](#recoverypolicy)_ | RecoveryPolicy defines the recovery policy for the failed Pod to be rebuilt | RoleRecreate | Enum: [ServingGroupRecreate RoleRecreate None] <br /> |
 | `revisionHistoryLimit` _integer_ | RevisionHistoryLimit is the maximum number of non-live revisions to retain.<br />Revisions still referenced by the ModelServing or its workloads do not count<br />toward this limit. | 10 | Minimum: 0 <br /> |
@@ -777,7 +777,7 @@ NetworkTopologySpec defines the network topology affinity scheduling policy for 
 
 
 _Appears in:_
-- [ServingGroup](#servinggroup)
+- [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -996,7 +996,7 @@ Role defines the specific pod instance role that performs the inference task.
 
 
 _Appears in:_
-- [ServingGroup](#servinggroup)
+- [ServingGroupTemplate](#servinggrouptemplate)
 
 | Field | Description | Default | Validation |
 | --- | --- | --- | --- |
@@ -1182,11 +1182,11 @@ _Appears in:_
 | `And` |  |
 
 
-#### ServingGroup
+#### ServingGroupTemplate
 
 
 
-ServingGroup is the smallest unit to complete the inference task
+ServingGroupTemplate describes one ServingGroup, the smallest unit to complete the inference task.
 
 
 

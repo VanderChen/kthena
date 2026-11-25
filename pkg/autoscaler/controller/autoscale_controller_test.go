@@ -374,7 +374,7 @@ func TestDoDisaggregatedScale_RatioRaisesDecode(t *testing.T) {
 	ms := &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Name: "ms-pd", Namespace: ns},
 		Spec: workload.ModelServingSpec{
-			Template: workload.ServingGroup{Roles: []workload.Role{
+			Template: workload.ServingGroupTemplate{Roles: []workload.Role{
 				{Name: "prefill", Replicas: ptrInt32(1)},
 				{Name: "decode", Replicas: ptrInt32(2)},
 			}},
@@ -482,7 +482,7 @@ func TestUpdateTargetRoleReplicas_UsesMinimalJSONPatch(t *testing.T) {
 	baseMS := &workload.ModelServing{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
 		Spec: workload.ModelServingSpec{
-			Template: workload.ServingGroup{Roles: []workload.Role{
+			Template: workload.ServingGroupTemplate{Roles: []workload.Role{
 				{
 					Name:          "prefill",
 					EntryTemplate: workload.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "model:v1", Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0.2")}}}}}},
@@ -749,7 +749,7 @@ func TestPatchReplicasDoesNotTouchResourceLimits(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
 		Spec: workload.ModelServingSpec{
 			Replicas: ptrInt32(1),
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",
@@ -869,7 +869,7 @@ func TestPatchSkipsWhenReplicasUnchanged(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "test-ms", Namespace: ns},
 		Spec: workload.ModelServingSpec{
 			Replicas: ptrInt32(3),
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",

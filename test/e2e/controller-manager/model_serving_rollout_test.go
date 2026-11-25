@@ -825,7 +825,7 @@ func createPartitionedModelServing(name string, replicas, partition int32) *work
 					MaxUnavailable: ptr.To(intstr.FromInt(int(replicas))),
 				},
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "role",
@@ -1050,7 +1050,7 @@ func TestModelServingRoleBasedRollingUpdate(t *testing.T) {
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate, // Using role-based rolling update
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",
@@ -1263,7 +1263,7 @@ func TestModelServingRoleRollingUpdateMaxUnavailable(t *testing.T) {
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate,
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",
@@ -1390,7 +1390,7 @@ func TestModelServingRoleRollingUpdateMaxSurge(t *testing.T) {
 			Replicas:        &replicas,
 			RecoveryPolicy:  workload.RoleRecreate,
 			RolloutStrategy: &workload.RolloutStrategy{Type: workload.RoleRollingUpdate},
-			Template: workload.ServingGroup{Roles: []workload.Role{
+			Template: workload.ServingGroupTemplate{Roles: []workload.Role{
 				{
 					Name:     "prefill",
 					Replicas: &prefillReplicas,
@@ -1488,7 +1488,7 @@ func TestModelServingRoleRollingUpdatePartition(t *testing.T) {
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate,
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",
@@ -1604,7 +1604,7 @@ func TestModelServingRolePartitionScaleUp(t *testing.T) {
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate,
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",
@@ -1811,7 +1811,7 @@ func TestModelServingRolePartitionScaleDown(t *testing.T) {
 			RolloutStrategy: &workload.RolloutStrategy{
 				Type: workload.RoleRollingUpdate,
 			},
-			Template: workload.ServingGroup{
+			Template: workload.ServingGroupTemplate{
 				Roles: []workload.Role{
 					{
 						Name:     "prefill",

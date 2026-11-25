@@ -49,7 +49,7 @@ func TestValidPodNameLength(t *testing.T) {
 					},
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -73,7 +73,7 @@ func TestValidPodNameLength(t *testing.T) {
 					},
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -113,7 +113,7 @@ func TestValidateModelServingMissingReplicasDoesNotPanic(t *testing.T) {
 			Name: "valid-name",
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name: "role1",
@@ -146,7 +146,7 @@ func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.
 			ms: &workloadv1alpha1.ModelServing{
 				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{Name: "role1", Replicas: &replicas},
 						},
@@ -160,7 +160,7 @@ func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.
 				ObjectMeta: v1.ObjectMeta{Name: "valid-name"},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: &replicas,
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{Name: "role1"},
 						},
@@ -173,7 +173,7 @@ func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.
 			ms: &workloadv1alpha1.ModelServing{
 				ObjectMeta: v1.ObjectMeta{Name: longName},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{Name: "role1", Replicas: &replicas},
 						},
@@ -188,7 +188,7 @@ func TestValidGeneratedNameLengthUsesReplicaDefaultsForMissingValues(t *testing.
 				ObjectMeta: v1.ObjectMeta{Name: longName},
 				Spec: workloadv1alpha1.ModelServingSpec{
 					Replicas: &replicas,
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{Name: "role1"},
 						},
@@ -412,7 +412,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 3},
 							},
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:     "predictor",
@@ -444,7 +444,7 @@ func TestValidateRollingUpdateConfiguration(t *testing.T) {
 								Partition: &intstr.IntOrString{Type: intstr.Int, IntVal: 5},
 							},
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:     "predictor",
@@ -623,7 +623,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "valid with role rolling update",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -636,7 +636,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "rejects zero maxUnavailable without maxSurge",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -650,7 +650,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows CRD default maxUnavailable with serving group rolling update",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -663,7 +663,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows CRD default maxUnavailable when the role has zero replicas",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "prefill",
 					Replicas: ptr.To[int32](0),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -676,7 +676,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows inactive role partition",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -689,7 +689,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows role maxSurge",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -703,7 +703,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows zero maxUnavailable with positive maxSurge",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -717,7 +717,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows inactive role maxSurge",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](4),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -730,7 +730,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "rejects maxUnavailable greater than role replicas",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](3),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -744,7 +744,7 @@ func TestValidateMaxUnavailableForRoles(t *testing.T) {
 			name: "allows maxUnavailable equal to role replicas",
 			ms: &workloadv1alpha1.ModelServing{Spec: workloadv1alpha1.ModelServingSpec{
 				RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 					Name:     "decode",
 					Replicas: ptr.To[int32](3),
 					RollingUpdateConfiguration: workloadv1alpha1.RollingUpdateConfiguration{
@@ -782,7 +782,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32Ptr(3),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -809,7 +809,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32PtrNil(),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -842,7 +842,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32Ptr(-1),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -875,7 +875,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32Ptr(3),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -908,7 +908,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32Ptr(3),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role1",
@@ -941,7 +941,7 @@ func TestValidatorReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: int32Ptr(3),
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{},
 						},
 					},
@@ -985,7 +985,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1011,7 +1011,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1043,7 +1043,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1075,7 +1075,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1107,7 +1107,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1129,7 +1129,7 @@ func TestValidateGangPolicy(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1177,7 +1177,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas, // It Uses the variable defined at top of test
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1205,7 +1205,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1225,7 +1225,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker",
@@ -1251,7 +1251,7 @@ func TestValidateWorkerReplicas(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "worker1",
@@ -1306,7 +1306,7 @@ func TestValidateRoleNames(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "prefill",
@@ -1333,7 +1333,7 @@ func TestValidateRoleNames(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "Prefill",
@@ -1360,7 +1360,7 @@ func TestValidateRoleNames(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "1role",
@@ -1387,7 +1387,7 @@ func TestValidateRoleNames(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "role-",
@@ -1414,7 +1414,7 @@ func TestValidateRoleNames(t *testing.T) {
 				ms: &workloadv1alpha1.ModelServing{
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{
 									Name:           "prefill",
@@ -1481,7 +1481,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					},
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas: &replicas,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1504,7 +1504,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							Type: workloadv1alpha1.RoleRollingUpdate,
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1533,7 +1533,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							Type: workloadv1alpha1.ServingGroupRollingUpdate,
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1556,7 +1556,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							Type: workloadv1alpha1.RoleRollingUpdate,
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1579,7 +1579,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 							Type: workloadv1alpha1.ServingGroupRollingUpdate,
 						},
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1599,7 +1599,7 @@ func TestValidateRecoveryPolicyAndRolloutStrategy(t *testing.T) {
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas:       &replicas,
 						RecoveryPolicy: workloadv1alpha1.ServingGroupRecreate,
-						Template: workloadv1alpha1.ServingGroup{
+						Template: workloadv1alpha1.ServingGroupTemplate{
 							Roles: []workloadv1alpha1.Role{
 								{Name: "role1", Replicas: &replicas, WorkerReplicas: 2},
 							},
@@ -1873,7 +1873,7 @@ func TestValidateEvictionStrategyBudget(t *testing.T) {
 					RolloutStrategy: &workloadv1alpha1.RolloutStrategy{
 						EvictionStrategy: strategy,
 					},
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{Name: "decode", Replicas: &currentRoleReplicas},
 						},

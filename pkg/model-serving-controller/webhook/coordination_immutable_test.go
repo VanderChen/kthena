@@ -55,7 +55,7 @@ func TestCoordinationPresenceAndPolicyAreImmutable(t *testing.T) {
 }
 
 func TestEmptyCoordinationSelectorCannotChangeThroughRoleNames(t *testing.T) {
-	old := &api.ModelServing{Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{MaxSkew: ptr.To(intstr.FromString("20%"))}}, Template: api.ServingGroup{Roles: []api.Role{{Name: "a"}, {Name: "b"}}}}}
+	old := &api.ModelServing{Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: &api.RoleCoordination{MaxSkew: ptr.To(intstr.FromString("20%"))}}, Template: api.ServingGroupTemplate{Roles: []api.Role{{Name: "a"}, {Name: "b"}}}}}
 	changed := old.DeepCopy()
 	changed.Spec.Template.Roles[0].Name = "x"
 	require.NotEmpty(t, validateRoleCoordinationImmutable(old, changed))

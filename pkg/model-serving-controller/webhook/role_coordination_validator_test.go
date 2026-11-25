@@ -126,7 +126,7 @@ func TestValidateRoleCoordination(t *testing.T) {
 							},
 						},
 					},
-					Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+					Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 						{Name: "a", Replicas: ptr.To[int32](10)},
 						{Name: "b", Replicas: ptr.To[int32](10)},
 						{Name: "c", Replicas: ptr.To[int32](10)},
@@ -172,7 +172,7 @@ func TestValidateRoleCoordinationUpdateCapacity(t *testing.T) {
 						},
 					},
 				},
-				Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{
+				Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{
 					role("a", image, replicas), role("b", image, replicas), role("c", image, replicas),
 				}},
 			},

@@ -47,7 +47,7 @@ func newEligibilityModelServing() *workloadv1alpha1.ModelServing {
 		Spec: workloadv1alpha1.ModelServingSpec{
 			Replicas:      ptr.To[int32](2),
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{{
 					Name:           "decode",
 					Replicas:       ptr.To[int32](1),

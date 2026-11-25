@@ -47,7 +47,7 @@ func TestCoordinatedVersionRatioIncludesPartitionAndCompletedRoles(t *testing.T)
 
 func TestCoordinatedVersionCountsProtectedTargetAndFormalExpansion(t *testing.T) {
 	role := api.Role{Name: "a", Replicas: ptr.To[int32](4)}
-	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ratios", Namespace: "default", UID: "ratios"}, Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
+	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ratios", Namespace: "default", UID: "ratios"}, Spec: api.ModelServingSpec{Template: api.ServingGroupTemplate{Roles: []api.Role{role}}}}
 	c := &ModelServingController{kubeClientSet: kubefake.NewSimpleClientset()}
 	recordDifferentRevision(t, c, ms, "old")
 	recordTestRevision(t, c.kubeClientSet, ms, "target")
@@ -134,7 +134,7 @@ func TestFullTailReleasesDependenciesOnlyAfterCallerDisappears(t *testing.T) {
 
 func TestFullTailRequiresObservedReadyKnownCapacity(t *testing.T) {
 	role := api.Role{Name: "a", Replicas: ptr.To[int32](2)}
-	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "tail", Namespace: "default", UID: "tail"}, Spec: api.ModelServingSpec{Template: api.ServingGroup{Roles: []api.Role{role}}}}
+	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "tail", Namespace: "default", UID: "tail"}, Spec: api.ModelServingSpec{Template: api.ServingGroupTemplate{Roles: []api.Role{role}}}}
 	c := &ModelServingController{kubeClientSet: kubefake.NewSimpleClientset()}
 	recordDifferentRevision(t, c, ms, "old")
 	recordTestRevision(t, c.kubeClientSet, ms, "target")
@@ -163,7 +163,7 @@ func TestFullTailRequiresObservedReadyKnownCapacity(t *testing.T) {
 }
 
 func TestLegacyPartitionConflictStopsFurtherStableDeletions(t *testing.T) {
-	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "default", UID: "legacy"}, Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: coordinationForTest("20%")}, Template: api.ServingGroup{Roles: []api.Role{
+	ms := &api.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "legacy", Namespace: "default", UID: "legacy"}, Spec: api.ModelServingSpec{RolloutStrategy: &api.RolloutStrategy{Type: api.RoleRollingUpdate, RoleCoordination: coordinationForTest("20%")}, Template: api.ServingGroupTemplate{Roles: []api.Role{
 		{Name: "a", Replicas: ptr.To[int32](4), RollingUpdateConfiguration: api.RollingUpdateConfiguration{Partition: ptr.To(intstr.FromInt(2))}},
 		{Name: "b", Replicas: ptr.To[int32](4)},
 	}}}}

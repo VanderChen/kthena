@@ -61,7 +61,7 @@ func newSurgeFixture(t *testing.T, scope string) (*ModelServingController, *work
 					MaxSurge: ptr.To(intstr.FromInt(1)), MaxUnavailable: ptr.To(intstr.FromInt(0)),
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name: "inference", Replicas: ptr.To[int32](1),
 				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "server", Image: "new"}},
@@ -180,7 +180,7 @@ func newRolloutHarness(t *testing.T, replicas, maxSurge, maxUnavailable, partiti
 					Partition: ptr.To(intstr.FromInt(partition)),
 				},
 			},
-			Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+			Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 				Name: "decode", Replicas: ptr.To[int32](1),
 				EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "decode", Image: "new"}},
@@ -377,7 +377,7 @@ func TestRoleRolloutRestoresOrdinals(t *testing.T) {
 					Spec: workloadv1alpha1.ModelServingSpec{
 						Replicas:        ptr.To[int32](1),
 						RolloutStrategy: &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate},
-						Template: workloadv1alpha1.ServingGroup{Roles: []workloadv1alpha1.Role{{
+						Template: workloadv1alpha1.ServingGroupTemplate{Roles: []workloadv1alpha1.Role{{
 							Name: "decode", Replicas: ptr.To(tt.replicas),
 							EntryTemplate: workloadv1alpha1.PodTemplateSpec{Spec: corev1.PodSpec{
 								Containers: []corev1.Container{{Name: "decode", Image: image}},

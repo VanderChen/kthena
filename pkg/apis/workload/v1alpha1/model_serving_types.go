@@ -58,7 +58,7 @@ type ModelServingSpec struct {
 	BootstrapAccelerateStrategy *BootstrapAccelerateStrategy `json:"bootstrapAccelerateStrategy,omitempty"`
 
 	// Template defines the template for ServingGroup
-	Template ServingGroup `json:"template"`
+	Template ServingGroupTemplate `json:"template"`
 
 	// RolloutStrategy defines the strategy that will be applied to update replicas
 	// +optional

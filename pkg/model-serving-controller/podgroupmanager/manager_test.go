@@ -80,7 +80,7 @@ func TestCalculateRequirements(t *testing.T) {
 				Namespace: "default",
 			},
 			Spec: workloadv1alpha1.ModelServingSpec{
-				Template: workloadv1alpha1.ServingGroup{
+				Template: workloadv1alpha1.ServingGroupTemplate{
 					Roles: []workloadv1alpha1.Role{
 						{
 							Name:           "prefill",
@@ -900,7 +900,7 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 					Name: "test-model-serving",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "role1",
@@ -947,7 +947,7 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 					Name: "test-model-serving",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "role1",
@@ -1026,7 +1026,7 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 					Name: "test-model-serving",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "role1",
@@ -1073,7 +1073,7 @@ func TestAppendSubGroupPolicy(t *testing.T) {
 					Name: "test-model-serving",
 				},
 				Spec: workloadv1alpha1.ModelServingSpec{
-					Template: workloadv1alpha1.ServingGroup{
+					Template: workloadv1alpha1.ServingGroupTemplate{
 						Roles: []workloadv1alpha1.Role{
 							{
 								Name:     "role1",
@@ -1377,7 +1377,7 @@ func newMinimalMS(queueName string) *workloadv1alpha1.ModelServing {
 		},
 		Spec: workloadv1alpha1.ModelServingSpec{
 			SchedulerName: "volcano",
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: []workloadv1alpha1.Role{
 					{
 						Name:     "role0",

@@ -170,7 +170,7 @@ func newRole(name string, replicas *int32, workerReplicas int32) workloadv1alpha
 func newModelServing(roles []workloadv1alpha1.Role) *workloadv1alpha1.ModelServing {
 	return &workloadv1alpha1.ModelServing{
 		Spec: workloadv1alpha1.ModelServingSpec{
-			Template: workloadv1alpha1.ServingGroup{
+			Template: workloadv1alpha1.ServingGroupTemplate{
 				Roles: roles,
 			},
 		},
