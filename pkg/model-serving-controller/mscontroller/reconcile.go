@@ -494,10 +494,15 @@ func (r *round) revisionOf(g *groupState) (revision string, ok bool) {
 	case group.Status.Revision != "":
 		return group.Status.Revision, true
 	}
-	// Its Roles were being rolled when the strategy changed, and its Pods run
-	// more than one revision. It is taken for the baseline, and replaced
-	// within the budget like any group that is not at the target.
-	return r.baseline, r.baseline != ""
+	// Its Roles were being rolled when the strategy changed, or are held by a
+	// Role partition, and its Pods run more than one revision. It is taken for
+	// the baseline, and moved or replaced within the budget like any group
+	// that is not at the target; until then it leaves its Pods as they are.
+	// Taken for the target it would bring all of them to it at once.
+	if r.history.Compare(r.baseline, r.target) != workload.Different {
+		return "", false
+	}
+	return r.baseline, true
 }
 
 // writeStatus writes the status of the ModelServing when it changed, and

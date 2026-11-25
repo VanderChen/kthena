@@ -338,8 +338,8 @@ func TestTheRolloutStrategyIsChanged(t *testing.T) {
 		}
 		target := s.modelServing().Status.UpdateRevision
 		for _, group := range s.groups() {
-			if group.Spec.Revision != target || group.Spec.TargetRevision != "" {
-				t.Errorf("group %s: revision %q, targetRevision %q; want revision %q alone", group.Name, group.Spec.Revision, group.Spec.TargetRevision, target)
+			if group.Spec.Revision != target || group.Spec.TargetRevision != target {
+				t.Errorf("group %s: revision %q, targetRevision %q; want %q for both", group.Name, group.Spec.Revision, group.Spec.TargetRevision, target)
 			}
 		}
 
@@ -419,6 +419,74 @@ func TestTheRolloutStrategyIsChanged(t *testing.T) {
 			}
 		}
 	})
+
+	// A Role partition holds every group on two revisions for good. Such a
+	// group is one of an earlier revision when the strategy changes: it is
+	// replaced within the budget where the partition of the groups allows
+	// it, and is left as it is where that partition protects it. It never asks
+	// to be recreated, and its Pods are not brought to one revision in place.
+	for _, method := range []workloadv1alpha1.UpdateMethod{workloadv1alpha1.RecreateUpdateMethod, workloadv1alpha1.InPlaceUpdateMethod} {
+		t.Run("to whole groups, with groups that a Role partition holds on two revisions, "+string(method), func(t *testing.T) {
+			held := roleRolling(func(role *workloadv1alpha1.Role) { role.Partition = ptr.To(intstr.FromInt32(1)) })
+			s := newSystem(t, modelServing(held, router, func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy.UpdateMethod = method
+			}))
+			s.settle()
+			s.update(setImage("model:v2"))
+			s.settleContainers()
+			const mixed = "0[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] 1[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2]"
+			if got := s.instances(); got != mixed {
+				t.Fatalf("held by the Role partition: %s, want %s", got, mixed)
+			}
+			pods, groups := s.podUIDs(), groupUIDs(s)
+
+			ready := func() int {
+				count := 0
+				for _, group := range s.groups() {
+					if group.DeletionTimestamp == nil && groupReady(group) {
+						count++
+					}
+				}
+				return count
+			}
+			unavailable := 0
+			s.invariant = func() {
+				for _, group := range s.groups() {
+					if meta.IsStatusConditionTrue(group.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionRecreateRequired)) {
+						t.Fatalf("group %s asks to be recreated: %s", group.Name, s.summary())
+					}
+				}
+				unavailable = max(unavailable, 2-ready())
+			}
+			s.update(func(ms *workloadv1alpha1.ModelServing) {
+				byGroups(ms)
+				ms.Spec.RolloutStrategy.UpdateMethod = method
+				ms.Spec.RolloutStrategy.RollingUpdateConfiguration.Partition = ptr.To(intstr.FromInt32(1))
+			})
+			s.settleContainers()
+			s.invariant = nil
+
+			const want = "0[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] 1[route-0=route:v1 0=model:v2 1=model:v2 2=model:v2]"
+			if got := s.instances(); got != want {
+				t.Errorf("after the change: %s, want %s", got, want)
+			}
+			if unavailable > 1 {
+				t.Errorf("%d groups were unavailable at once, want at most 1", unavailable)
+			}
+			after := groupUIDs(s)
+			if after["llama-0"] != groups["llama-0"] {
+				t.Errorf("the group that the partition protects was replaced")
+			}
+			for name, uid := range s.podUIDs() {
+				if strings.HasPrefix(name, "llama-0-") && pods[name] != uid {
+					t.Errorf("Pod %s of the protected group was replaced", name)
+				}
+			}
+			if got := ready(); got != 2 {
+				t.Errorf("%d groups are ready, want 2: %s", got, s.summary())
+			}
+		})
+	}
 }
 
 // The generation a spec was derived from keeps a controller with an old view

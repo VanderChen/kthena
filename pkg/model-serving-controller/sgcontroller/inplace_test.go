@@ -1195,3 +1195,66 @@ func TestEveryStopPointOfAnInPlaceUpdateEndsInTheSameState(t *testing.T) {
 		t.Logf("%s: %d stop points; final state %s", name, total, want)
 	}
 }
+
+// A group whose revision is not the one the rollout moves to is a group of an
+// earlier revision: the ModelServing controller moves it to the target, or
+// replaces it, within the budget of the rollout, or protects it. Until then
+// the group starts nothing and does not ask to be recreated, whatever
+// revisions its Pods run. A Pod whose images were patched finishes its own
+// update and gets the label of what it runs.
+func TestAGroupThatIsNotAtTheTargetLeavesItsPodsAlone(t *testing.T) {
+	for _, method := range []workloadv1alpha1.UpdateMethod{workloadv1alpha1.InPlaceUpdateMethod, workloadv1alpha1.RecreateUpdateMethod} {
+		t.Run(string(method), func(t *testing.T) {
+			h, recorder := inPlaceHarness(t)
+			h.settleContainers()
+			before := h.uids()
+			// One Pod of three is patched for rev-b when the target moves on.
+			h.retarget("rev-b")
+			h.cluster.BeforeWrite = func(write apitest.Write) error {
+				if write.Verb == "patch" && write.Name == "llama-0-prefill-0-1" {
+					return errors.New("the patch is rejected")
+				}
+				return nil
+			}
+			if _, err := h.round(); err == nil {
+				t.Fatal("the round with a rejected patch succeeded")
+			}
+			h.cluster.BeforeWrite = nil
+			h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+				group.Spec.TargetRevision = "rev-c"
+				group.Spec.RolloutStrategy.UpdateMethod = method
+			})
+			h.cluster.ResetWrites()
+			eventsOf(recorder)
+
+			writes := h.mustRound()
+			for _, write := range writes {
+				if !strings.HasPrefix(write, "update servinggroups/status ") {
+					t.Fatalf("writes = %v, want the status alone: the patched Pod has not restarted", writes)
+				}
+			}
+			h.settleContainers()
+			const held = "prefill-0-0=model:v2/rev-b/done:rev-b prefill-0-1=model:v1/rev-a/- prefill-0-2=model:v1/rev-a/-"
+			if got := h.podFacts(); got != held || !reflect.DeepEqual(h.uids(), before) {
+				t.Fatalf("Pods = %s, want %s and no Pod replaced", got, held)
+			}
+			if got := h.conditions(); got != "Ready=AllInstancesReady" {
+				t.Errorf("conditions = %q, want the group ready and not asking to be recreated", got)
+			}
+			if events := eventsOf(recorder); hasEvent(events, ReasonInPlaceUpdateCompleted) || hasEvent(events, ReasonInPlaceUpdateFallback) {
+				t.Errorf("events = %v, want none about an update of the group", events)
+			}
+
+			if method != workloadv1alpha1.InPlaceUpdateMethod {
+				return
+			}
+			// The ModelServing controller moves the group to the target.
+			h.retarget("rev-c")
+			h.settleContainers()
+			const moved = "prefill-0-0=model:v3/rev-c/done:rev-c prefill-0-1=model:v3/rev-c/done:rev-c prefill-0-2=model:v3/rev-c/done:rev-c"
+			if got := h.podFacts(); got != moved || !reflect.DeepEqual(h.uids(), before) || h.conditions() != "Ready=AllInstancesReady" {
+				t.Errorf("after the move: %s, conditions %q", got, h.conditions())
+			}
+		})
+	}
+}

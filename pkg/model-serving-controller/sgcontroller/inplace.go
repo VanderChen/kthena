@@ -32,6 +32,7 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // Reasons of the events that report in-place updates. They are recorded on
@@ -112,6 +113,10 @@ func (r *round) planInPlace(recoveryEnabled bool) {
 		unit := servinggroup.InPlaceUnit{
 			Target: group.Spec.Revision, Allowed: servinggroup.UpdatesInPlace(group),
 			Settled: len(r.steps) > 0, RecoveryEnabled: recoveryEnabled,
+			// A group of another revision than the target is not brought to
+			// its own revision either: the ModelServing controller moves it to
+			// the target, or replaces it, within the budget of the rollout.
+			Held: r.history.Compare(group.Spec.Revision, group.Spec.TargetRevision) == workload.Different,
 		}
 		var all []servinggroup.InstanceKey
 		for i := range r.steps {
@@ -248,15 +253,19 @@ func (c *Controller) updateInPlace(ctx context.Context, r *round, now time.Time)
 		}
 
 		for _, pod := range step.Complete {
-			hash, err := r.history.RoleHash(step.Revision, pod.Labels[workloadv1alpha1.RoleLabelKey])
+			revision := step.Revision
+			if step.Held {
+				revision = inplace.StateOf(pod).Revision
+			}
+			hash, err := r.history.RoleHash(revision, pod.Labels[workloadv1alpha1.RoleLabelKey])
 			if err != nil {
 				return fmt.Errorf("finish the in-place update of Pod %s: %w", pod.Name, err)
 			}
-			if err := inplace.Complete(ctx, c.kube, pod, step.Revision, hash); err != nil {
+			if err := inplace.Complete(ctx, c.kube, pod, revision, hash); err != nil {
 				return fmt.Errorf("finish the in-place update of Pod %s: %w", pod.Name, err)
 			}
 		}
-		if len(step.Complete) > 0 {
+		if len(step.Complete) > 0 && !step.Held {
 			c.recorder.Eventf(r.parent, corev1.EventTypeNormal, ReasonInPlaceUpdateCompleted,
 				"In-place update of ServingGroup %s to revision %s completed", r.group.Name, step.Revision)
 		}

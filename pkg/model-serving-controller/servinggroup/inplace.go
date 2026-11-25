@@ -175,6 +175,13 @@ type InPlaceUnit struct {
 	Settled bool
 	// RecoveryEnabled is false when a failed or restarting Pod is never deleted.
 	RecoveryEnabled bool
+	// Held reports that Target is not the revision the rollout moves to: the
+	// group is one of an earlier revision, which the ModelServing controller
+	// moves or replaces within the rollout budget, or protects. Nothing is
+	// started in such a unit and it never asks to be recreated, whatever
+	// revisions its Pods run. A Pod that was patched is still brought to the
+	// end of its own update.
+	Held bool
 }
 
 // ImagePatch is the in-place update of one Pod: the images its containers get.
@@ -206,6 +213,9 @@ type InPlaceStep struct {
 	Fallback bool
 	// Waiting, when not empty, says what the update waits for.
 	Waiting string
+	// Held reports that the unit is held: every Pod in Complete gets the
+	// label of the revision it was patched for, which need not be Revision.
+	Held bool
 }
 
 // PlanInPlace decides what to do about the in-place update of a unit. It
@@ -214,6 +224,9 @@ type InPlaceStep struct {
 // that is patched in part is patched to the end, one whose target moved on is
 // patched again, and one that is finished gets its labels.
 func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
+	if unit.Held {
+		return planHeld(unit)
+	}
 	step := InPlaceStep{Revision: unit.Target}
 	var members, patched []Member
 	adoptable, terminating := false, false
@@ -309,6 +322,30 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 		return step
 	}
 	step.Complete = pods(patched)
+	return step
+}
+
+// planHeld is the step of a unit that is held. Its Pods are left as they are,
+// except that one whose images were patched finishes that update: it is
+// waited for, and gets the label of the revision it then runs.
+func planHeld(unit InPlaceUnit) InPlaceStep {
+	step := InPlaceStep{Revision: unit.Target, Held: true}
+	for _, inst := range unit.Instances {
+		for _, member := range inst.Members {
+			state := inplace.StateOf(member.Pod)
+			if member.Membership != Owned || !state.InProgress() {
+				continue
+			}
+			step.Active = true
+			switch {
+			case member.State == MemberTerminating:
+			case updateFinished(state, member.Pod, unit.RecoveryEnabled):
+				step.Complete = append(step.Complete, member.Pod)
+			case step.Waiting == "":
+				step.Waiting = fmt.Sprintf("Pod %s to run its target images and be ready", member.Pod.Name)
+			}
+		}
+	}
 	return step
 }
 

@@ -38,8 +38,11 @@ type ServingGroupSpec struct {
 	// +optional
 	Revision string `json:"revision,omitempty"`
 
-	// TargetRevision is the revision the Role instances of this group are rolled
-	// to under RoleRollingUpdate.
+	// TargetRevision is the revision the rollout of the ModelServing moves to.
+	// Under RoleRollingUpdate the Role instances of this group are rolled to it.
+	// Under ServingGroupRollingUpdate a group whose revision differs from it is
+	// one of an earlier revision: it starts no update of its Pods until the
+	// ModelServing controller changes its revision or replaces it.
 	// +optional
 	TargetRevision string `json:"targetRevision,omitempty"`
 
