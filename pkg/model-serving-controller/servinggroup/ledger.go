@@ -151,6 +151,11 @@ type Want struct {
 	// LayoutKnown is false when that template cannot be resolved. Nothing is then
 	// created for the instance and it is not established.
 	LayoutKnown bool
+	// Revision is the revision the members of the instance are created from.
+	Revision string
+	// Surge: the instance is temporary capacity of a Role rolling update. Members
+	// created for it carry the Role surge mark.
+	Surge bool
 }
 
 // Scope is what the transition of an instance depends on besides the instance.
