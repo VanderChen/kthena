@@ -223,29 +223,6 @@ func (c *Controller) plan(ctx context.Context, ms *workloadv1alpha1.ModelServing
 	return r, nil
 }
 
-// settings returns what the spec of a group at revision carries besides the
-// settings copied from the ModelServing.
-func (r *round) settings(revision string) workload.Settings {
-	settings := workload.Settings{BaselineRevision: r.baseline, UpdateMethod: workloadv1alpha1.RecreateUpdateMethod}
-	layout := revision
-	if r.view.spec.Mode == grouplevel.ModeRole {
-		settings.TargetRevision = r.target
-		layout = r.target
-	} else {
-		settings.Revision = revision
-	}
-	at, err := r.history.At(layout)
-	if err != nil {
-		// The revision of Pods that are taken back cannot be read: the group
-		// reports by the layout of the target until it can.
-		at, err = r.history.At(r.target)
-	}
-	if err == nil {
-		settings.ExpectedPods = workload.ExpectedPods(at)
-	}
-	return settings
-}
-
 // execute issues the writes of a round in the order the plan gives them, and
 // then hands the settings of the ModelServing down to the groups. A write
 // that fails ends the writes of the plan: each of them was computed on the
