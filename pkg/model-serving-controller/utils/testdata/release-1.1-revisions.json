@@ -1,0 +1,83 @@
+[
+  {
+    "name": "steady",
+    "revision": "865595b854",
+    "spec": {
+      "recoveryPolicy": "RoleRecreate",
+      "replicas": 3,
+      "revisionHistoryLimit": 10,
+      "schedulerName": "default-scheduler",
+      "template": {
+        "restartGracePeriodSeconds": 0,
+        "roles": [
+          {
+            "entryTemplate": {
+              "spec": {
+                "containers": [
+                  {
+                    "image": "registry.k8s.io/pause:3.10",
+                    "name": "model"
+                  }
+                ],
+                "terminationGracePeriodSeconds": 1
+              }
+            },
+            "maxUnavailable": 1,
+            "name": "prefill",
+            "replicas": 1,
+            "workerReplicas": 0
+          },
+          {
+            "entryTemplate": {
+              "spec": {
+                "containers": [
+                  {
+                    "image": "registry.k8s.io/pause:3.10",
+                    "name": "model"
+                  }
+                ],
+                "terminationGracePeriodSeconds": 1
+              }
+            },
+            "maxUnavailable": 1,
+            "name": "decode",
+            "replicas": 2,
+            "workerReplicas": 0
+          }
+        ]
+      }
+    }
+  },
+  {
+    "name": "sgr",
+    "revision": "79d5bf9dd6",
+    "spec": {
+      "recoveryPolicy": "ServingGroupRecreate",
+      "replicas": 2,
+      "revisionHistoryLimit": 10,
+      "schedulerName": "default-scheduler",
+      "template": {
+        "restartGracePeriodSeconds": 0,
+        "roles": [
+          {
+            "entryTemplate": {
+              "spec": {
+                "containers": [
+                  {
+                    "image": "registry.k8s.io/pause:3.10",
+                    "name": "model"
+                  }
+                ],
+                "terminationGracePeriodSeconds": 1
+              }
+            },
+            "maxUnavailable": 1,
+            "name": "serve",
+            "replicas": 1,
+            "workerReplicas": 0
+          }
+        ]
+      }
+    }
+  }
+]
