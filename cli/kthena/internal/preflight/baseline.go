@@ -100,8 +100,8 @@ type BaselineObject struct {
 	ModelServing string    `json:"modelServing"`
 	Group        string    `json:"group,omitempty"`
 	// GroupHasPods reports that the group of the object had a Pod that was
-	// not terminating. Only then is the object taken over; otherwise the
-	// takeover deletes it.
+	// not terminating. Only then is the object taken over with its group;
+	// otherwise the takeover leaves it to the ModelServing.
 	GroupHasPods bool `json:"groupHasPods"`
 }
 

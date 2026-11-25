@@ -66,7 +66,7 @@ func (a *analysis) existingObjects() {
 	sort.Strings(leftover)
 	if len(leftover) > 0 {
 		a.add(Finding{ID: FindingObjectsWithoutPods, Level: LevelInfo, Objects: leftover,
-			Message: fmt.Sprintf("%s to a group without a Pod to take over (%s). The takeover deletes such an object, and it is created again, with a new UID, when the group is created. No Pod is affected.",
+			Message: fmt.Sprintf("%s to a group without a Pod to take over (%s). The takeover leaves such an object as it is, controlled by the ModelServing. It is taken over in place when a group of that name is created; otherwise it stays until the ModelServing is deleted. No Pod is affected.",
 				counted(len(leftover), "1 object belongs", "%d objects belong"), listed(leftover))})
 	}
 }

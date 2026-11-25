@@ -249,7 +249,7 @@ Findings about a ModelServing:
 | `dry-run-rejected` | blocked | An admission webhook or the API server rejects the write of the adoption annotation |
 | `dry-run-rejected-by-kthena-webhook`, `dry-run-unknown` | attention | The running version's own webhook rejects the object (the new version admits updates that leave the spec unchanged), or the dry-run could not be judged |
 | `pods-on-cordoned-nodes`, `disruption-budget-expected-count` | attention | Pods on cordoned nodes; PodDisruptionBudgets whose allowed disruptions change with the owner of the Pods |
-| `objects-of-groups-without-pods` | info | PodGroups and Services that the takeover deletes and recreates because their group has no Pod |
+| `objects-of-groups-without-pods` | info | PodGroups and Services of a group without a Pod: the takeover leaves them to the ModelServing |
 | `deleting`, `takeover-in-progress`, `rollback-in-progress` | wait | The ModelServing is being deleted, taken over, or handed back |
 | `taken-over` | info | The ModelServing was taken over already |
 

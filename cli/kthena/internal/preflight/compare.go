@@ -381,8 +381,8 @@ func uidsOf[T metav1.Object](objects []T) map[string]types.UID {
 }
 
 // compareObjects checks that every PodGroup or Service of the baseline is
-// the same object. One whose group had no Pod to take over is deleted by the
-// takeover and created again with the group; that is reported, not judged.
+// the same object. One whose group had no Pod to take over is not part of
+// the takeover; a change of it is reported, not judged.
 func compareObjects(objects []BaselineObject, kind string, current map[string]types.UID, judge func(Change), report func(string, Change)) {
 	for _, base := range objects {
 		change := Change{Kind: kind, Namespace: base.Namespace, Name: base.Name, ModelServing: base.ModelServing}
@@ -396,7 +396,7 @@ func compareObjects(objects []BaselineObject, kind string, current map[string]ty
 			change.Change, change.Detail = ChangeObjectRecreated, fmt.Sprintf("the %s was deleted and created again: UID %s, was %s", kind, uid, base.UID)
 		}
 		if !base.GroupHasPods {
-			change.Detail += "; its group had no Pod to take over, and the takeover deletes such an object"
+			change.Detail += "; its group had no Pod to take over, so the takeover did not concern the object"
 			report(SeverityInfo, change)
 			continue
 		}
