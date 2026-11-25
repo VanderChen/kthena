@@ -801,7 +801,7 @@ ModelServing controller 每一轮先把当前模板记成 ControllerRevision，�
 - 组：多于 `replicas` 的删到 `replicas`。`ServingGroupRollingUpdate`、不是原地更新、`replicas` 大于 0 时另留出配置的 `maxSurge`：目标读不出来，不能断定 surge 的组已经没有用。先删正式的组，带 surge 标记的排在后面；`replicas` 为 0 时全部删掉，带标记的也删。删除之前照常直读、在读到的东西上重新计划。
 - Role 实例：没有配 `roleCoordination` 的 ModelServing，留下的每个组里 Role 的副本数调小的部分下发（只改这个数、与之对应的 `expectedPods` 和 `sourceGeneration`），partition 之下的组也一样：副本数不属于版本，正常的一轮也把当前的数下发给每个组。调大的、新增或去掉的 Role 不下发。组自己的版本读不出来时不动它，在错误里点名。配了 `roleCoordination` 的不动：多出来的实例可能是协调滚动的 surge，不能绕过协调的检查。
 - 不建任何东西，不替换任何东西，不改任何组的版本，不写 ModelServing 的 `status`（`observedGeneration` 留在后面）。
-- 在 ModelServing 上发 Warning 事件 `RevisionUnresolved`，每个 generation 每个进程一次。这一轮总是按出错返回（版本的错误连同缩容中出的错），由队列重试，到版本记得下来为止。
+- 在 ModelServing 上发 Warning 事件 `RevisionUnresolved`，每个 generation 每个进程一次。这一轮总是按出错返回（版本的错误连同缩容中出的错），到版本记得下来为止固定每 15 秒重试一次，不用队列那个越来越长的退避：版本记不下来的那几秒里，ModelServing 和各组的每个事件都会触发一轮、每一轮都失败，退避的延迟十几次之后就是十几分钟，而「现在可以写了」没有任何事件来告诉 controller。Kind 上观察到过：准入策略撤掉 5 分钟之后滚动还没有开始。
 - 不做的情形：从来没有记下过目标（`status.updateRevision` 为空或读不出来）；存量还没有接管完（接管注解不是 `Done`）；`maxSurge` 或 partition 解析不出来。
 
 与上游的差别：上游在 Role 逐个滚动时给 Role 留 `replicas + maxSurge` 个实例，这里下发确切的数，组在自己的滚动还需要时留着带 surge 标记的实例；上游在 `maxSurge` 写错时仍然下调 Role，这里整轮不做；「算出来的名字上已有一个内容不同的 ControllerRevision」在上游是错误，这里按碰撞换名记下来，是正常的一轮。
