@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -110,9 +111,16 @@ func TestWorkloadsOfAnEarlierVersionAreTakenOver(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ms := modelServing()
 			ms.UID = "ms-uid"
+			ms.Generation = 4
+			available := metav1.Condition{
+				Type: string(workloadv1alpha1.ModelServingAvailable), Status: metav1.ConditionTrue, Reason: "AllGroupsReady",
+				Message: "All Serving groups are ready", LastTransitionTime: metav1.NewTime(time.Unix(1600000000, 0)),
+			}
 			ms.Status = workloadv1alpha1.ModelServingStatus{
 				Replicas: 3, UpdatedReplicas: 3, CurrentReplicas: 3, AvailableReplicas: 3,
 				CurrentRevision: "old-identity", UpdateRevision: "old-identity",
+				// The earlier version had not seen the last change of the object.
+				ObservedGeneration: 3, Conditions: []metav1.Condition{available},
 			}
 			objects := []runtime.Object{ms, legacyRevision(t, ms, "old-identity", release11)}
 			for ordinal := range 3 {
@@ -124,14 +132,31 @@ func TestWorkloadsOfAnEarlierVersionAreTakenOver(t *testing.T) {
 				uids[pod.Name] = pod.UID
 			}
 
-			// While the workloads are taken over, the counts users see do not move.
+			// While the workloads are taken over, the counts users see do not
+			// move, and neither do the conditions: every Pod serves, and a
+			// ModelServing that turned unavailable for the time of the upgrade
+			// would trip every alert that watches the condition. The status
+			// speaks about the generation the earlier version wrote it for
+			// until it is written for this one.
 			s.invariant = func() {
+				current := s.modelServing()
 				if got := s.counts(); got != "replicas=3 updated=3 current=3 available=3" {
 					t.Fatalf("during the take-over: %s", got)
+				}
+				condition := meta.FindStatusCondition(current.Status.Conditions, string(workloadv1alpha1.ModelServingAvailable))
+				if condition == nil || condition.Status != metav1.ConditionTrue || !condition.LastTransitionTime.Equal(&available.LastTransitionTime) {
+					t.Fatalf("during the take-over the Available condition changed: %+v", condition)
+				}
+				done := current.Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey] == workloadv1alpha1.ServingGroupAdoptionDone
+				if !done && current.Status.ObservedGeneration != 3 {
+					t.Fatalf("during the take-over observedGeneration = %d, want what the earlier version wrote", current.Status.ObservedGeneration)
 				}
 			}
 			s.settle()
 			s.invariant = nil
+			if got := s.modelServing().Status.ObservedGeneration; got != 4 {
+				t.Errorf("after the take-over observedGeneration = %d, want 4", got)
+			}
 
 			for _, write := range s.cluster.Writes() {
 				if write.Resource == "pods" && write.Verb != "patch" || write.Resource == "controllerrevisions" && write.Verb == "create" {

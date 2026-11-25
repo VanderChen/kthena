@@ -99,17 +99,19 @@ func computeStatus(in statusInput) workloadv1alpha1.ModelServingStatus {
 	rolloutActive := pendingSurge || outdated
 	progressActive := pendingSurge || len(progressing) > 0 || len(v.groups) != replicas || available != replicas
 
-	copied := ms.DeepCopy()
-	copied.Status = status
-	utils.SetConditionWithRolloutAndProgressState(copied, progressing, updatedGroups, currentGroups, rolloutActive, progressActive)
-	status = copied.Status
+	// Groups that were just created for workloads of an earlier version have
+	// not reported yet. What that version wrote stays until they have: the
+	// counts, the conditions, and the generation they were written for. A
+	// ModelServing whose Pods all serve is not reported as unavailable for the
+	// time it takes to take them over, and a status that speaks about an
+	// earlier generation does not claim to speak about this one.
 	if !in.adopting {
-		// Groups that were just created for workloads of an earlier version
-		// have not reported yet; what that version wrote stays until they have.
+		copied := ms.DeepCopy()
+		copied.Status = status
+		utils.SetConditionWithRolloutAndProgressState(copied, progressing, updatedGroups, currentGroups, rolloutActive, progressActive)
+		status = copied.Status
 		setCoordinationCondition(&status, ms, v, in.handedDown)
-	}
 
-	if !in.adopting {
 		status.Replicas = int32(len(v.groups))
 		status.AvailableReplicas = int32(available)
 		status.UpdatedReplicas = int32(updated)
@@ -128,7 +130,9 @@ func computeStatus(in statusInput) workloadv1alpha1.ModelServingStatus {
 		count := *in.collisions
 		status.CollisionCount = &count
 	}
-	status.ObservedGeneration = ms.Generation
+	if !in.adopting {
+		status.ObservedGeneration = ms.Generation
+	}
 	status.LabelSelector = scaleSelector(ms)
 	return status
 }
