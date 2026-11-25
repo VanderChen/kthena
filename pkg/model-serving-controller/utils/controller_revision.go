@@ -23,10 +23,8 @@ import (
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
@@ -202,119 +200,6 @@ func ModelServingAtRevision(ms *workloadv1alpha1.ModelServing, cr *appsv1.Contro
 	result := ms.DeepCopy()
 	result.Spec.Template.Roles = roles
 	return result, nil
-}
-
-// CleanupOldControllerRevisions deletes old ControllerRevisions that are no longer in use.
-// Status names current/update revisions; active mixed units may reference additional snapshots.
-// Preserve status, store and live Pod references, including mixed Role revisions.
-func CleanupOldControllerRevisions(
-	ctx context.Context,
-	client kubernetes.Interface,
-	ms *workloadv1alpha1.ModelServing,
-	referencedRevisions ...string,
-) error {
-	// Get all ControllerRevisions for this ModelServing
-	selector := labels.SelectorFromSet(map[string]string{
-		ControllerRevisionLabelKey: ms.Name,
-	})
-
-	list, err := client.AppsV1().ControllerRevisions(ms.Namespace).List(ctx, metav1.ListOptions{
-		LabelSelector: selector.String(),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to list ControllerRevisions: %v", err)
-	}
-
-	// Get the revision names that must be preserved (CurrentRevision and UpdateRevision)
-	var currentRevisionName, updateRevisionName string
-	if ms.Status.CurrentRevision != "" {
-		currentRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.CurrentRevision)
-	}
-	if ms.Status.UpdateRevision != "" {
-		updateRevisionName = GenerateControllerRevisionName(ms.Name, ms.Status.UpdateRevision)
-	}
-	preservedRevisionNames := make(map[string]struct{}, len(referencedRevisions)+2)
-	if currentRevisionName != "" {
-		preservedRevisionNames[currentRevisionName] = struct{}{}
-	}
-	if updateRevisionName != "" {
-		preservedRevisionNames[updateRevisionName] = struct{}{}
-	}
-	for _, referencedRevision := range referencedRevisions {
-		if referencedRevision != "" {
-			preservedRevisionNames[GenerateControllerRevisionName(ms.Name, referencedRevision)] = struct{}{}
-		}
-	}
-
-	// API Pods fence cache gaps and unfinished/terminating units. Their historical
-	// snapshot remains necessary until the last actual reference disappears.
-	pods, err := client.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return fmt.Errorf("list Pod revision references: %w", err)
-	}
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		if controlledByModelServing(pod, ms) {
-			if revision := ObjectRevision(pod); revision != "" {
-				preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
-			}
-			if revision := unfinishedInPlaceRevision(pod); revision != "" {
-				preservedRevisionNames[GenerateControllerRevisionName(ms.Name, revision)] = struct{}{}
-			}
-		}
-	}
-
-	// Delete only unreferenced history controlled by this exact ModelServing.
-	deletedCount := 0
-	for i := range list.Items {
-		revision := &list.Items[i]
-		if !controlledByModelServing(revision, ms) {
-			continue
-		}
-		// Skip if this revision must be preserved
-		if _, preserved := preservedRevisionNames[revision.Name]; preserved {
-			continue
-		}
-		err := client.AppsV1().ControllerRevisions(ms.Namespace).Delete(ctx, revision.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &revision.UID}})
-		if err != nil && !apierrors.IsNotFound(err) {
-			klog.Warningf("Failed to delete old ControllerRevision %s/%s: %v", ms.Namespace, revision.Name, err)
-		} else {
-			deletedCount++
-			klog.V(4).Infof("Deleted old ControllerRevision %s/%s", ms.Namespace, revision.Name)
-		}
-	}
-
-	if deletedCount > 0 {
-		klog.V(4).Infof("Cleaned up %d old ControllerRevisions for ModelServing %s/%s (preserved CurrentRevision=%s, UpdateRevision=%s)",
-			deletedCount, ms.Namespace, ms.Name, ms.Status.CurrentRevision, ms.Status.UpdateRevision)
-	}
-
-	return nil
-}
-
-// An unfinished patch can still target B after the desired revision advances to
-// C while the Pod label remains A. Decode only its history reference here: the
-// inplace package depends on utils. Keep current and legacy completion semantics
-// aligned with inplace.StateOf; completed patch records do not pin old history.
-func unfinishedInPlaceRevision(pod *corev1.Pod) string {
-	var state struct {
-		Revision       string `json:"revision"`
-		TargetRevision string `json:"targetRevision"`
-		Version        int    `json:"version"`
-		Phase          string `json:"phase"`
-		Done           bool   `json:"done"`
-	}
-	if err := json.Unmarshal([]byte(pod.Annotations[workloadv1alpha1.InPlaceUpdateStateAnnotationKey]), &state); err != nil {
-		return ""
-	}
-	if state.Version != 0 || state.Phase != "" {
-		if state.Phase != "Done" {
-			return state.TargetRevision
-		}
-	} else if !state.Done {
-		return state.Revision
-	}
-	return ""
 }
 
 // controlledByModelServing requires the complete controller identity, not just labels.

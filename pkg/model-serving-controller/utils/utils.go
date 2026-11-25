@@ -47,13 +47,6 @@ const (
 	SomeGroupsAreUpdated     = "Updated Groups are"
 )
 
-func GetNamespaceName(obj metav1.Object) types.NamespacedName {
-	return types.NamespacedName{
-		Namespace: obj.GetNamespace(),
-		Name:      obj.GetName(),
-	}
-}
-
 // ServingGroupRegex is a regular expression that extracts the parent modelServing and ordinal from the Name of an ServingGroup
 var servingGroupRegex = regexp.MustCompile("(.*)-([0-9]+)$")
 
@@ -266,18 +259,6 @@ func CreateHeadlessService(ctx context.Context, k8sClient kubernetes.Interface, 
 	return err
 }
 
-func GetModelServingAndGroupByLabel(podLabels map[string]string) (string, string, bool) {
-	modelServingName, ok := podLabels[workloadv1alpha1.ModelServingNameLabelKey]
-	if !ok {
-		return "", "", false
-	}
-	servingGroupName, ok := podLabels[workloadv1alpha1.GroupNameLabelKey]
-	if !ok {
-		return "", "", false
-	}
-	return modelServingName, servingGroupName, true
-}
-
 // IsOwnedByModelServingWithUID returns true when the object is owned by the ModelServing with the provided UID.
 func IsOwnedByModelServingWithUID(obj metav1.Object, uid types.UID) bool {
 	for _, ownerRef := range obj.GetOwnerReferences() {
@@ -310,20 +291,6 @@ func ObjectRevision(obj metav1.Object) string {
 	return obj.GetLabels()[workloadv1alpha1.RevisionLabelKey]
 }
 
-func ObjectRoleTemplateHash(obj metav1.Object) string {
-	return obj.GetLabels()[workloadv1alpha1.RoleTemplateHashLabelKey]
-}
-
-// GetRoleName returns the role name of the resource.
-func GetRoleName(resource metav1.Object) string {
-	return resource.GetLabels()[workloadv1alpha1.RoleLabelKey]
-}
-
-// GetRoleID returns the role id of the resource.
-func GetRoleID(resource metav1.Object) string {
-	return resource.GetLabels()[workloadv1alpha1.RoleIDKey]
-}
-
 func isPodReady(pod *corev1.Pod) bool {
 	return isPodReadyConditionTrue(pod.Status)
 }
@@ -349,24 +316,9 @@ func getPodReadyCondition(status *corev1.PodStatus) *corev1.PodCondition {
 	return nil
 }
 
-// IsPodTerminating returns true if pod's DeletionTimestamp has been set
-func IsPodTerminating(pod *corev1.Pod) bool {
-	return pod.DeletionTimestamp != nil
-}
-
 // IsPodFailed returns true if pod has a Phase of PodFailed.
 func IsPodFailed(pod *corev1.Pod) bool {
 	return pod.Status.Phase == corev1.PodFailed
-}
-
-func ExpectedPodNum(ms *workloadv1alpha1.ModelServing) int {
-	num := 0
-	for _, role := range ms.Spec.Template.Roles {
-		// Calculate the expected number of pod replicas when the role is running normally
-		// For each role, the expected number of pods is (entryPod.num + workerPod.num) * role.replicas
-		num += (1 + int(role.WorkerReplicas)) * int(*role.Replicas)
-	}
-	return num
 }
 
 // ContainerRestarted return true when there is any container in the pod that gets restarted
@@ -579,24 +531,6 @@ func GroupNameIndexFunc(obj interface{}) ([]string, error) {
 	return []string{compositeKey}, nil
 }
 
-func RoleIDIndexFunc(obj interface{}) ([]string, error) {
-	labels, namespace, ok := getIndexKeyFromObject(obj)
-	if !ok {
-		return []string{}, nil
-	}
-
-	groupName, groupNameExists := labels[workloadv1alpha1.GroupNameLabelKey]
-	roleName, roleNameExists := labels[workloadv1alpha1.RoleLabelKey]
-	roleID, roleIDExists := labels[workloadv1alpha1.RoleIDKey]
-
-	if !groupNameExists || !roleNameExists || !roleIDExists || groupName == "" || roleName == "" || roleID == "" {
-		return []string{}, nil
-	}
-
-	compositeKey := fmt.Sprintf("%s/%s/%s/%s", namespace, groupName, roleName, roleID)
-	return []string{compositeKey}, nil
-}
-
 func GetMaxUnavailable(ms *workloadv1alpha1.ModelServing) (int, error) {
 	maxUnavailable := intstr.FromInt(1) // Default value
 	replicas := int(*ms.Spec.Replicas)
@@ -623,33 +557,4 @@ func GetMaxSurge(ms *workloadv1alpha1.ModelServing) (int, error) {
 		}
 	}
 	return intstr.GetScaledValueFromIntOrPercent(&maxSurge, replicas, true)
-}
-
-func GetMaxUnavailableForRole(role workloadv1alpha1.Role) (int, bool, error) {
-	if role.MaxUnavailable == nil {
-		return 0, false, nil
-	}
-	replicas := 1
-	if role.Replicas != nil {
-		replicas = int(*role.Replicas)
-	}
-	maxUnavailable, err := intstr.GetScaledValueFromIntOrPercent(role.MaxUnavailable, replicas, false)
-	return maxUnavailable, true, err
-}
-
-// GetMaxSurgeForRole resolves a Role's surge budget against its latest desired
-// replica count. Percentage values are rounded up.
-func GetMaxSurgeForRole(role workloadv1alpha1.Role) (int, error) {
-	if role.MaxSurge == nil {
-		return 0, nil
-	}
-	replicas := roleReplicas(role)
-	return intstr.GetScaledValueFromIntOrPercent(role.MaxSurge, replicas, true)
-}
-
-func roleReplicas(role workloadv1alpha1.Role) int {
-	if role.Replicas == nil {
-		return 1
-	}
-	return int(*role.Replicas)
 }
