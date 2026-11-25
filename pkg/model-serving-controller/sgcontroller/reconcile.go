@@ -34,7 +34,12 @@ import (
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/podgroupmanager"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // Reasons of the ReconcileFailed condition and of events.
@@ -77,12 +82,13 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		// The garbage collector removes the members. Nothing is created for a
 		// group that is going away.
 		c.forget(group.UID, nil)
+		c.farewell(ctx, group)
 		return 0, nil
 	}
 	parent := c.parentOf(group)
 	if parent == nil {
 		c.recorder.Eventf(group, corev1.EventTypeWarning, ReasonOwnerNotFound,
-			"the ModelServing that controls the group does not exist; the group is left alone")
+			"no ModelServing controls the group under a name of the form <ModelServing>-<ordinal>; the group is left alone")
 		return 0, nil
 	}
 
@@ -92,6 +98,12 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 
 	now := c.now()
 	r := c.decide(observation{group: group, parent: parent, pods: c.caches.PodsOfGroup(group)}, now)
+	if err := c.syncPlugins(ctx, parent); err != nil {
+		// A hook of the ModelServing said that nothing may be done for it:
+		// the round creates, deletes and patches nothing, and says why.
+		r.failure = err
+		return c.execute(ctx, r, now)
+	}
 	if r.confirm {
 		// What the round is about to do rests on a Pod being absent, terminating
 		// or faulty. The cache may be behind: read again and decide again.
@@ -105,6 +117,84 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		r = c.decide(obs, now)
 	}
 	return c.execute(ctx, r, now)
+}
+
+// syncPlugins calls the OnModelServingSync hooks of the ModelServing. Its own
+// controller calls them as well, before it creates or deletes a group; a hook
+// that fails without asking to continue has to stop what happens inside the
+// groups that exist, too.
+func (c *Controller) syncPlugins(ctx context.Context, parent *workloadv1alpha1.ModelServing) error {
+	chain, err := c.chain(parent)
+	if err != nil {
+		return fmt.Errorf("build the plugins: %w", err)
+	}
+	if chain == nil {
+		return nil
+	}
+	result := chain.OnModelServingSync(ctx, &plugins.HookRequest{ModelServing: parent, KubeClient: c.kube, ServiceLister: c.services})
+	if result.Err == nil {
+		return nil
+	}
+	if result.Continue {
+		klog.V(2).InfoS("A plugin failed; the round continues", "modelServing", klog.KObj(parent), "err", result.Err)
+		return nil
+	}
+	return fmt.Errorf("plugins of ModelServing %s: %w", parent.Name, result.Err)
+}
+
+// farewell calls the OnRoleDelete hooks for the Role instances of a group
+// that is being deleted, once its Pods are gone. It is an attempt and no more:
+// the object can be gone before the round that would call them. What a plugin
+// creates for a group has to be owned by the group, so that it goes with it.
+func (c *Controller) farewell(ctx context.Context, group *workloadv1alpha1.ServingGroup) {
+	parent := c.parentOf(group)
+	if parent == nil || len(group.Status.RoleInstances) == 0 || len(c.caches.PodsOfGroup(group)) > 0 {
+		return
+	}
+	history := workload.NewHistory(workload.Base(parent, group), c.caches.ControllerRevision)
+	view, err := history.At(groupRevision(group))
+	if err != nil {
+		view = history.ModelServing()
+	}
+	chain, err := plugins.NewRoleDeleteChain(c.registry, view.Spec.Plugins)
+	if err != nil || chain == nil {
+		return
+	}
+	owner := OwnerReference(group)
+	for _, entry := range group.Status.RoleInstances {
+		key := servinggroup.InstanceKey{Role: entry.Role, Index: int(entry.Index)}
+		if err := chain.OnRoleDelete(ctx, c.hookRequest(view, group.Name, key, owner, entry.Generation)); err != nil {
+			klog.V(2).InfoS("Role delete hook failed for a group that is being deleted", "servingGroup", klog.KObj(group),
+				"role", entry.Role, "index", entry.Index, "err", err)
+		}
+	}
+}
+
+// reportRoles records, on the ModelServing, that a Role instance entered a
+// phase. The events are the ones a version without group objects recorded.
+func (c *Controller) reportRoles(r *round, changes map[servinggroup.InstanceKey]servinggroup.LedgerChange) {
+	for i := range r.steps {
+		s := &r.steps[i]
+		state := ""
+		change, changed := changes[s.key]
+		switch {
+		case changed && change.Remove:
+		case changed && change.Phase == workloadv1alpha1.RoleInstanceCreating:
+			state = "Creating"
+		case changed && change.Phase == workloadv1alpha1.RoleInstanceEstablished:
+			state = "Running"
+		case changed && change.Phase == workloadv1alpha1.RoleInstanceDraining:
+			state = "Deleting"
+		case !changed && s.inst.Entry == nil && len(s.inst.Members) == 0 && len(s.step.Create) > 0:
+			// An instance that is created for the first time has no entry in
+			// the ledger until it is established.
+			state = "Creating"
+		}
+		if state != "" {
+			c.recorder.Eventf(r.parent, corev1.EventTypeNormal, "Role"+state, "Role %s/%s in ServingGroup %s is now %s",
+				s.key.Role, utils.GenerateRoleID(s.key.Role, s.key.Index), r.group.Name, state)
+		}
+	}
 }
 
 // handingBack reports whether the workloads of a ModelServing are being
@@ -121,6 +211,12 @@ func handingBack(parent *workloadv1alpha1.ModelServing) bool {
 func (c *Controller) parentOf(group *workloadv1alpha1.ServingGroup) *workloadv1alpha1.ModelServing {
 	owner := metav1.GetControllerOfNoCopy(group)
 	if owner == nil || owner.Kind != workloadv1alpha1.ModelServingKind.Kind {
+		return nil
+	}
+	// A ModelServing only knows the groups that carry its name and an
+	// ordinal. An object under another name that points at it is not counted,
+	// rolled or deleted by it, and gets no Pods either.
+	if prefix, _, ok := objcache.OrdinalName(group.Name); !ok || prefix != owner.Name {
 		return nil
 	}
 	parent, err := c.caches.ModelServing(group.Namespace, owner.Name)
@@ -238,6 +334,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	// after its delete hook succeeded.
 	changes := map[servinggroup.InstanceKey]servinggroup.LedgerChange{}
 	drainBlocked := ""
+	var hookFailure error
 	var creations []creation
 	pending := 0
 	for i := range r.steps {
@@ -247,6 +344,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 				klog.ErrorS(err, "Role delete hook failed", "servingGroup", klog.KObj(group), "role", s.key.Role, "index", s.key.Index)
 				if drainBlocked == "" {
 					drainBlocked = fmt.Sprintf("Role instance %s-%d: %v", s.key.Role, s.key.Index, err)
+					hookFailure = fmt.Errorf("delete hook of Role instance %s-%d: %w", s.key.Role, s.key.Index, err)
 				}
 				continue
 			}
@@ -264,60 +362,79 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		ledger = group.Status.RoleInstances
 	}
 
-	// The PodGroup exists before the first member is committed to.
-	var failure error
+	// The PodGroup exists before the first member is committed to. Without it
+	// no member is created or patched; what the round deletes it still deletes,
+	// or a group that has failed could not be emptied to be replaced.
 	requeue := time.Duration(0)
-	if after, err := c.syncPodGroup(ctx, r, owner); err != nil {
-		failure, requeue = err, after
-		creations, pending = nil, 0
+	after, podGroupFailure := c.syncPodGroup(ctx, r, owner)
+	if podGroupFailure != nil {
+		requeue, creations = after, nil
 	}
 
 	input := servinggroup.StatusInput{
 		Group: group, Now: now, Members: r.members, Instances: r.instances,
 		Ledger: ledger, Wants: r.plan.Wants, Updating: r.updating, Revisions: r.history,
 		Fail: r.fail, RecreateRequired: r.recreate, DrainBlocked: drainBlocked,
-		Coordination:   r.plan.Coordination.Condition(),
+		Coordination: r.plan.Coordination.Condition(),
+		// What is still to be created stays in the count although nothing is
+		// created in a round without its PodGroup: members that the cache does
+		// not show yet may be among it, and a count of zero would say that the
+		// group has none.
 		PendingCreates: pending,
 		// First the status says that members are being created, then the first
 		// one is. The ModelServing controller changes the revision of a group
 		// without a member freely; this write and that change exclude each other.
-		CreationCommitted: pending > 0 && len(r.members) == 0 && group.Status.Pods == 0,
+		CreationCommitted: podGroupFailure == nil && pending > 0 && len(r.members) == 0 && group.Status.Pods == 0,
+		// Whether the round fails is known after it has acted.
+		FailurePending: true,
 	}
-	input.Failure = conditionOf(failure)
 	group, err := c.writeStatus(ctx, group, servinggroup.ComputeStatus(input))
 	if err != nil {
 		return 0, err
 	}
 	input.Group = group
 	c.reportInPlace(r)
+	c.reportRoles(r, changes)
 
-	if failure == nil {
-		failure = c.act(ctx, r, group, owner, creations, now)
+	actFailure := c.act(ctx, r, group, owner, creations, now, podGroupFailure != nil)
+	failure := errors.Join(podGroupFailure, actFailure)
+
+	// The failure of the round is settled once, here. A round that fails the
+	// way the one before it did leaves the status as it is; the queue then
+	// retries with growing delays, and no write of its own wakes it early.
+	input.FailurePending, input.Failure = false, conditionOf(failure)
+	if _, err := c.writeStatus(ctx, group, servinggroup.ComputeStatus(input)); err != nil {
+		return 0, errors.Join(failure, err)
 	}
-	if failure != nil {
-		input.Failure = conditionOf(failure)
-		if _, err := c.writeStatus(ctx, group, servinggroup.ComputeStatus(input)); err != nil {
-			return 0, errors.Join(failure, err)
-		}
-		if requeue > 0 {
-			klog.ErrorS(failure, "Round failed; retrying later", "servingGroup", klog.KObj(group), "after", requeue)
-			return requeue, nil
-		}
+	switch {
+	case podGroupFailure != nil && actFailure == nil && requeue > 0:
+		// The PodGroup said when it is worth trying again.
+		klog.ErrorS(failure, "Round failed; retrying later", "servingGroup", klog.KObj(group), "after", requeue)
+		return requeue, nil
+	case failure != nil:
 		return 0, failure
+	case hookFailure != nil:
+		// The instance stays as it is until its hook succeeds. Nothing else
+		// would bring the next round.
+		return 0, hookFailure
 	}
-
 	return r.wakeAfter(now), nil
 }
 
 // act issues the deletions, the marks, the creations and the in-place patches
 // of a round, after its status write.
-func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.ServingGroup, owner metav1.OwnerReference, creations []creation, now time.Time) error {
+//
+// deletionsOnly ends it after the deletions: the round has no PodGroup.
+func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.ServingGroup, owner metav1.OwnerReference, creations []creation, now time.Time, deletionsOnly bool) error {
 	for i := range r.steps {
 		for _, pod := range r.steps[i].step.Delete {
 			if err := c.deletePod(ctx, pod); err != nil {
 				return fmt.Errorf("delete Pod %s: %w", pod.Name, err)
 			}
 		}
+	}
+	if deletionsOnly {
+		return nil
 	}
 	if err := c.promote(ctx, r); err != nil {
 		return err
@@ -341,7 +458,7 @@ func conditionOf(err error) *servinggroup.ConditionChange {
 		return nil
 	}
 	reason := ReasonError
-	if errors.Is(err, errNameOccupied) {
+	if errors.Is(err, errNameOccupied) || errors.Is(err, podgroupmanager.ErrNameOccupied) || errors.Is(err, plugins.ErrNameOccupied) {
 		reason = ReasonNameOccupied
 	}
 	return &servinggroup.ConditionChange{Reason: reason, Message: err.Error()}

@@ -36,6 +36,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/apitest"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
@@ -174,6 +175,8 @@ type harness struct {
 	recorder record.EventRecorder
 	// restarts makes quiesce run every round with a new controller.
 	restarts bool
+	// registry, when set, holds the plugins instead of the default registry.
+	registry *plugins.Registry
 }
 
 func newHarness(t *testing.T, objects ...runtime.Object) *harness {
@@ -189,7 +192,8 @@ func newHarness(t *testing.T, objects ...runtime.Object) *harness {
 func (h *harness) restart() {
 	h.controller = New(Options{
 		Kube: h.cluster.Kube, Kthena: h.cluster.Kthena, PodGroups: h.podGroups, Recorder: h.recorder,
-		Now: func() time.Time { return h.cluster.Now() },
+		Registry: h.registry,
+		Now:      func() time.Time { return h.cluster.Now() },
 	})
 }
 

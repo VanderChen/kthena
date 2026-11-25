@@ -257,7 +257,10 @@ func Transition(inst Instance, want *Want, scope Scope) Step {
 		if len(old) > 0 {
 			return deleteInTwoSteps(Step{Rule: "E2"}, old)
 		}
-		step := Step{Rule: "E3", RoleDelete: true, Ledger: &LedgerChange{Remove: true}}
+		// That the Pods are gone is what the next generation is created on:
+		// it is read from the API server. A cache that does not show them yet
+		// would end the drain before it began.
+		step := Step{Rule: "E3", RoleDelete: true, Confirm: true, Ledger: &LedgerChange{Remove: true}}
 		if want != nil {
 			next := max(generation, inst.maxOwnedGeneration()) + 1
 			step.Ledger = &LedgerChange{Phase: workloadv1alpha1.RoleInstanceCreating, Generation: next}

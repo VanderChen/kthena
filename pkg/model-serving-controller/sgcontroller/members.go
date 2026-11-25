@@ -253,7 +253,7 @@ func (c *Controller) createMembers(ctx context.Context, r *round, group *workloa
 				return fmt.Errorf("prepare Pod %s: %w", pod.Name, err)
 			}
 		}
-		if err := c.createPod(ctx, pod, owner); err != nil {
+		if err := c.createPod(ctx, pod, owner, r.parent.Name, group.Name, s.step.Generation); err != nil {
 			return err
 		}
 	}
@@ -277,7 +277,14 @@ func surgeMark(group *workloadv1alpha1.ServingGroup, want *servinggroup.Want) st
 // createPod creates a member. When the name is taken, only a direct read can
 // tell whether by the member itself, which the cache does not show yet, or by
 // something else.
-func (c *Controller) createPod(ctx context.Context, pod *corev1.Pod, owner metav1.OwnerReference) error {
+//
+// The member itself is a Pod the group controls that carries the labels of a
+// member and was created for this generation of its Role instance. A Pod of
+// the group without those labels is in no cache and counts for nothing; one
+// of an earlier generation has yet to be deleted. Taking either for the
+// member would leave the instance waiting for a Pod that never comes, or let
+// a drain end without the Pods having gone.
+func (c *Controller) createPod(ctx context.Context, pod *corev1.Pod, owner metav1.OwnerReference, modelServing, group string, generation int64) error {
 	_, err := c.kube.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err == nil {
 		return nil
@@ -292,10 +299,18 @@ func (c *Controller) createPod(ctx context.Context, pod *corev1.Pod, owner metav
 	if err != nil {
 		return fmt.Errorf("create Pod %s: %w", pod.Name, err)
 	}
-	if controller := metav1.GetControllerOfNoCopy(existing); controller != nil && controller.UID == owner.UID {
-		return nil
+	if controller := metav1.GetControllerOfNoCopy(existing); controller == nil || controller.UID != owner.UID {
+		return fmt.Errorf("create Pod %s: %w", pod.Name, errNameOccupied)
 	}
-	return fmt.Errorf("create Pod %s: %w", pod.Name, errNameOccupied)
+	if !servinggroup.HasMemberIdentity(existing, modelServing, group) {
+		return fmt.Errorf("create Pod %s: a Pod of that name is controlled by the group and does not carry the labels of a member; "+
+			"restore its labels or delete it: %w", pod.Name, errNameOccupied)
+	}
+	if existing.DeletionTimestamp != nil || servinggroup.InstanceGeneration(existing) < generation {
+		return fmt.Errorf("create Pod %s: the Pod of generation %d of its Role instance is not gone yet",
+			pod.Name, servinggroup.InstanceGeneration(existing))
+	}
+	return nil
 }
 
 // notifyReady calls the OnPodReady hooks once for every member that is ready.

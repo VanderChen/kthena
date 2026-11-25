@@ -108,6 +108,15 @@ func (r *Runner) enqueueGroupsOf(namespace, modelServing string) {
 	}
 }
 
+// forgetGroup drops what the process remembers about a group that is gone.
+// No round will see the object again to forget it by: a group deleted in the
+// background is gone at once.
+func (r *Runner) forgetGroup(obj any) {
+	if accessor := object(obj); accessor != nil {
+		r.controller.forget(accessor.GetUID(), nil)
+	}
+}
+
 // Register adds the event handlers.
 func (r *Runner) Register(informers Informers) error {
 	handlers := []struct {
@@ -117,7 +126,10 @@ func (r *Runner) Register(informers Informers) error {
 		{informers.ServingGroups, cache.ResourceEventHandlerFuncs{
 			AddFunc:    r.enqueueGroup,
 			UpdateFunc: func(_, current any) { r.enqueueGroup(current) },
-			DeleteFunc: r.enqueueGroup,
+			DeleteFunc: func(obj any) {
+				r.forgetGroup(obj)
+				r.enqueueGroup(obj)
+			},
 		}},
 		{informers.Pods, r.owned()},
 		{informers.Services, r.owned()},

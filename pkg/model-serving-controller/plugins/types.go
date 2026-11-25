@@ -18,6 +18,7 @@ package plugins
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -27,6 +28,11 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 )
+
+// ErrNameOccupied reports that the name of an object a plugin maintains is
+// held by an object the plugin does not manage. A plugin wraps it so that the
+// caller can report the cause, which only removing that object resolves.
+var ErrNameOccupied = errors.New("the name is occupied")
 
 // HookResult describes the outcome of a ModelServing sync hook invocation.
 type HookResult struct {

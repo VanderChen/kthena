@@ -77,6 +77,13 @@ type StatusInput struct {
 	// Such an instance is not ready, whatever its Pods report.
 	Updating map[InstanceKey]bool
 
+	// FailurePending leaves the ReconcileFailed condition as the group carries
+	// it: the status is written before the round acts, and whether the round
+	// fails is not known yet. A round that fails the way the one before it did
+	// then writes nothing, and one that removed the condition before acting
+	// would write twice, every time.
+	FailurePending bool
+
 	// Fail, when not nil, sets the Failed condition. Failed is never cleared.
 	Fail *ConditionChange
 	// RecreateRequired, when not nil, sets the RecreateRequired condition. It is never cleared.
@@ -198,7 +205,9 @@ func ComputeStatus(in StatusInput) workloadv1alpha1.ServingGroupStatus {
 		drainBlocked = &ConditionChange{Reason: ReasonRoleDeleteHookFailed, Message: in.DrainBlocked}
 	}
 	transient(workloadv1alpha1.ServingGroupConditionDrainBlocked, drainBlocked)
-	transient(workloadv1alpha1.ServingGroupConditionReconcileFailed, in.Failure)
+	if !in.FailurePending {
+		transient(workloadv1alpha1.ServingGroupConditionReconcileFailed, in.Failure)
+	}
 
 	if in.Coordination != nil {
 		condition := *in.Coordination

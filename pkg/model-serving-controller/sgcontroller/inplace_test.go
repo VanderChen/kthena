@@ -662,8 +662,16 @@ func TestAnUpdateThatMissesItsDeadlineFollowsTheRecoveryPolicy(t *testing.T) {
 				t.Errorf("conditions = %q, want %q", got, tt.conditions)
 			}
 			policy := string(tt.policy)
-			if events := eventsOf(recorder); !reflect.DeepEqual(events, []string{timeout + policy}) {
-				t.Errorf("events = %v, want the timeout", events)
+			// Next to it there may be the event of a Role instance that is drained.
+			events := eventsOf(recorder)
+			var timeouts []string
+			for _, event := range events {
+				if strings.Contains(event, ReasonInPlaceUpdateTimeout) {
+					timeouts = append(timeouts, event)
+				}
+			}
+			if !reflect.DeepEqual(timeouts, []string{timeout + policy}) {
+				t.Errorf("events = %v, want the timeout once", events)
 			}
 			// The timeout is reported once, not in every round.
 			h.mustRound()
@@ -774,7 +782,11 @@ func TestAUnitThatIsPatchedInPartIsPatchedToTheEnd(t *testing.T) {
 		h.cluster.BeforeWrite = nil
 		h.cluster.ResetWrites()
 		writes := h.mustRound()
-		want := []string{"update servinggroups/status llama-0", "patch pods llama-0-prefill-0-1", "patch pods llama-0-prefill-0-2"}
+		// The last write takes back the failure the round before reported.
+		want := []string{
+			"update servinggroups/status llama-0", "patch pods llama-0-prefill-0-1", "patch pods llama-0-prefill-0-2",
+			"update servinggroups/status llama-0",
+		}
 		if !reflect.DeepEqual(writes, want) || h.podFacts() != patchedV2 {
 			t.Fatalf("writes = %v, Pods %s", writes, h.podFacts())
 		}
@@ -804,7 +816,11 @@ func TestAUnitThatIsPatchedInPartIsPatchedToTheEnd(t *testing.T) {
 			}
 			// The Pods that were never patched are healthy. They go with the
 			// instance all the same: the update cannot finish without them.
-			want := []string{"update servinggroups/status llama-0", "delete pods llama-0-prefill-0-0", "delete pods llama-0-prefill-0-1", "delete pods llama-0-prefill-0-2"}
+			// The last write takes back the failure of the patch that was rejected.
+			want := []string{
+				"update servinggroups/status llama-0", "delete pods llama-0-prefill-0-0", "delete pods llama-0-prefill-0-1", "delete pods llama-0-prefill-0-2",
+				"update servinggroups/status llama-0",
+			}
 			if writes := writesOf(h.cluster.Writes()); err != nil || !reflect.DeepEqual(writes, want) {
 				t.Fatalf("round = %v, writes = %v, want %v", err, writes, want)
 			}

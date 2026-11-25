@@ -231,7 +231,7 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 			return fmt.Errorf("ensure Headless Service %s/%s: %w", ms.Namespace, name, err)
 		}
 		if !req.managesService(service) {
-			return fmt.Errorf("Headless Service name %s/%s is occupied by an object not managed by plugin %s", ms.Namespace, name, HeadlessServicePluginName)
+			return fmt.Errorf("Headless Service name %s/%s is occupied by an object not managed by plugin %s: %w", ms.Namespace, name, HeadlessServicePluginName, ErrNameOccupied)
 		}
 		if service.DeletionTimestamp != nil {
 			return fmt.Errorf("Headless Service %s/%s is terminating", ms.Namespace, name)
