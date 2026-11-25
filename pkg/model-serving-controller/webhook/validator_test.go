@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -1888,6 +1890,123 @@ func TestValidateEvictionStrategyBudget(t *testing.T) {
 			}
 			assert.NotEmpty(t, errs)
 			assert.Contains(t, errs.ToAggregate().Error(), tt.wantMessage)
+		})
+	}
+}
+
+func TestUpdateWithUnchangedSpecSkipsSpecValidation(t *testing.T) {
+	workerWithoutTemplate := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles[0].WorkerReplicas = 1
+	}
+	metadata := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Labels = map[string]string{"example.com/label": "value"}
+		ms.Annotations = map[string]string{workloadv1alpha1.ServingGroupAdoptionAnnotationKey: workloadv1alpha1.ServingGroupAdoptionInProgress}
+		ms.Finalizers = []string{"example.com/finalizer"}
+	}
+	replicas := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Replicas = ptr.To[int32](2)
+	}
+
+	tests := []struct {
+		name      string
+		operation admissionv1.Operation
+		// stored makes the object of the request, and of an UPDATE its old object.
+		stored func(*workloadv1alpha1.ModelServing)
+		// change is applied to the object of the request only.
+		change  func(*workloadv1alpha1.ModelServing)
+		allowed bool
+		message string
+	}{
+		{
+			name:      "create of an invalid object",
+			operation: admissionv1.Create,
+			stored:    workerWithoutTemplate,
+			message:   "workerTemplate",
+		},
+		{
+			name:      "unchanged update of an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			allowed:   true,
+		},
+		{
+			name:      "metadata update of an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			change:    metadata,
+			allowed:   true,
+		},
+		{
+			name:      "spec update of an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			change:    replicas,
+			message:   "workerTemplate",
+		},
+		{
+			name:      "spec and metadata update of an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			change: func(ms *workloadv1alpha1.ModelServing) {
+				metadata(ms)
+				replicas(ms)
+			},
+			message: "workerTemplate",
+		},
+		{
+			name:      "immutable field update of an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			change:    func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Plugins = nil },
+			message:   "spec.plugins",
+		},
+		{
+			name:      "spec update that repairs an invalid object",
+			operation: admissionv1.Update,
+			stored:    workerWithoutTemplate,
+			change:    func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Template.Roles[0].WorkerReplicas = 0 },
+			allowed:   true,
+		},
+		{
+			name:      "valid spec update",
+			operation: admissionv1.Update,
+			change:    replicas,
+			allowed:   true,
+		},
+		{
+			name:      "spec update that makes a valid object invalid",
+			operation: admissionv1.Update,
+			change:    workerWithoutTemplate,
+			message:   "workerTemplate",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			old := immutableAdmissionModelServing(workloadv1alpha1.ServingGroupRollingUpdate)
+			// A quantity has unexported fields and is compared semantically.
+			old.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Resources.Requests = corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse("500m"),
+			}
+			if tt.stored != nil {
+				tt.stored(old)
+			}
+			current := old.DeepCopy()
+			if tt.change != nil {
+				tt.change(current)
+			}
+			var oldRaw []byte
+			if tt.operation == admissionv1.Update {
+				var err error
+				oldRaw, err = json.Marshal(old)
+				assert.NoError(t, err)
+			}
+
+			response := immutableAdmissionResponse(t, oldRaw, current, tt.operation)
+
+			if assert.Equal(t, tt.allowed, response.Allowed, "%v", response.Result) && !tt.allowed {
+				assert.Contains(t, response.Result.Message, tt.message)
+			}
 		})
 	}
 }

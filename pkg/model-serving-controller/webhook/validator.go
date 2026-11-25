@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apivalidation "k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -119,6 +120,12 @@ func (v *ModelServingValidator) validateModelServing(modelServing *workloadv1alp
 func (v *ModelServingValidator) validateModelServingUpdate(
 	oldModelServing, modelServing *workloadv1alpha1.ModelServing,
 ) (bool, string) {
+	// An update that leaves spec unchanged is admitted without validating it: a
+	// ModelServing stored before a rule existed must still accept metadata
+	// updates, such as the annotations the controller sets.
+	if apiequality.Semantic.DeepEqual(oldModelServing.Spec, modelServing.Spec) {
+		return true, ""
+	}
 	allErrs := modelServingValidationErrors(modelServing)
 	allErrs = append(allErrs, validatePluginsImmutable(oldModelServing, modelServing)...)
 	allErrs = append(allErrs, validateSchedulerNameUpdate(oldModelServing, modelServing)...)
