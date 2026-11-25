@@ -33,6 +33,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/record"
+	volcano "volcano.sh/apis/pkg/client/clientset/versioned"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
@@ -48,6 +49,10 @@ type Controller struct {
 	registry *plugins.Registry
 	recorder record.EventRecorder
 	now      func() time.Time
+	// volcano is nil in a cluster without Volcano.
+	volcano volcano.Interface
+	// rollingBack reports whether the rollback switch is set.
+	rollingBack func() bool
 
 	mu sync.Mutex
 	// targets caches the target revision resolved for a ModelServing, by UID.
@@ -69,6 +74,11 @@ type Options struct {
 	Recorder record.EventRecorder
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// Volcano is the client for PodGroups; nil where Volcano is not installed.
+	Volcano volcano.Interface
+	// RollingBack reports whether the rollback switch is set (see
+	// RollbackSwitch); nil means never.
+	RollingBack func() bool
 }
 
 // New returns a Controller.
@@ -81,7 +91,10 @@ func New(options Options) *Controller {
 		registry: options.Registry,
 		recorder: options.Recorder,
 		now:      options.Now,
+		volcano:  options.Volcano,
 		targets:  map[types.UID]recorded{},
+
+		rollingBack: options.RollingBack,
 
 		unsettled:   map[types.UID]time.Time{},
 		unsettledOf: map[types.UID]map[types.UID]bool{},
@@ -94,6 +107,9 @@ func New(options Options) *Controller {
 	}
 	if c.recorder == nil {
 		c.recorder = &record.FakeRecorder{}
+	}
+	if c.rollingBack == nil {
+		c.rollingBack = func() bool { return false }
 	}
 	return c
 }

@@ -108,6 +108,8 @@ type system struct {
 	invariant func()
 	// stuck, when set, names the Pods the kubelet never gets ready.
 	stuck func(*corev1.Pod) bool
+	// rollback is the rollback switch.
+	rollback bool
 }
 
 func newSystem(t *testing.T, objects ...runtime.Object) *system {
@@ -120,8 +122,11 @@ func newSystem(t *testing.T, objects ...runtime.Object) *system {
 // restart replaces both controllers by ones that remember nothing.
 func (s *system) restart() {
 	now := func() time.Time { return s.cluster.Now() }
-	s.ms = New(Options{Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, Now: now})
-	s.sg = sgcontroller.New(sgcontroller.Options{Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, PodGroups: noPodGroups{}, Now: now})
+	rollingBack := func() bool { return s.rollback }
+	s.ms = New(Options{Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, Volcano: s.cluster.Volcano, Now: now, RollingBack: rollingBack})
+	s.sg = sgcontroller.New(sgcontroller.Options{
+		Kube: s.cluster.Kube, Kthena: s.cluster.Kthena, PodGroups: noPodGroups{}, Now: now, RollingBack: rollingBack,
+	})
 }
 
 func (s *system) caches() (objcache.Caches, *apitest.Snapshot) {
@@ -331,3 +336,8 @@ func groupReady(group *workloadv1alpha1.ServingGroup) bool {
 }
 
 var intstrOne = intstr.FromInt32(1)
+
+// apitestWrite is the write the API server stand-in reports.
+type apitestWrite = apitest.Write
+
+var errDied = errors.New("the process died")

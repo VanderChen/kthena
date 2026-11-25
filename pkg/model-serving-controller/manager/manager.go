@@ -21,6 +21,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -109,6 +110,23 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 		return nil, fmt.Errorf("index the caches: %w", err)
 	}
 
+	// The rollback switch is one ConfigMap in the namespace of the controller
+	// manager. Outside a cluster there is no such namespace and no switch.
+	rollingBack := func() bool { return false }
+	var rollbackSwitch cache.SharedIndexInformer
+	if namespace := os.Getenv("POD_NAMESPACE"); namespace != "" {
+		rollbackSwitch = kubeinformers.NewSharedInformerFactoryWithOptions(kube, 0,
+			kubeinformers.WithNamespace(namespace),
+			kubeinformers.WithTweakListOptions(func(options *metav1.ListOptions) {
+				options.FieldSelector = "metadata.name=" + mscontroller.RollbackSwitch
+			})).Core().V1().ConfigMaps().Informer()
+		key := namespace + "/" + mscontroller.RollbackSwitch
+		rollingBack = func() bool {
+			_, exists, _ := rollbackSwitch.GetStore().GetByKey(key)
+			return exists
+		}
+	}
+
 	broadcaster := record.NewBroadcaster()
 	broadcaster.StartStructuredLogging(0)
 	broadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: kube.CoreV1().Events("")})
@@ -118,6 +136,9 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 		kthena:    kthena,
 		caches:    caches,
 		informers: []cache.SharedIndexInformer{pods.Informer(), services.Informer(), revisions, modelServings, servingGroups},
+	}
+	if rollbackSwitch != nil {
+		m.informers = append(m.informers, rollbackSwitch)
 	}
 	// The PodGroup informer exists only while the PodGroup
 	// CustomResourceDefinition is installed; its handlers are added when it starts.
@@ -129,7 +150,7 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 
 	m.groups = sgcontroller.NewRunner(sgcontroller.New(sgcontroller.Options{
 		Kube: kube, Kthena: kthena, Caches: caches, Services: services.Lister(),
-		PodGroups: m.podGroups, Recorder: recorder,
+		PodGroups: m.podGroups, Recorder: recorder, RollingBack: rollingBack,
 	}))
 	if err := m.groups.Register(sgcontroller.Informers{
 		ServingGroups: servingGroups, ModelServings: modelServings, Pods: pods.Informer(),
@@ -140,11 +161,19 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 
 	m.servings = mscontroller.NewRunner(mscontroller.New(mscontroller.Options{
 		Kube: kube, Kthena: kthena, Caches: caches, Services: services.Lister(), Recorder: recorder,
+		Volcano: volcanoClient, RollingBack: rollingBack,
 	}))
 	if err := m.servings.Register(mscontroller.Informers{
 		ModelServings: modelServings, ServingGroups: servingGroups, Pods: pods.Informer(), ControllerRevisions: revisions,
 	}); err != nil {
 		return nil, fmt.Errorf("watch for the ModelServing controller: %w", err)
+	}
+	if rollbackSwitch != nil {
+		// Setting or removing the switch concerns every ModelServing.
+		all := func(any) { m.servings.EnqueueAll() }
+		if _, err := rollbackSwitch.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: all, DeleteFunc: all}); err != nil {
+			return nil, fmt.Errorf("watch the rollback switch: %w", err)
+		}
 	}
 	return m, nil
 }

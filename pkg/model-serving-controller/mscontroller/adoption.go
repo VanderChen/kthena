@@ -46,12 +46,10 @@ import (
 // that was just created has not said that it is ready.
 func (c *Controller) adoption(ctx context.Context, r *round) (bool, error) {
 	ms := r.ms
-	switch ms.Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey] {
-	case workloadv1alpha1.ServingGroupAdoptionDone:
+	// RollingBack on a ModelServing that is reconciled means that a rollback
+	// was abandoned: whatever was handed back is taken over again.
+	if ms.Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey] == workloadv1alpha1.ServingGroupAdoptionDone {
 		return false, nil
-	case workloadv1alpha1.ServingGroupAdoptionRollingBack:
-		// The workloads are being handed back to an earlier version.
-		return true, nil
 	}
 
 	legacy, err := c.legacyPods(ctx, ms)

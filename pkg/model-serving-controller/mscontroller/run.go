@@ -92,6 +92,13 @@ func (r *Runner) named() cache.ResourceEventHandlerFuncs {
 	}
 }
 
+// EnqueueAll puts every ModelServing on the queue.
+func (r *Runner) EnqueueAll() {
+	for _, obj := range r.controller.caches.ModelServings.List() {
+		r.enqueue(obj)
+	}
+}
+
 // Register adds the event handlers.
 func (r *Runner) Register(informers Informers) error {
 	handlers := []struct {

@@ -90,6 +90,9 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		c.forgetTarget(ms.UID)
 		return 0, nil
 	}
+	if c.rollingBack() {
+		return c.rollBack(ctx, ms)
+	}
 	requeue, err := c.syncPlugins(ctx, ms)
 	if err != nil {
 		return 0, err

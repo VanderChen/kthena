@@ -65,6 +65,10 @@ type Controller struct {
 	registry  *plugins.Registry
 	recorder  record.EventRecorder
 	now       func() time.Time
+	// rollingBack reports whether the rollback switch is set: the workloads are
+	// being handed back to a version without group objects, and this
+	// controller keeps its hands off them.
+	rollingBack func() bool
 
 	// faults remembers since when this process has seen the fault of a member.
 	// It is the only input of a round that is not on an object: a new process
@@ -91,6 +95,8 @@ type Options struct {
 	Recorder record.EventRecorder
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
+	// RollingBack reports whether the rollback switch is set; nil means never.
+	RollingBack func() bool
 }
 
 // New returns a Controller.
@@ -104,6 +110,7 @@ func New(options Options) *Controller {
 		registry:      options.Registry,
 		recorder:      options.Recorder,
 		now:           options.Now,
+		rollingBack:   options.RollingBack,
 		faults:        servinggroup.NewFaultTracker(),
 		readyNotified: sets.New[types.UID](),
 		known:         map[types.UID]sets.Set[types.UID]{},
@@ -116,6 +123,9 @@ func New(options Options) *Controller {
 	}
 	if c.recorder == nil {
 		c.recorder = &record.FakeRecorder{}
+	}
+	if c.rollingBack == nil {
+		c.rollingBack = func() bool { return false }
 	}
 	return c
 }

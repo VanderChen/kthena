@@ -33,13 +33,6 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
-func modelServingOwner(ms *workloadv1alpha1.ModelServing) metav1.OwnerReference {
-	return metav1.OwnerReference{
-		APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: workloadv1alpha1.ModelServingKind.Kind,
-		Name: ms.Name, UID: ms.UID, Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true),
-	}
-}
-
 // legacyRevision returns the ControllerRevision an earlier controller recorded
 // for ms under the identity revision: in the format of release 1.1, the Roles
 // alone, or in the format of the controller before groups were objects.
@@ -52,7 +45,7 @@ func legacyRevision(t *testing.T, ms *workloadv1alpha1.ModelServing, revision st
 				utils.ControllerRevisionLabelKey:         ms.Name,
 				utils.ControllerRevisionRevisionLabelKey: revision,
 			},
-			OwnerReferences: []metav1.OwnerReference{modelServingOwner(ms)},
+			OwnerReferences: []metav1.OwnerReference{modelServingOwner(ms, true)},
 		},
 		Revision: 1,
 	}
@@ -85,7 +78,7 @@ func legacyPods(ms *workloadv1alpha1.ModelServing, ordinal int, revision, image 
 					workloadv1alpha1.RoleIDKey:                "serve-0",
 					workloadv1alpha1.RevisionLabelKey:         revision,
 				},
-				OwnerReferences: []metav1.OwnerReference{modelServingOwner(ms)},
+				OwnerReferences: []metav1.OwnerReference{modelServingOwner(ms, true)},
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: image}}},
 			Status: corev1.PodStatus{

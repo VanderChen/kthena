@@ -85,6 +85,10 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		return 0, nil
 	}
 
+	if c.rollingBack() || handingBack(parent) {
+		return 0, nil
+	}
+
 	now := c.now()
 	r := c.decide(observation{group: group, parent: parent, pods: c.caches.PodsOfGroup(group)}, now)
 	if r.confirm {
@@ -100,6 +104,15 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		r = c.decide(obs, now)
 	}
 	return c.execute(ctx, r, now)
+}
+
+// handingBack reports whether the workloads of a ModelServing are being
+// handed back to a version without group objects. The ModelServing controller
+// records that on the ModelServing before it changes the owner of a Pod, and
+// this controller reads it from the API server before it changes one: a Pod
+// that was handed back is not adopted again.
+func handingBack(parent *workloadv1alpha1.ModelServing) bool {
+	return parent.Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey] == workloadv1alpha1.ServingGroupAdoptionRollingBack
 }
 
 // parentOf returns the ModelServing that controls group, from the cache, or
@@ -138,7 +151,7 @@ func (c *Controller) readDirect(ctx context.Context, obs observation) (observati
 	if err != nil {
 		return observation{}, false, err
 	}
-	if parent.UID != obs.parent.UID || parent.DeletionTimestamp != nil {
+	if parent.UID != obs.parent.UID || parent.DeletionTimestamp != nil || handingBack(parent) {
 		return observation{}, false, nil
 	}
 
