@@ -90,7 +90,8 @@
 三条约束：
 
 1. **没有 Pod 模板。**模板、plugin、调度器名从 ControllerRevision 读。ControllerRevision 的数据就是这三样（`utils/revision_data.go` 的 `modelServingRevisionSpec`），别的设置它没有，所以要经 `spec` 下发。
-2. **没有 schema 默认值。**apiserver 补上默认值之后，存下来的 `spec` 就和 ModelServing controller 算出来的不一样，「内容不同才下发」永远成立，组永远是未观测。ModelServing 上的字段已经带着它自己的默认值，照抄即可。Kind 上验证过：写进去的 `spec` 原样读回，`generation` 是 1。
+2. **没有 schema 默认值。**apiserver 补上默认值之后，存下来的 `spec` 就和 ModelServing controller 算出来的不一样，「内容不同才下发」永远成立，组永远是未观测。ModelServing 上的字段已经带着它自己的默认值，照抄即可。Kind 上验证过：写进去的 `spec` 原样读回，`generation` 是 1。有一处例外：`networkTopology.{groupPolicy,rolePolicy}.mode` 的默认值 `hard` 来自复用的 Volcano 类型，去不掉；ModelServing 的 schema 有同一个默认值，下发的值总是已经带着它，不影响「内容不同才下发」。
+3. **没有关于更新的规则。**`gangPolicy` 用自己的类型 `ServingGroupGangPolicy`，不复用模板的 `GangPolicy`：后者带着「`minRoleReplicas` 不可变」的转换规则，而这条规则在字段一侧缺失时不检查，ModelServing 上可以分两步改掉它；两步落在同一次下发之间时，组的 `Update` 每一轮都被拒绝，这个组永远拿不到新的 `spec`（独立评审的发现 A2）。`spec` 只由 controller 写，ModelServing 上允许的变化在这里都要写得进去。
 3. **版本的值是 revision 的身份**：Pod 的 `modelserving.volcano.sh/revision` 标签、`status.updateRevision` 用的那个字符串。ControllerRevision 对象的名字是 `<ModelServing 名>-<这个字符串>`。
 
 ### 2.2 `status`
@@ -173,7 +174,7 @@
 | `Ready` | 每种 Role 的实例个数等于 `replicas`，每个实例已建成、成员齐全、全部就绪。各 Role 的副本数都是 0 的组为真。按每个实例自己应用的版本的布局算，不按 `spec.revision`。模板读不到时：现有的 Pod 不少于 `spec.expectedPods`、全部就绪、没有终止中的 | 其余 | `AllInstancesReady`；`InstancesNotReady`；`InstanceCountMismatch`；`TemplateUnresolved` | 额度里只在已观测并且新鲜时才算数；对外的 `availableReplicas` 取最后一次写上的值 |
 | `Failed` | 这个组要整个删掉重建。**不可逆**：ServingGroup controller 读到的对象上是真，就不再写成假 | 没有失败 | `MemberLost`、`MemberFaulty`（`ServingGroupRecreate`）；`AllPodsLost`（`ServingGroupRollingUpdate` 下一个成员 Pod 都没有了） | 组的类别是「失败」。与 `Drained` 一起为真并且新鲜：G1 删除 |
 | `Drained` | 只在 `Failed` 为真时写。没有故障的成员，没有终止中的 Pod | 还没有清空。`Failed` 不为真时没有意义，不读 | `NoFaultyMember`；`FaultyMembersRemain` | 见上 |
-| `RecreateRequired` | 这个组只能删掉重建：配了原地更新而它的 Pod 打不了补丁；收养来的成员版本与组的不同。只加不撤 | 可以按配置的方式更新 | `InPlaceUpdateNotPossible`；`AdoptedRevisionMismatch` | 可替换，不看版本，不看 partition |
+| `RecreateRequired` | 这个组只能删掉重建：配了原地更新而它的 Pod 打不了补丁；或者按重建更新而组里有 Pod 的版本与组的不同（收养来的成员、切换更新方式之前没有打完补丁的成员）。「版本不同」按 Role 比较：Pod 所属的 Role 在两个版本里渲染出同样的 Pod 就不算不同（逐 Role 滚动之后没有变化的 Role 保留着旧标签）；版本读不出来时等，不重建。只加不撤 | 可以按配置的方式更新 | `InPlaceUpdateNotPossible`（两种情形共用，message 写明是哪一种） | 可替换，不看版本，不看 partition |
 | `DrainBlocked` | 有实例停在清空中：`OnRoleDelete` 不成功 | 没有 | `RoleDeleteHookFailed` | 不读 |
 | `ReconcileFailed` | 这一轮出错。`Ready` 仍然按看到的成员照实写 | 这一轮没有出错 | `TemplateUnresolved`；`NameOccupied`；`Error` | 不读；ModelServing 的 message 里引用 |
 | `CoordinatedRoleRolloutBlocked` | 与今天 ModelServing 上的同名 condition 相同，按组报告 | reason 分 `ProgressAvailable` 和 `RolloutComplete` | 与今天相同 | 汇总：有组为真时取序号最小的那个组的 reason 和 message |
@@ -274,11 +275,13 @@ ModelServing controller 的 PATCH 第一次常常输给新对象的第一次 `st
 
 | 写 | 什么时候 | 内容 | 被拒绝时 |
 | --- | --- | --- | --- |
-| 动手之前 | 每一轮都算；算出来的和读到的不同才写。它同时是 R8（账本的转换、Failed）、L8（先写后建的那一位）和 R11（汇总） | 账本、Failed、Drained、`pods`，和这一轮算出来的全部汇总 | 返回。这一轮后面不发任何删除、创建、补丁 |
-| 出错之后 | 这一轮的删除、创建、钩子里有一个出错 | 同上，加 `ReconcileFailed` | 重新入队 |
+| 动手之前 | 每一轮都算；算出来的和读到的不同才写。它同时是 R8（账本的转换、Failed）、L8（先写后建的那一位）和 R11（汇总） | 账本、Failed、Drained、`pods`，和这一轮算出来的全部汇总。**`ReconcileFailed` 照读到的原样留着**：这一轮会不会出错，动手之后才知道 | 返回。这一轮后面不发任何删除、创建、补丁 |
+| 动手之后 | `ReconcileFailed` 有变化：这一轮出了错而之前没有（或者错得不一样），或者之前有而这一轮没有出错 | 同上，`ReconcileFailed` 按这一轮的结果 | 重新入队 |
 
 - 008 把 R8、L8、R11 分成三次写。三次的内容都是从同一份观察算出来的，合成一次之后「账本、Failed、先写后建的那一位都在任何删除和创建之前落盘」不变，少一到两次写。
-- 同一个错误再出现时，算出来的 `status` 与已经写上的相同，不再写：出错不会变成一圈一圈的 `status` 写。
+- 同一个错误再出现时，两次算出来的 `status` 都与已经写上的相同，不再写：出错不会变成一圈一圈的 `status` 写，队列的退避才起得了作用。第一版在动手之前的那次写里把 `ReconcileFailed` 去掉、出错之后再加回来，于是每个出错的轮次写两次，每次写又触发下一轮（独立评审的发现 S1）。
+- **清空钩子（`OnRoleDelete`）失败的轮次返回错误**：实例停在 Draining、没有 Pod，除了重试没有别的事件会带来下一轮（S2）。
+- **没有 PodGroup 的轮次照样删，只是不建、不打补丁**：已经失败的组要先清空才能被替换（S4）。这样的轮次里「还要建几个」照旧计入 `pods`：缓存还没显示出来的成员可能就在其中，写成 0 等于告诉 ModelServing controller 这个组没有成员（S6）。
 - **写用 `UpdateStatus`，带读到的 resourceVersion。**不用 PATCH：要的就是「读之后没有人写过」这个前置条件。
 - **写回校验。**`UpdateStatus` 返回的对象里，账本、`observedPods`、`pods` 要与发出去的相同。不同，说明集群里的 CRD 比 controller 旧，字段被裁掉了：这一轮按出错处理，不发后面的删除和创建，发事件 `StatusNotPersisted`。这样「先写后做」不会因为写被悄悄裁掉而变成「没写就做」。做法取自 RoleBasedGroup。
 - **出错的轮次也写**（A1）：只要读到了成员，`observedGeneration` 照样推进，`Ready` 照实算，带 `ReconcileFailed`。不写的话这个组会一直是未观测，或者一直带着上一次的 `Ready`。
@@ -287,13 +290,16 @@ ModelServing controller 的 PATCH 第一次常常输给新对象的第一次 `st
 一轮里的次序（R0–R11 的实现）：
 
 ```text
-R1  取组；owner 不是现存的 ModelServing：发事件，返回。组在终止中：返回
+R0  取读锁（回退的交还要等它，6.8）
+R1  取组；owner 不是现存的 ModelServing、或者组的名字不是 <ModelServing>-<序号>：发事件，返回。
+    组在终止中：成员都没了就尽力调一次 OnRoleDelete，返回
 R2  有待接管的成员：直读这个组，换 owner
-R3  观察：成员 Pod（缓存）；spec 引用的 ControllerRevision；OnModelServingSync
+R3  观察：成员 Pod（缓存）；spec 引用的 ControllerRevision；OnModelServingSync（阻塞性的错误：
+    只写 status，不建、不删、不打补丁）
 R4  成员分类、实例状态
 R5  组已失败：只删 Faulty 的成员；算 Drained；到 R11
 R6  Role 一级的计划：哪些实例在期望之内、建在哪个序号、用哪个版本
-R7  账本的转换。要写 Failed、写 Draining、删 Pod、打补丁：直读，重做 R4–R7
+R7  账本的转换。要写 Failed、写 Draining、删 Pod、打补丁、结束清空（E3）、协调滚动途中的创建：直读，重做 R4–R7
 R8  提交（status）
 R9  钩子和删除
 R10 PodGroup、Service、OnRoleSync；先写后建；创建；原地更新的补丁；标记
@@ -463,7 +469,7 @@ client-go 的 fake clientset 不检查 resourceVersion 和 UID 的前置条件�
 | 部分 | 做法 |
 | --- | --- |
 | Role 的扩缩容；独立的 `RoleRollingUpdate`（额度、partition、surge、转正、回收、次序） | **调用同一个计划函数** `grouplevel.Plan`，单元是一个组里某种 Role 的实例。实例到单元的对应：清空中 = 终止中；已建成并且成员全部就绪 = 就绪；Role 一级的 surge 标记 = surge；版本按这个 Role 的模板比较，语义相同的算同一个版本。`ServingGroupRollingUpdate` 下用它「不分版本」的那一支：只扩缩、补洞、摘掉留下的标记 |
-| roleCoordination | 纯函数（`calculateRoleRolloutLimits`、`slowestReadyProgress`、`allowedStartedReplicas` 等）连同它们的测试原样搬进 `servinggroup`；读 `datastore` 的部分改成读账本和成员 |
+| roleCoordination | 纯函数（`calculateRoleRolloutLimits`、`slowestReadyProgress`、`allowedStartedReplicas`、依赖闭包、稳定集合等）连同它们的测试原样搬进 `servinggroup/coordination.go`。读 `datastore` 的部分改成读账本和成员（`coordination_state.go`）。它不是另一套计划，而是 Role 计划上的一层过滤：`grouplevel.Plan` 给出候选，协调的上界决定哪些实例这一轮可以开始、哪些删除要压住。基线的副本数照旧记在 ControllerRevision 的注解上，另经 `spec.roles[].baselineReplicas` 下发；没拿到它的组这一轮报 `ReconcileFailed`、什么都不滚。组在 `status` 里报 `CoordinatedRoleRolloutBlocked`，ModelServing 取序号最小的那个组的；有组还没有按下发的 `spec` 报告时不说 `RolloutComplete`（保守的一侧：校验 webhook 读的是「不是 `RolloutComplete`」）。协调滚动途中的创建与删除一样要直读。PodGroup 在协调扩容途中取滚动经过的最小布局，与变更前相同 |
 | 原地更新 | `inplace` 包不动。`controller/inplace_update.go` 里按单元推进的部分搬进 `sgcontroller`；「能不能原地更新」里只看模板的部分（`OnlyImagesChanged`）移到 ModelServing controller |
 | 建 Pod、PodGroup、plugin 钩子 | 搬，owner 换成组 |
 | 缩容的次序（未就绪的先、deletion cost 低的先、序号高的先） | 比较函数原样搬；优先级从账本和成员得出 |
@@ -522,7 +528,7 @@ client-go 的 fake clientset 不检查 resourceVersion 和 UID 的前置条件�
 | --- | --- | --- |
 | X1 | 自查 | chart 给 controller-manager 的 Pod 模板加标签 `modelserving.volcano.sh/controller-protocol: servinggroup`。标的是协议的代，不是镜像版本：以后新版本之间的升级不应当被它挡住。进程启动时（参选之前）另外给自己的 Pod 补上这个标签，补不上就每 5 秒重试：不是用这个 chart 部署的 Deployment 可能没有模板上的标签，那样同一个版本的几个副本会互相当成旧版本、谁也不启动。自己的 Pod 名取环境变量 `POD_NAME`（chart 经 downward API 注入），没有时取主机名。进程拿到租约之后、启动任何 controller 之前，在自己的命名空间里列出带 `app.kubernetes.io/component: kthena-controller-manager`、不带这个标签、还没有结束（`Succeeded`、`Failed` 之外，终止中的也算在跑）的 Pod；有，就不启动任何 controller，只应答 webhook，每 5 秒查一次，在自己的 Pod 上发事件 `WaitingForPredecessor` 说明在等谁。运行中每 5 秒查一次；看到这样的 Pod，进程退出（退出码非零），容器重启之后回到启动自查。不在集群里跑（本地调试）时不查 |
 | X2 | CRD 和权限的闸 | 进程一启动就试着 LIST 一次 ServingGroup，每 5 秒重试，不论有没有拿到租约。成功之前 `/readyz` 返回 503（Deployment 的就绪探针指向它），`/healthz`（存活）照常，两个 controller 不启动。不退回旧的工作方式。新 Pod 不就绪时滚动更新不会停掉旧 Pod，旧版本接着工作：漏装 CRD 只是让升级停在那里。chart 里另用 `lookup` 在升级开始之前失败；`lookup` 在 `helm template` 和多数 GitOps 的渲染里返回空，所以只在「release 的命名空间查得到而 CRD 查不到」时才失败 |
-| X3 | 换凭据 | chart 里 controller-manager 的 ServiceAccount 改名为 `kthena-controller-manager-servinggroup`，两个绑定跟着改。`helm upgrade` 删掉旧的 ServiceAccount，旧版本的进程（包括失联节点上还活着的）随即失去凭据：Kind 上旧 Pod 在被 Deployment 删除之前就因为认证失败退出了一次，`kubectl get pod` 里短暂显示 `Error`，这是预期的。装回旧 chart 时反方向同样生效，回退靠它保证新版本的进程不再写。X2 和 X3 有一处相互作用：CRD 没装而 chart 的检查又没有触发（Helm 不能 `lookup`）时，X2 让新 Pod 不就绪、旧 Pod 留着，X3 却已经让旧 Pod 的凭据失效，这段时间没有 controller 在工作。不另加机制，写进升级步骤当作漏装 CRD 的代价：工作负载不受影响，只是不恢复、不滚动；装上 CRD 之后新进程自己变成就绪 |
+| X3 | 换凭据 | chart 里 controller-manager 的 ServiceAccount 改名为 `kthena-controller-manager-servinggroup`，两个绑定跟着改。`helm upgrade` 删掉旧的 ServiceAccount，旧版本的进程（包括失联节点上还活着的）随即失去凭据，写不了任何东西。开着选主的进程续不上租约，自己退出：Kind 上看到被替换的 Pod 在被 Deployment 删除之前短暂显示 `Error`、重启一次，这是预期的。没开选主的进程（旧版本的默认值）不退出，失去凭据之后留到 Deployment 的滚动把它删掉。装回旧 chart 时反方向同样生效，回退靠它保证新版本的进程不再写。X2 和 X3 有一处相互作用：CRD 没装而 chart 的检查又没有触发（Helm 不能 `lookup`）时，X2 让新 Pod 不就绪、旧 Pod 留着，X3 却已经让旧 Pod 的凭据失效，这段时间没有 controller 在工作。不另加机制，写进升级步骤当作漏装 CRD 的代价：工作负载不受影响，只是不恢复、不滚动；装上 CRD 之后新进程自己变成就绪 |
 | X4 | 选主 | `--leader-elect` 默认改成真；失主的回调改成退出进程（今天只打一行日志，进程留着，已经在睡眠的 grace goroutine 还会去删 Pod）。`ReleaseOnCancel` 仍然是假 |
 
 运行中的自查选「退出」而不是 008 写的「停掉两个 controller、继续应答 webhook」：informer 和队列停下之后不能原地重启，退出重来是同一个效果，少一条要测试的路径。代价是这个 Pod 重启的几秒里它不应答 webhook；别的副本和那个旧 Pod 照样应答。
@@ -539,7 +545,7 @@ Deployment 的更新策略是默认的 RollingUpdate（多一个、不少一个�
 
 | 步 | 谁 | 做什么 | 实现上的点 |
 | --- | --- | --- | --- |
-| T1 | ModelServing controller | 注解不是 `Done`：直读存量的 Pod。一个都没有，并且名下的组都已观测、新鲜、没有待接管的成员：写 `Done`。否则写 `InProgress` | 一次 LIST（Pod），按名字标签，按 owner 的 UID 过滤。PodGroup 和 Service 不查：它们由各组的同步入口顺手接过去（T4），不拦 `Done`。**新建的 ModelServing 也走这一步**，结果是 `Done`。注解写在主资源上，要过校验 webhook，而它对每次 UPDATE 都重新校验整个对象：按现在的规则不合法、今天却在运行的对象会卡在接管上。所以校验 webhook 放行 `spec` 在语义上没有变的 UPDATE（只放宽，不违反 P4） |
+| T1 | ModelServing controller | 注解不是 `Done`：直读存量的 Pod。一个都没有，并且名下的组都已观测、新鲜、没有待接管的成员：写 `Done`。否则写 `InProgress` | 一次 LIST（Pod），按名字标签，按 owner 的 UID 过滤，只数有成员身份的（标签和名字都是 `<组>-<role>-<实例>-<成员>`）。owner 是 ModelServing 而没有成员身份的 Pod（比如照着成员抄出来、改了名字的副本）没有组会接管它：不等它，不动它，在 ModelServing 上发事件 `PodNotTakenOver`；等它的话接管永远做不完，而且没有任何提示（独立评审的发现 M6）。PodGroup 和 Service 不查：它们由各组的同步入口顺手接过去（T4），不拦 `Done`。**新建的 ModelServing 也走这一步**，结果是 `Done`。注解写在主资源上，要过校验 webhook，而它对每次 UPDATE 都重新校验整个对象：按现在的规则不合法、今天却在运行的对象会卡在接管上。所以校验 webhook 放行 `spec` 在语义上没有变的 UPDATE（只放宽，不违反 P4） |
 | T2′ | — | **没有实现。**没有活的存量 Pod 的组名下如果留着存量的 PodGroup、Service：序号小于 N 的，G4 建出组对象之后由 T4 接过去；序号不小于 N 的留着，owner 还是 ModelServing，随它删除时被回收 | T7 不查 PodGroup 和 Service，所以它们不拦接管。代价是可能留下几个没有 Pod 的旧对象 |
 | T3 | ModelServing controller | 每个还有活的存量 Pod 的组名：建同名的 ServingGroup | 就是 S1′：存量的 Pod 和无主的成员 Pod 走同一段代码。`spec.revision` 取这个组的 Pod 的 revision 标签；标签不一致的取这个序号现在该有的版本。surge 注解判定一次：`ServingGroupRollingUpdate`，序号不小于直读到的 N，名下至少一个 Pod（含终止中的）带值是 `serving-group` 的注解。撞名字时核对 owner 的 UID，对象上有没有注解以第一次创建的为准 |
 | T4 | ServingGroup controller | 每个待接管的成员：先直读这个 ServingGroup（UID 没变，没有 `deletionTimestamp`）和所属的 ModelServing（注解不是 `RollingBack`），再把 owner 换成它 | 一次 JSON merge patch：整个 `ownerReferences` 列表（保留不是 controller 的 owner）、代际号标签（没有的补 0），body 里带 Pod 的 `uid` 和 `resourceVersion`。PodGroup 在 `podgroupmanager.SyncPodGroup` 里、headless Service 在 plugin 的 `OnRoleSync` 里原地换 owner（UID 不变；Service 另带上实例的代际号，删除钩子只删代际号不大于请求的）。ClusterRole 要给 PodGroup 和 Service 加 `patch`，给 `servinggroups/finalizers` 加 `update`（开着 `OwnerReferencesPermissionEnforcement` 的集群里，设置 `blockOwnerDeletion` 要它） |
@@ -572,7 +578,7 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 
 ### 6.6 升级前检查
 
-一个只读的子命令（`kthena` CLI 的 `modelserving preflight`），对集群和每个 ModelServing 给出结论。输出的项照 008 的 06 第 7.1 节，去掉只属于在网版本的几项。必须有的三项：
+一个只读的子命令：`kthena preflight model-servings [NAME] [-n NS | -A] [-o table|json] [--baseline-file F | --compare-baseline F] [--skip-dry-run]`（动词在前，与 `kthena get`、`kthena describe` 一致），对集群和每个 ModelServing 给出结论（`ready`、`attention`、`wait`、`blocked`；退出码 0、2、2、3，没能跑是 1）。`--compare-baseline` 在升级之后拿升级前的记录核对。输出的项照 008 的 06 第 7.1 节，去掉只属于在网版本的几项。必须有的三项：
 
 1. 按目标版本的算法算出当前 `spec` 的版本，与存量 Pod 的 revision 标签比：「升级后不滚动」或者「升级后会滚动 k 个组」。
 2. 不带 surge 标记的组多于 N 的 ModelServing。
@@ -607,7 +613,8 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 三点：
 
 - **与收养的竞争。**正常的一轮里 owner 是 ModelServing 的 Pod 是待接管的成员。开关出现时正在跑的一轮可能把刚换回去的 Pod 又接回来。所以 T4 换 owner 之前的那次直读里另查所属 ModelServing 的注解：是 `RollingBack` 就不换；回退的第 3 步在第 2 步的写成功之后才开始。
-- **放弃回退**：删掉开关。注解是 `RollingBack` 的和已经没有注解的 ModelServing 落回 T1，重新接管。
+- **与正在跑的一轮的竞争。**上一条只管得住「读注解之后才换 owner」的那一轮。开关出现之前已经读过注解的一轮，可能在交还读完这个组、确认它名下没有东西之后，才收养一个 Pod 或者建出一个 Pod；组随后被 orphan 删除，这个 Pod 要么跟着丢了 owner，要么（建在组消失之后）被垃圾回收。所以 ServingGroup controller 的每一轮从头到尾持有一把读锁，开关是在锁里读的；交还开始之前先拿一次写锁：到那时开关出现之前开始的轮次都已经结束，之后的轮次都看得见开关（独立评审的发现 M2）。两个 controller 在同一个进程里、同一个租约下，进程内的锁就够了；换主重叠的那一个请求不在其中（第 10 章）。
+- **放弃回退**：删掉开关。注解是 `RollingBack` 的和已经没有注解的 ModelServing 落回 T1，重新接管。开关在的时候各组的轮次什么都不做就结束了，带来那些轮次的事件不会再来一遍，所以开关被删掉时除了每个 ModelServing，每个 ServingGroup 也各入队一次（M4）。
 - **带着开关启动**：新版本什么都不接管，工作负载留在 ModelServing 名下。为了不让它看起来像故障，进入和离开回退模式各记一行日志，并在开关这个 ConfigMap 上发 `RollbackMode` 事件。再次升级之前要先删掉开关。
 - **旧版本要对象回到什么样子**：三类对象的 controller owner 是 ModelServing；revision 和 role-template-hash 标签在（新版本一直在写）；原地更新的注解格式没变；ControllerRevision 上协调的基线注解在（新版本照旧写它）。代际号标签旧版本不认识，留着无妨。
 
@@ -677,6 +684,34 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 | D ModelServing controller 和切换 | 骨架和版本；计划、直读重算、执行；`status` 和清理；接管（T1、T2′、T3、T7）；搬 LWS controller；**接线**（两个 controller、选主默认开、失主退出、QPS、X1、X2）；删旧包（源码、测试分几个提交、`datastore`）；e2e |
 | E 其余 | 升级前检查；用户文档；runner（契约 2.14、适配、新用例）；回退；X3 |
 
+## 9A. 独立评审之后补上的规则
+
+三位没有参与编码的评审者（ServingGroup controller；ModelServing controller 和接线；API、chart、webhook）读的是工作分支 `62367667`。下面是由评审带来、前面各章没有写或者写得不对的规则；每一条都有一个去掉修正就失败的测试。发现的全文和处置在任务 010 的 `subagents/code-review-*.md`。
+
+| 规则 | 没有它会怎样 | 测试 |
+| --- | --- | --- |
+| 一轮的出错在动手之后定一次；重复的出错不写 `status`（3.7） | 建不出 Pod 的组以 apiserver 应答的速度空转，每轮两次 `status` 写，占掉两个 controller 共用的限流额度 | `TestARepeatedFailureWritesNothing` |
+| `OnRoleDelete` 失败的轮次返回错误 | 实例停在 Draining、没有 Pod，没有事件带来下一轮 | `TestAFailingDeleteHookIsRetried` |
+| 没有 PodGroup 的轮次照样删；已承诺的成员数留在 `pods` 里 | 失败的组清不空、换不掉；缓存落后时组报成没有成员，被换了版本 | `TestAFailedGroupIsDrainedWithoutItsPodGroup`、`TestTheCommitmentSurvivesARoundWithoutThePodGroup` |
+| 「清空完了」（E3）要直读；已存在的同名 Pod 只有带着成员标签、并且是这一代的才算数 | 新主的缓存还没有 Pod 时，下一代被提交而上一代的 Pod 还在，被当成新一代的成员；丢了标签的成员让实例永远停在 Creating，而且没有任何报告 | `TestADrainDoesNotEndOnAStaleCache`、`TestAMemberWithoutItsLabelsIsReported` |
+| 组的名字必须是 `<ModelServing>-<序号>` | 手工建的、owner 指向某个 ModelServing 的组会得到 Pod，而 ModelServing 看不见它 | `TestAGroupUnderAnotherNameIsLeftAlone` |
+| `OnModelServingSync` 两个 controller 都调；ServingGroup controller 里阻塞性的错误让这一轮只写 `status` | 钩子说「现在不行」时已有的组照样建、删 Pod | `TestABlockingModelServingHookStopsTheGroup` |
+| `RoleCreating`、`RoleRunning`、`RoleDeleting` 事件照旧发在 ModelServing 上 | 依赖这些事件的用户和 e2e 看不到 Role 的状态变化 | `TestRoleInstancePhasesAreReported` |
+| 组不在了，进程里记着的东西随 informer 的删除事件丢掉；ModelServing 同理 | 后台删除的对象没有哪一轮看得到它在终止，记着的东西留到进程结束 | `TestAGroupThatIsGoneIsForgotten` |
+| PodGroup 的 informer 和 ServingGroup controller 不论谁先出现都接上，只接一次 | CRD 启动时就在的集群里 PodGroup 的事件没有人听，被删掉的 PodGroup 不会被补回来（对基线是回归） | `TestPodGroupWatch` |
+| 直读里按名字补读「缓存里有、标签列表里没有」的自己的组；组的事件按名字也能找到 ModelServing | 组丢了名字标签之后，每一轮都去建它、得到 AlreadyExists、这一轮别的写全部丢掉 | `TestAGroupWithoutItsLabelIsStillCounted`、`TestServingGroupEventsReachTheModelServing` |
+| 「这个组多久没报告了」每一轮都维护 | 报告过的组留着很早以前的时刻，下一次落后时立刻被报成 `GroupNotObserved` | `TestRolloutBlocked` 的最后一个子测试 |
+| 接管原地更新到一半的组：组的版本取 Pod 正在更新到的那个，不取标签 | 组按标签上的旧版本建出来，ServingGroup controller 以为更新被撤回，要求重建，升级把 Pod 换掉 | `TestAnInPlaceUpdateUnderWayIsTakenOver` |
+| `RoleRollingUpdate` 改成 `ServingGroupRollingUpdate`：组的 `spec.revision` 取它报告的 `status.revision`；正在逐 Role 滚动的组算作基线版本，按额度替换；还没有报告的组先不下发 | 组被下发成空版本：永远不可替换，`updatedReplicas` 永远是 0，丢了的 Role 实例建不回来 | `TestTheRolloutStrategyIsChanged` |
+| 接管不等没有成员身份的存量 Pod（6.4） | 接管永远做不完，没有提示 | `TestAPodThatIsNoMemberDoesNotHoldUpTheTakeOver` |
+| `status.currentRevision` 为空又没有组对象时，基线取存量各组里出现最多的非目标版本 | 旧版本在滚动途中、写 `status` 之前被停掉的话，partition 之下新建的组用了新版本 | `TestTheBaselineOfAnEarlierVersionIsReadFromItsPods` |
+| 组上的 `sourceGeneration` 比 apiserver 上的 ModelServing 还大时照样下发（先确认缓存里的 ModelServing 是最新的） | 这个数被别人改大之后，组永远不再被下发 | `TestASourceGenerationFromNowhereDoesNotStopTheHandDown` |
+| 回退的交还等各组正在跑的轮次结束；离开回退模式时每个组入队一次（6.8） | Pod 在组被确认「名下没有东西」之后才被收养或者建出来，随组丢掉 owner 或者被回收；回退期间丢的 Pod 没有人补 | `TestRollbackWaitsForARoundInFlight`、`TestEnqueueAll` |
+| 进程给自己的 Pod 补协议标签（6.3） | 不用 chart 部署的多副本互相当成旧版本，谁也不启动 | `TestLabelPod` |
+| `ServingGroupSpec.gangPolicy` 用自己的类型（2.1） | ModelServing 上分两步改 `minRoleReplicas` 之后，组的下发永远被拒绝 | CRD 里没有那条规则；`TestTheGangPolicyKeepsWhetherItIsSet` |
+
+评审确认没有问题、因此没有改的部分，和评审没能确定的部分，也记在同一组文件里。
+
 ## 10. 没有解决的
 
 | 项 | 内容 |
@@ -687,3 +722,5 @@ T4 与 orphan 删组之后的收养是同一段代码（R2）。差别只有一�
 | 只选中一种 Role 的比例型 PDB | 分母偏大（2.3） |
 | 大的账本 | 没有上限，整个重写。1000 个实例约 70 KB |
 | 重启故障的 grace 在新进程里重新计 | D9。重启的间隔一直短于 grace 时一直不恢复 |
+| 回退与换主重叠 | 交还之前等的是本进程里各组的轮次（6.8 的读写锁）。失主的旧进程发出去而还没落地的那一个写不在其中；靠失主退出把窗口压到一次请求 |
+| 组被整个删除时的 `OnRoleDelete` | 只是尽力：对象可能在调用它的那一轮之前就没了。plugin 为组建的资源要以组为 owner |
