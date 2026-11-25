@@ -19,6 +19,7 @@ package workload
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -175,7 +176,7 @@ func TestGroupSpecAndBaseCarryTheSettingsOfTheGroup(t *testing.T) {
 		},
 		RecoveryPolicy:            workloadv1alpha1.RoleRecreate,
 		RestartGracePeriodSeconds: ptr.To[int64](30),
-		GangPolicy:                &workloadv1alpha1.GangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}},
+		GangPolicy:                &workloadv1alpha1.ServingGroupGangPolicy{MinRoleReplicas: map[string]int32{"prefill": 1}},
 		NetworkTopology:           &workloadv1alpha1.NetworkTopology{},
 		QueueName:                 "gpu",
 		Roles: []workloadv1alpha1.ServingGroupRole{
@@ -372,5 +373,25 @@ func TestCompare(t *testing.T) {
 	}
 	if same, _ := history.RoleHash("rev-a", "prefill"); same == want {
 		t.Error("two different templates of a Role have the same hash")
+	}
+}
+
+// A gang policy that is set and names no Role is not the same as none: every
+// Role is then required as a whole. It stays set on the way to the group and back.
+func TestTheGangPolicyKeepsWhetherItIsSet(t *testing.T) {
+	for name, policy := range map[string]*workloadv1alpha1.GangPolicy{
+		"none": nil, "set and empty": {}, "with Roles": {MinRoleReplicas: map[string]int32{"prefill": 1}},
+	} {
+		there := groupGangPolicy(policy)
+		back := templateGangPolicy(there)
+		if (there == nil) != (policy == nil) || !reflect.DeepEqual(back, policy) {
+			t.Errorf("%s: %+v became %+v and came back as %+v", name, policy, there, back)
+		}
+		if policy != nil && len(policy.MinRoleReplicas) > 0 {
+			there.MinRoleReplicas["prefill"] = 7
+			if policy.MinRoleReplicas["prefill"] != 1 {
+				t.Errorf("%s: the copy shares its map with the original", name)
+			}
+		}
 	}
 }

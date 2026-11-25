@@ -77,7 +77,7 @@ type ServingGroupSpec struct {
 
 	// GangPolicy is the gang scheduling configuration of the ModelServing template.
 	// +optional
-	GangPolicy *GangPolicy `json:"gangPolicy,omitempty"`
+	GangPolicy *ServingGroupGangPolicy `json:"gangPolicy,omitempty"`
 
 	// NetworkTopology is the network topology configuration of the ModelServing template.
 	// +optional
@@ -115,6 +115,19 @@ type ServingGroupRolloutStrategy struct {
 	// RoleCoordination is the cross-Role coordination configuration.
 	// +optional
 	RoleCoordination *RoleCoordination `json:"roleCoordination,omitempty"`
+}
+
+// ServingGroupGangPolicy is the gang scheduling configuration of a group: what
+// GangPolicy is for the template of a ModelServing, without its rules about
+// updates. The ModelServing controller writes it, and whatever the
+// ModelServing was allowed to change has to be writable here: a rule that
+// rejected the copy would leave the group with the settings of an earlier
+// generation for good.
+type ServingGroupGangPolicy struct {
+	// MinRoleReplicas is the minimum number of replicas of each Role that gang
+	// scheduling requires. See GangPolicy.
+	// +optional
+	MinRoleReplicas map[string]int32 `json:"minRoleReplicas,omitempty"`
 }
 
 // ServingGroupRole carries the settings of one Role that are not part of a revision.

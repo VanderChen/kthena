@@ -17,6 +17,8 @@ limitations under the License.
 package workload
 
 import (
+	"maps"
+
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -47,7 +49,7 @@ func GroupSpec(ms *workloadv1alpha1.ModelServing, settings Settings) workloadv1a
 		ExpectedPods:              settings.ExpectedPods,
 		RecoveryPolicy:            ms.Spec.RecoveryPolicy,
 		RestartGracePeriodSeconds: copyOf(ms.Spec.Template.RestartGracePeriodSeconds),
-		GangPolicy:                ms.Spec.Template.GangPolicy.DeepCopy(),
+		GangPolicy:                groupGangPolicy(ms.Spec.Template.GangPolicy),
 		NetworkTopology:           ms.Spec.Template.NetworkTopology.DeepCopy(),
 		QueueName:                 ms.Annotations[schedulingv1beta1.QueueNameAnnotationKey],
 	}
@@ -89,7 +91,7 @@ func Base(parent *workloadv1alpha1.ModelServing, group *workloadv1alpha1.Serving
 	spec := &base.Spec
 	spec.RecoveryPolicy = group.Spec.RecoveryPolicy
 	spec.Template.RestartGracePeriodSeconds = copyOf(group.Spec.RestartGracePeriodSeconds)
-	spec.Template.GangPolicy = group.Spec.GangPolicy.DeepCopy()
+	spec.Template.GangPolicy = templateGangPolicy(group.Spec.GangPolicy)
 	spec.Template.NetworkTopology = group.Spec.NetworkTopology.DeepCopy()
 
 	spec.RolloutStrategy = nil
@@ -159,4 +161,21 @@ func copyOf[T any](value *T) *T {
 	}
 	copied := *value
 	return &copied
+}
+
+// groupGangPolicy returns the gang policy of a template as the spec of a
+// group carries it. A policy that is set and empty stays set.
+func groupGangPolicy(policy *workloadv1alpha1.GangPolicy) *workloadv1alpha1.ServingGroupGangPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &workloadv1alpha1.ServingGroupGangPolicy{MinRoleReplicas: maps.Clone(policy.MinRoleReplicas)}
+}
+
+// templateGangPolicy is the inverse of groupGangPolicy.
+func templateGangPolicy(policy *workloadv1alpha1.ServingGroupGangPolicy) *workloadv1alpha1.GangPolicy {
+	if policy == nil {
+		return nil
+	}
+	return &workloadv1alpha1.GangPolicy{MinRoleReplicas: maps.Clone(policy.MinRoleReplicas)}
 }
