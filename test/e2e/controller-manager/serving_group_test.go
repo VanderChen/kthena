@@ -292,14 +292,21 @@ func TestServingGroupLifecycle(t *testing.T) {
 // TestServingGroupDeletion verifies what follows when a ServingGroup object is deleted by hand,
 // with each propagation policy `kubectl delete sg --cascade` offers. Deleted in the foreground
 // or in the background, the group comes back under its name with new Pods. Deleted with its
-// Pods orphaned, the group comes back and takes the Pods over without restarting them. The
-// other ServingGroup of the ModelServing is not touched.
+// Pods orphaned, the group comes back and takes the Pods over without restarting them. At no
+// moment do two objects of the group control Pods: the new object creates none while Pods of
+// the deleted one exist. The other ServingGroup of the ModelServing is not touched.
 func TestServingGroupDeletion(t *testing.T) {
 	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
 
+	// The worker Pod takes longer to stop than the entry Pod. A new object of the group that
+	// did not wait for the Pods of the deleted one would find the name of the entry Pod free
+	// while the worker Pod of the deleted object is still there.
 	role := createRole("prefill", 1, 1)
 	role.EntryTemplate.Spec.TerminationGracePeriodSeconds = ptr.To(int64(1))
-	role.WorkerTemplate.Spec.TerminationGracePeriodSeconds = ptr.To(int64(1))
+	role.WorkerTemplate.Spec.TerminationGracePeriodSeconds = ptr.To(int64(10))
+	role.WorkerTemplate.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sleep", "3"}}},
+	}
 	modelServing := createBasicModelServing("test-sg-deletion", 2, 0, role)
 	t.Log("Creating ModelServing with 2 replicas of an entry and a worker Pod")
 	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
@@ -324,6 +331,7 @@ func TestServingGroupDeletion(t *testing.T) {
 			require.Len(t, keptPods, 2, "Pods of ServingGroup %s", kept.Name)
 			require.Len(t, deletedPods, 2, "Pods of ServingGroup %s", deleted.Name)
 
+			stopOwners := trackServingGroupOwners(t, ctx, kubeClient, deleted.Name)
 			t.Logf("Deleting ServingGroup %s (UID %s) with propagation policy %s", deleted.Name, deleted.UID, tc.propagation)
 			err := kthenaClient.WorkloadV1alpha1().ServingGroups(testNamespace).Delete(ctx, deleted.Name, metav1.DeleteOptions{
 				Preconditions:     &metav1.Preconditions{UID: &deleted.UID},
@@ -355,6 +363,8 @@ func TestServingGroupDeletion(t *testing.T) {
 				assert.Equal(t, before.Labels[workload.InstanceGenerationLabelKey], pod.Labels[workload.InstanceGenerationLabelKey],
 					"Pod %s should keep the generation of its Role instance", pod.Name)
 			}
+
+			assert.Empty(t, stopOwners(), "Pods under the name of ServingGroup %s were controlled by two ServingGroup objects at once", deleted.Name)
 
 			assert.Equal(t, kept.UID, groups[0].UID, "ServingGroup %s should not be replaced", kept.Name)
 			assertPodsUntouched(t, ctx, kubeClient, kept.Name, keptPods)
@@ -504,45 +514,28 @@ func waitForControllerManagerLeader(t *testing.T, ctx context.Context, kubeClien
 	return leader
 }
 
-// trackUnavailableServingGroups watches the Pods of a ModelServing whose ServingGroups have one
-// Pod each, and records the largest number of the ordinals [0, replicas) that were without a
-// Ready Pod at the same time. A group whose Pod is gone counts, as does one whose Pod is not
-// Ready or is being deleted. The returned function stops the watch and returns the peak.
-func trackUnavailableServingGroups(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) func() int {
+// watchPods lists the Pods a selector matches and follows them from there, so that no change
+// of a Pod is missed. observe is called with the Pods by name after the list and after every
+// event, never twice at the same time. The returned function stops the watch; what observe
+// has gathered may be read after it returns. It fails the test when the watch broke before
+// it was stopped: what was observed is incomplete then.
+func watchPods(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, selector string, observe func(pods map[string]corev1.Pod)) func() {
 	t.Helper()
-	selector := modelServingLabelSelector(msName)
 	list, err := kubeClient.CoreV1().Pods(testNamespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	require.NoError(t, err, "Failed to list the Pods of ModelServing %s", msName)
+	require.NoError(t, err, "Failed to list the Pods matching %s", selector)
 	pods := map[string]corev1.Pod{}
 	for _, pod := range list.Items {
 		pods[pod.Name] = pod
 	}
-	unavailable := func() int {
-		available := map[string]bool{}
-		for _, pod := range pods {
-			if utils.IsPodReady(pod) {
-				available[pod.Labels[workload.GroupNameLabelKey]] = true
-			}
-		}
-		count := 0
-		for ordinal := range replicas {
-			if !available[controllerutils.GenerateServingGroupName(msName, ordinal)] {
-				count++
-			}
-		}
-		return count
-	}
+	observe(pods)
 
-	// The watch starts where the list ended, so no change of a Pod is missed.
 	watchCtx, cancel := context.WithCancel(ctx)
 	watcher, err := kubeClient.CoreV1().Pods(testNamespace).Watch(watchCtx, metav1.ListOptions{LabelSelector: selector, ResourceVersion: list.ResourceVersion})
 	if err != nil {
 		cancel()
-		require.NoError(t, err, "Failed to watch the Pods of ModelServing %s", msName)
+		require.NoError(t, err, "Failed to watch the Pods matching %s", selector)
 	}
 
-	var mu sync.Mutex
-	peak := unavailable()
 	var watchErr error
 	done := make(chan struct{})
 	go func() {
@@ -551,9 +544,7 @@ func trackUnavailableServingGroups(t *testing.T, ctx context.Context, kubeClient
 			pod, ok := event.Object.(*corev1.Pod)
 			if !ok {
 				if watchCtx.Err() == nil {
-					mu.Lock()
 					watchErr = fmt.Errorf("unexpected %s event: %v", event.Type, event.Object)
-					mu.Unlock()
 				}
 				return
 			}
@@ -562,33 +553,85 @@ func trackUnavailableServingGroups(t *testing.T, ctx context.Context, kubeClient
 			} else {
 				pods[pod.Name] = *pod
 			}
-			count := unavailable()
-			mu.Lock()
-			peak = max(peak, count)
-			mu.Unlock()
+			observe(pods)
 		}
 		if watchCtx.Err() == nil {
-			mu.Lock()
-			watchErr = fmt.Errorf("watch closed before the tracker was stopped")
-			mu.Unlock()
+			watchErr = fmt.Errorf("watch closed before it was stopped")
 		}
 	}()
 
 	var once sync.Once
-	stop := func() int {
+	stop := func() {
 		once.Do(func() {
 			cancel()
 			watcher.Stop()
 			<-done
 		})
-		mu.Lock()
-		defer mu.Unlock()
-		// A broken watch means the peak may be incomplete, so it cannot prove the budget held.
-		require.NoError(t, watchErr, "the unavailable ServingGroup tracker lost its watch")
+		require.NoError(t, watchErr, "the watch of the Pods matching %s broke", selector)
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+// trackUnavailableServingGroups watches the Pods of a ModelServing whose ServingGroups have one
+// Pod each, and records the largest number of the ordinals [0, replicas) that were without a
+// Ready Pod at the same time. A group whose Pod is gone counts, as does one whose Pod is not
+// Ready or is being deleted. The returned function stops the watch and returns the peak.
+func trackUnavailableServingGroups(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, msName string, replicas int) func() int {
+	t.Helper()
+	peak := 0
+	stop := watchPods(t, ctx, kubeClient, modelServingLabelSelector(msName), func(pods map[string]corev1.Pod) {
+		available := map[string]bool{}
+		for _, pod := range pods {
+			if utils.IsPodReady(pod) {
+				available[pod.Labels[workload.GroupNameLabelKey]] = true
+			}
+		}
+		unavailable := 0
+		for ordinal := range replicas {
+			if !available[controllerutils.GenerateServingGroupName(msName, ordinal)] {
+				unavailable++
+			}
+		}
+		peak = max(peak, unavailable)
+	})
+	return func() int {
+		stop()
 		return peak
 	}
-	t.Cleanup(func() { stop() })
-	return stop
+}
+
+// trackServingGroupOwners watches the Pods that carry the name of a group and records every
+// state in which ServingGroup objects of more than one UID control them: Pods of a deleted
+// object next to Pods of the object that took its name. The returned function stops the watch
+// and returns the states that were recorded.
+func trackServingGroupOwners(t *testing.T, ctx context.Context, kubeClient *kubernetes.Clientset, groupName string) func() []string {
+	t.Helper()
+	var overlaps []string
+	stop := watchPods(t, ctx, kubeClient, workload.GroupNameLabelKey+"="+groupName, func(pods map[string]corev1.Pod) {
+		owners := map[types.UID][]string{}
+		for name, pod := range pods {
+			if owner := metav1.GetControllerOfNoCopy(&pod); owner != nil && owner.Kind == workload.ServingGroupKind.Kind {
+				owners[owner.UID] = append(owners[owner.UID], name)
+			}
+		}
+		if len(owners) < 2 {
+			return
+		}
+		states := make([]string, 0, len(owners))
+		for uid, names := range owners {
+			sort.Strings(names)
+			states = append(states, fmt.Sprintf("%s controls %v", uid, names))
+		}
+		sort.Strings(states)
+		if overlap := strings.Join(states, "; "); len(overlaps) == 0 || overlaps[len(overlaps)-1] != overlap {
+			overlaps = append(overlaps, overlap)
+		}
+	})
+	return func() []string {
+		stop()
+		return overlaps
+	}
 }
 
 // TestServingGroupControllerFailoverDuringRollingUpdate verifies that a rolling update is
