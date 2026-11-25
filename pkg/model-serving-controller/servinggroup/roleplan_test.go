@@ -40,6 +40,10 @@ type fakeRevisions struct {
 	class   map[string]string
 	missing map[string]bool
 	env     map[string]string
+	// absent names, by revision, a Role the revision does not have.
+	absent map[string]string
+	// unchanged names the Roles that render the same Pods in every revision.
+	unchanged map[string]bool
 }
 
 func (f fakeRevisions) At(revision string) (*workloadv1alpha1.ModelServing, error) {
@@ -57,7 +61,7 @@ func (f fakeRevisions) At(revision string) (*workloadv1alpha1.ModelServing, erro
 }
 
 func (f fakeRevisions) Role(revision, roleName string) (*workloadv1alpha1.Role, error) {
-	if revision == "" || f.missing[revision] {
+	if revision == "" || f.missing[revision] || f.absent[revision] == roleName && roleName != "" {
 		return nil, errors.New("unresolved")
 	}
 	workers, ok := f.workers[revision]
@@ -67,9 +71,16 @@ func (f fakeRevisions) Role(revision, roleName string) (*workloadv1alpha1.Role, 
 	return &workloadv1alpha1.Role{Name: roleName, WorkerReplicas: workers}, nil
 }
 
-func (f fakeRevisions) CompareRole(revision, target, _ string) workload.Comparison {
+func (f fakeRevisions) Compare(revision, target string) workload.Comparison {
+	return f.CompareRole(revision, target, "")
+}
+
+func (f fakeRevisions) CompareRole(revision, target, roleName string) workload.Comparison {
 	if revision == "" || target == "" || f.missing[revision] || f.missing[target] {
 		return workload.Unknown
+	}
+	if f.unchanged[roleName] {
+		return workload.Equivalent
 	}
 	classOf := func(revision string) string {
 		if class, ok := f.class[revision]; ok {

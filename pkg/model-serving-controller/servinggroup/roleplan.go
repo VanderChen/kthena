@@ -17,12 +17,15 @@ limitations under the License.
 package servinggroup
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/grouplevel"
@@ -35,6 +38,8 @@ import (
 type Revisions interface {
 	// At returns the ModelServing as of a revision.
 	At(revision string) (*workloadv1alpha1.ModelServing, error)
+	// Compare tells whether a group that runs revision is at target.
+	Compare(revision, target string) workload.Comparison
 	Role(revision, roleName string) (*workloadv1alpha1.Role, error)
 	CompareRole(revision, target, roleName string) workload.Comparison
 }
@@ -58,6 +63,9 @@ type RolePlan struct {
 	// Waiting says, per Role, why a place is not filled or an instance is not
 	// replaced. It is reported, not acted on.
 	Waiting []string
+	// Coordination is what the coordinated Role rollout says about the group;
+	// nil when its Roles are rolled independently.
+	Coordination *Coordination
 }
 
 // PlanRoles decides which Role instances of a group are to exist, from which
@@ -82,14 +90,26 @@ func PlanRoles(group *workloadv1alpha1.ServingGroup, instances []Instance, revis
 	strategy := group.Spec.RolloutStrategy
 	roleMode := strategy != nil && strategy.Type == workloadv1alpha1.RoleRollingUpdate
 
+	specs := map[string]grouplevel.Spec{}
 	for _, role := range group.Spec.Roles {
 		spec, err := roleSpec(group, role, roleMode)
 		if err != nil {
 			return RolePlan{}, err
 		}
+		specs[role.Name] = spec
+	}
+	// The Roles of a group that are rolled together limit each other: how far
+	// one may advance depends on how far the others are.
+	coordinated, coordination, err := coordinate(group, specs, byRole, revisions)
+	if err != nil {
+		return RolePlan{}, err
+	}
+	plan.Coordination = coordination
+
+	for _, role := range group.Spec.Roles {
 		p := rolePlanner{
-			role: role.Name, spec: spec, revisions: revisions, plan: &plan,
-			updating: map[int]string{}, fallback: map[int]string{},
+			role: role.Name, spec: specs[role.Name], revisions: revisions, plan: &plan,
+			updating: map[int]string{}, fallback: map[int]string{}, coordinated: coordinated[role.Name],
 		}
 		p.run(byRole[role.Name])
 	}
@@ -149,6 +169,9 @@ type rolePlanner struct {
 	// fallback maps the index of an instance that cannot be updated in place
 	// to the reason.
 	fallback map[int]string
+	// coordinated holds the limits of a Role that is rolled together with
+	// other Roles of the group; nil for a Role that is rolled on its own.
+	coordinated *coordinatedRole
 }
 
 func (p *rolePlanner) run(instances []Instance) {
@@ -171,7 +194,7 @@ func (p *rolePlanner) run(instances []Instance) {
 	removed := map[int]bool{}
 	promoted := map[int]bool{}
 	retargeted := map[int]string{}
-	for _, action := range grouplevel.Plan(grouplevel.Input{Spec: p.spec, Groups: units, Orphans: awaiting}) {
+	for _, action := range p.constrain(grouplevel.Plan(grouplevel.Input{Spec: p.spec, Groups: units, Orphans: awaiting}), units) {
 		key := InstanceKey{Role: p.role, Index: action.Ordinal}
 		switch action.Kind {
 		case grouplevel.ActionCreate:
@@ -206,7 +229,7 @@ func (p *rolePlanner) run(instances []Instance) {
 	// again once it is gone. The plan that tells is the one without it.
 	refill := map[int]grouplevel.Action{}
 	for _, action := range grouplevel.Plan(grouplevel.Input{Spec: p.spec, Groups: settled, Orphans: awaiting}) {
-		if action.Kind == grouplevel.ActionCreate {
+		if action.Kind == grouplevel.ActionCreate && p.mayStart(action.Revision) {
 			refill[action.Ordinal] = action
 		}
 	}
@@ -224,11 +247,117 @@ func (p *rolePlanner) run(instances []Instance) {
 			if !ok && p.spec.Mode == grouplevel.ModeRole {
 				revision = p.spec.Target
 			}
-			p.want(key, revision, unit.Surge && !promoted[unit.Ordinal])
+			if p.mayStart(revision) {
+				p.want(key, revision, unit.Surge && !promoted[unit.Ordinal])
+			}
 		default:
 			p.want(key, own[unit.Ordinal], unit.Surge && !promoted[unit.Ordinal])
 		}
 	}
+}
+
+// mayStart tells whether an instance may be created from revision now. A
+// coordinated Role that waits for the Roles it depends on starts no instance
+// of the target revision; instances of the baseline are not held back.
+func (p *rolePlanner) mayStart(revision string) bool {
+	return p.coordinated == nil || p.coordinated.limits == nil || p.coordinated.limits.allowTargetStart || revision != p.spec.Target
+}
+
+// constrain applies the limits of a coordinated Role to the writes of its
+// plan. The plan has chosen what the budget of the Role allows; coordination
+// allows less. It drops the creation of target instances while the Role may
+// not start, and of the replacements, by deletion or in place, all but a
+// prefix of the old instances in descending ordinal: the instances at or
+// above the effective partition, as many as the Role may still start. An
+// instance that the plan did not choose ends the prefix, so a lower ordinal
+// is never replaced past a higher one that has to wait.
+//
+// Temporary capacity, marked surge beyond the desired count, is not part of
+// that order: an old temporary instance goes when the budget allows, unless
+// it is the last old instance and a Role that depends on this one still runs
+// the old revision.
+func (p *rolePlanner) constrain(actions []grouplevel.Action, units []grouplevel.Group) []grouplevel.Action {
+	c := p.coordinated
+	if c == nil {
+		return actions
+	}
+	// Reclaiming a marked instance of an old revision is a replacement too:
+	// it takes old capacity away.
+	replaces := func(action grouplevel.Action) bool {
+		switch action.Kind {
+		case grouplevel.ActionDelete:
+			return action.Reason == grouplevel.ReasonReplace || action.Reason == grouplevel.ReasonReplaceNotReady || action.Reason == grouplevel.ReasonReclaimSurge
+		case grouplevel.ActionRetarget:
+			return action.Reason == grouplevel.ReasonInPlace
+		}
+		return false
+	}
+	// Capacity that this round adds from the target is started as well. The
+	// limits do not count it before it exists, and its creation is not held
+	// back by them: it takes from what the old instances may start. A hole
+	// among the places the baseline had is counted by the limits already.
+	planned, added := sets.New[int](), 0
+	for _, action := range actions {
+		switch {
+		case replaces(action):
+			planned.Insert(action.Ordinal)
+		case action.Kind == grouplevel.ActionCreate && !action.Surge && action.Revision == p.spec.Target &&
+			action.Ordinal >= c.baselineReplicas && p.mayStart(action.Revision):
+			added++
+		}
+	}
+	// The old instances the rollout may replace, highest ordinal first.
+	var outdated []int
+	for _, unit := range units {
+		if !unit.Terminating && !unit.Memberless && !unit.RevisionUnknown && unit.Revision != p.spec.Target && unit.Ordinal >= p.spec.Partition {
+			outdated = append(outdated, unit.Ordinal)
+		}
+	}
+	slices.SortFunc(outdated, func(a, b int) int { return cmp.Compare(b, a) })
+
+	keep := sets.New[int]()
+	remainingOld := len(outdated)
+	var stable []int
+	for _, ordinal := range outdated {
+		switch {
+		case !c.temporary.Has(ordinal):
+			stable = append(stable, ordinal)
+		case c.limits != nil && c.limits.retainOldReplica && remainingOld <= 1:
+		case planned.Has(ordinal):
+			keep.Insert(ordinal)
+			remainingOld--
+		}
+	}
+	for i, ordinal := range stable {
+		if ordinal <= c.unknownOrdinal {
+			stable = stable[:i]
+			break
+		}
+	}
+	eligible, allowed := stable, len(stable)
+	if c.limits != nil {
+		eligible, allowed = c.limits.constrainRoleDeletion(stable)
+		allowed -= added
+	}
+	for _, ordinal := range eligible {
+		if allowed <= 0 || !planned.Has(ordinal) {
+			break
+		}
+		keep.Insert(ordinal)
+		allowed--
+	}
+
+	old := sets.New(outdated...)
+	kept := actions[:0:0]
+	for _, action := range actions {
+		switch {
+		case replaces(action) && old.Has(action.Ordinal) && !keep.Has(action.Ordinal):
+		case action.Kind == grouplevel.ActionCreate && !p.mayStart(action.Revision):
+		default:
+			kept = append(kept, action)
+		}
+	}
+	return kept
 }
 
 // want records that an instance is to exist, created from revision.
