@@ -41,6 +41,7 @@ import (
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	workload "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	plugins "github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 	controllerutils "github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/test/e2e/utils"
 )
@@ -785,6 +786,18 @@ func belongsToModelServing(ctx context.Context, kthenaClient *clientset.Clientse
 		owner := metav1.GetControllerOfNoCopy(obj)
 		return owner != nil && (owner.UID == ms.UID || controlled[owner.UID])
 	}, nil
+}
+
+// servingGroupReportedPods reports whether the ServingGroup controller has reconciled the group
+// on the Pods as they are in pods: the status of the group was computed from its current spec
+// and from exactly these Pods. pods are the Pods that carry the name of the group.
+func servingGroupReportedPods(group *workload.ServingGroup, ms *workload.ModelServing, pods []corev1.Pod) bool {
+	candidates := make([]*corev1.Pod, 0, len(pods))
+	for i := range pods {
+		candidates = append(candidates, &pods[i])
+	}
+	members := servinggroup.Members(candidates, group.Name, group.UID, servinggroup.ParentOf(ms))
+	return group.Status.ObservedGeneration == group.Generation && group.Status.ObservedPods == servinggroup.Digest(members)
 }
 
 // createAndWaitForModelServing creates a ModelServing, registers a cleanup function, and waits for it to be ready.

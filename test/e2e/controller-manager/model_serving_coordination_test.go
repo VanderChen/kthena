@@ -243,12 +243,28 @@ func (r *coordinatedE2E) wait(message string, prefill, decode, prefillReady, dec
 	r.t.Logf("%s: started=%d/%d, Ready=%d/%d", message, prefill, decode, prefillReady, decodeReady)
 }
 
+// groupReportedPods reports whether the ServingGroup controller has reconciled the single
+// ServingGroup of the ModelServing on the Pods as they are now.
+func (r *coordinatedE2E) groupReportedPods() (bool, error) {
+	pods, err := r.pods()
+	if err != nil {
+		return false, err
+	}
+	group, err := r.client.WorkloadV1alpha1().ServingGroups(testNamespace).Get(r.ctx, controllerutils.GenerateServingGroupName(r.ms.Name, 0), metav1.GetOptions{})
+	if err != nil {
+		return false, err
+	}
+	return servingGroupReportedPods(group, r.ms, pods), nil
+}
+
 func (r *coordinatedE2E) hold(message string, prefill, decode, prefillReady, decodeReady int) {
 	r.t.Helper()
 	// A short quiet window alone can pass while reconciliation is still busy.
 	// Advance a non-template field and wait for two acknowledged generations:
 	// even if an in-flight sync acknowledges the first one, the next sync must
 	// have started after the readiness change. Budgets and revision stay fixed.
+	// The Roles of a group are rolled by the ServingGroup controller, so the
+	// group must also have reported on the Pods as they are at the checkpoint.
 	for range 2 {
 		var generation int64
 		updateModelServingWithRetry(r.t, r.ctx, r.client, r.ms.Name, func(ms *workload.ModelServing) {
@@ -268,7 +284,11 @@ func (r *coordinatedE2E) hold(message string, prefill, decode, prefillReady, dec
 			if err != nil {
 				return false, err
 			}
-			return ms.Status.ObservedGeneration >= generation, nil
+			reported, err := r.groupReportedPods()
+			if err != nil {
+				return false, err
+			}
+			return ms.Status.ObservedGeneration >= generation && reported, nil
 		})
 		require.NoError(r.t, err, "Controller must reconcile the held checkpoint: %s", message)
 	}

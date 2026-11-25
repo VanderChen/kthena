@@ -437,7 +437,13 @@ func (r *coordinatedInPlaceE2E) holdInPlace(message string, entryReady bool) {
 			if err != nil {
 				return false, err
 			}
-			return ms.Status.ObservedGeneration >= generation, nil
+			// The Roles of a group are updated by the ServingGroup controller: it
+			// must have reported on the Pods as they are at the checkpoint as well.
+			reported, err := r.groupReportedPods()
+			if err != nil {
+				return false, err
+			}
+			return ms.Status.ObservedGeneration >= generation && reported, nil
 		})
 	}
 	until := time.Now().Add(10 * time.Second)
