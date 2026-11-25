@@ -21,6 +21,8 @@ package objcache
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -40,7 +42,12 @@ const (
 	// <namespace>/<value of the group-name label>: the Pods a group may have to adopt.
 	GroupIndex = "group"
 	// ModelServingIndex indexes an object by <namespace>/<value of the ModelServing name label>.
+	// A Pod is only indexed while no ServingGroup controls it.
 	ModelServingIndex = "modelserving"
+	// OrdinalNameIndex indexes a ServingGroup named <prefix>-<ordinal> by
+	// <namespace>/<prefix>: the objects that take the names of the groups of a
+	// ModelServing called <prefix>, whoever made them.
+	OrdinalNameIndex = "ordinal-name"
 )
 
 // Caches holds the stores the controllers read. In production each is the
@@ -59,8 +66,8 @@ func (c Caches) AddIndexers() error {
 		store    cache.Indexer
 		indexers cache.Indexers
 	}{
-		{c.Pods, cache.Indexers{ControllerIndex: controllerIndex, GroupIndex: unadoptedGroupIndex}},
-		{c.ServingGroups, cache.Indexers{ControllerIndex: controllerIndex, ModelServingIndex: modelServingIndex}},
+		{c.Pods, cache.Indexers{ControllerIndex: controllerIndex, GroupIndex: unadoptedGroupIndex, ModelServingIndex: unadoptedModelServingIndex}},
+		{c.ServingGroups, cache.Indexers{ControllerIndex: controllerIndex, ModelServingIndex: modelServingIndex, OrdinalNameIndex: ordinalNameIndex}},
 		{c.ControllerRevisions, cache.Indexers{ModelServingIndex: modelServingIndex}},
 	} {
 		if err := add.store.AddIndexers(add.indexers); err != nil {
@@ -81,19 +88,55 @@ func controllerIndex(obj any) ([]string, error) {
 	return nil, nil
 }
 
-func unadoptedGroupIndex(obj any) ([]string, error) {
+// unadopted returns the Pod in obj when no ServingGroup controls it.
+func unadopted(obj any) *corev1.Pod {
 	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil
+	}
+	if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.Kind == workloadv1alpha1.ServingGroupKind.Kind {
+		return nil
+	}
+	return pod
+}
+
+func unadoptedGroupIndex(obj any) ([]string, error) {
+	if pod := unadopted(obj); pod != nil && pod.Labels[workloadv1alpha1.GroupNameLabelKey] != "" {
+		return []string{pod.Namespace + "/" + pod.Labels[workloadv1alpha1.GroupNameLabelKey]}, nil
+	}
+	return nil, nil
+}
+
+func unadoptedModelServingIndex(obj any) ([]string, error) {
+	if pod := unadopted(obj); pod != nil {
+		return modelServingIndex(pod)
+	}
+	return nil, nil
+}
+
+// OrdinalName splits a name of the form <prefix>-<ordinal>. The ordinal is
+// written without a sign and without leading zeros.
+func OrdinalName(name string) (prefix string, ordinal int, ok bool) {
+	cut := strings.LastIndexByte(name, '-')
+	if cut <= 0 {
+		return "", 0, false
+	}
+	ordinal, err := strconv.Atoi(name[cut+1:])
+	if err != nil || ordinal < 0 || strconv.Itoa(ordinal) != name[cut+1:] {
+		return "", 0, false
+	}
+	return name[:cut], ordinal, true
+}
+
+func ordinalNameIndex(obj any) ([]string, error) {
+	object, ok := obj.(metav1.Object)
 	if !ok {
 		return nil, nil
 	}
-	group := pod.Labels[workloadv1alpha1.GroupNameLabelKey]
-	if group == "" {
-		return nil, nil
+	if prefix, _, ok := OrdinalName(object.GetName()); ok {
+		return []string{object.GetNamespace() + "/" + prefix}, nil
 	}
-	if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.Kind == workloadv1alpha1.ServingGroupKind.Kind {
-		return nil, nil
-	}
-	return []string{pod.Namespace + "/" + group}, nil
+	return nil, nil
 }
 
 func modelServingIndex(obj any) ([]string, error) {
@@ -163,6 +206,20 @@ func (c Caches) GroupsControlledBy(uid types.UID) []*workloadv1alpha1.ServingGro
 // ModelServing in their labels, whoever controls them.
 func (c Caches) GroupsLabelled(namespace, modelServing string) []*workloadv1alpha1.ServingGroup {
 	return byIndex[*workloadv1alpha1.ServingGroup](c.ServingGroups, ModelServingIndex, namespace+"/"+modelServing)
+}
+
+// GroupsNamedAfter returns the ServingGroups whose name is that of a group of
+// the ModelServing called modelServing, <modelServing>-<ordinal>, whoever
+// controls them and whatever their labels are.
+func (c Caches) GroupsNamedAfter(namespace, modelServing string) []*workloadv1alpha1.ServingGroup {
+	return byIndex[*workloadv1alpha1.ServingGroup](c.ServingGroups, OrdinalNameIndex, namespace+"/"+modelServing)
+}
+
+// UnadoptedPodsOf returns the Pods that carry the name of a ModelServing in
+// their labels and are not controlled by a ServingGroup: Pods created before
+// groups were objects, and Pods left behind without an owner.
+func (c Caches) UnadoptedPodsOf(namespace, modelServing string) []*corev1.Pod {
+	return byIndex[*corev1.Pod](c.Pods, ModelServingIndex, namespace+"/"+modelServing)
 }
 
 // RevisionsLabelled returns the ControllerRevisions that carry the name of a

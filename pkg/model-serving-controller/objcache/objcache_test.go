@@ -18,6 +18,7 @@ package objcache
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -53,6 +54,21 @@ func names[T metav1.Object](objects []T) string {
 	return strings.Join(out, ",")
 }
 
+func TestOrdinalName(t *testing.T) {
+	for name, want := range map[string]string{
+		"llama-0": "llama/0", "llama-12": "llama/12", "a-b-3": "a-b/3",
+		"llama": "", "llama-": "", "-1": "", "llama-01": "", "llama-+1": "", "llama-1x": "",
+	} {
+		got := ""
+		if prefix, ordinal, ok := OrdinalName(name); ok {
+			got = prefix + "/" + strconv.Itoa(ordinal)
+		}
+		if got != want {
+			t.Errorf("OrdinalName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestCaches(t *testing.T) {
 	newStore := func() cache.Indexer { return cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{}) }
 	caches := Caches{ModelServings: newStore(), ServingGroups: newStore(), Pods: newStore(), ControllerRevisions: newStore()}
@@ -81,6 +97,11 @@ func TestCaches(t *testing.T) {
 	} {
 		_ = caches.Pods.Add(object)
 	}
+	for name, owners := range map[string][]metav1.OwnerReference{"by-name": nil, "by-name-adopted": controller("ServingGroup", "sg-uid")} {
+		labelled := pod("default", name, "", owners)
+		labelled.Labels[workloadv1alpha1.ModelServingNameLabelKey] = "llama"
+		_ = caches.Pods.Add(labelled)
+	}
 	_ = caches.ModelServings.Add(&workloadv1alpha1.ModelServing{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "llama"}})
 	_ = caches.ControllerRevisions.Add(&appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{
 		Namespace: "default", Name: "llama-abc", Labels: map[string]string{workloadv1alpha1.ModelServingNameLabelKey: "llama"},
@@ -89,14 +110,14 @@ func TestCaches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := names(caches.PodsControlledBy("sg-uid")); got != "owned,owned-relabelled" {
+	if got := names(caches.PodsControlledBy("sg-uid")); got != "by-name-adopted,owned,owned-relabelled" {
 		t.Errorf("PodsControlledBy = %s", got)
 	}
 	// A Pod another ServingGroup controls is never one to adopt.
 	if got := names(caches.UnadoptedPods("default", "llama-0")); got != "legacy,orphan,referenced" {
 		t.Errorf("UnadoptedPods = %s", got)
 	}
-	if got := names(caches.PodsOfGroup(group)); got != "legacy,orphan,owned,owned-relabelled,referenced" {
+	if got := names(caches.PodsOfGroup(group)); got != "by-name-adopted,legacy,orphan,owned,owned-relabelled,referenced" {
 		t.Errorf("PodsOfGroup = %s", got)
 	}
 	if got := names(caches.GroupsControlledBy("ms-uid")); got != "llama-0" {
@@ -104,6 +125,19 @@ func TestCaches(t *testing.T) {
 	}
 	if got := names(caches.GroupsLabelled("default", "llama")); got != "llama-0,llama-1" {
 		t.Errorf("GroupsLabelled = %s", got)
+	}
+	// By name alone: an object that takes the name of a group counts, whatever its labels are.
+	unlabelled := group.DeepCopy()
+	unlabelled.Name, unlabelled.UID, unlabelled.Labels, unlabelled.OwnerReferences = "llama-7", "squatter-uid", nil, nil
+	longer := group.DeepCopy()
+	longer.Name, longer.UID = "llama-extra-0", "longer-uid"
+	_ = caches.ServingGroups.Add(unlabelled)
+	_ = caches.ServingGroups.Add(longer)
+	if got := names(caches.GroupsNamedAfter("default", "llama")); got != "llama-0,llama-1,llama-7" {
+		t.Errorf("GroupsNamedAfter = %s", got)
+	}
+	if got := names(caches.UnadoptedPodsOf("default", "llama")); got != "by-name" {
+		t.Errorf("UnadoptedPodsOf = %s", got)
 	}
 	if got := names(caches.RevisionsLabelled("default", "llama")); got != "llama-abc" {
 		t.Errorf("RevisionsLabelled = %s", got)
