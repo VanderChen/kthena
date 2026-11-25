@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -151,6 +152,11 @@ func (r *Runner) next(ctx context.Context) bool {
 	case errors.Is(err, ErrNotSettled):
 		// Not a failure: a group has yet to report. Its report brings the next
 		// round; the growing delay is for the case that no event does.
+		r.queue.AddRateLimited(key)
+	case apierrors.IsConflict(err):
+		// The object changed since it was read: the precondition of a write did
+		// its work. The round is planned again on the object as it is now.
+		klog.V(2).InfoS("An object changed since it was read; the round is planned again", "modelServing", key, "err", err)
 		r.queue.AddRateLimited(key)
 	case err != nil:
 		klog.ErrorS(err, "Round of a ModelServing failed", "modelServing", key)

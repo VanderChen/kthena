@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -191,6 +192,13 @@ func (r *Runner) next(ctx context.Context) bool {
 		return true
 	}
 	after, err := r.controller.Reconcile(ctx, namespace, name)
+	if apierrors.IsConflict(err) {
+		// The object changed since it was read: the precondition of a write did
+		// its work. The round is decided again on the object as it is now.
+		klog.V(2).InfoS("An object changed since it was read; the round is decided again", "servingGroup", key, "err", err)
+		r.queue.AddRateLimited(key)
+		return true
+	}
 	if err != nil {
 		klog.ErrorS(err, "Round of a ServingGroup failed", "servingGroup", key)
 		r.queue.AddRateLimited(key)
