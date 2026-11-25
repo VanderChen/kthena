@@ -58,6 +58,33 @@ rules:
       - update
       - watch
   - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - modelservings/finalizers
+      - servinggroups/finalizers
+    verbs:
+      - update
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - servinggroups
+    verbs:
+      - create
+      - delete
+      - get
+      - list
+      - patch
+      - update
+      - watch
+  - apiGroups:
+      - workload.serving.volcano.sh
+    resources:
+      - servinggroups/status
+    verbs:
+      - get
+      - patch
+      - update
+  - apiGroups:
       - ""
     resources:
       - pods
@@ -130,6 +157,7 @@ rules:
       - delete
       - get
       - list
+      - patch
       - update
       - watch
   - apiGroups:
@@ -142,6 +170,7 @@ rules:
       - list
       - watch
       - update
+      - patch
       - delete
   - apiGroups:
       - admissionregistration.k8s.io
@@ -160,6 +189,7 @@ rules:
       - create
       - get
       - list
+      - watch
       - update
       - delete
   - apiGroups:
