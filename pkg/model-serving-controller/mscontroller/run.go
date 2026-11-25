@@ -168,6 +168,10 @@ func (r *Runner) work(ctx context.Context) {
 	}
 }
 
+// targetRetry is how long a round waits before it tries again to record the
+// revision of the template.
+const targetRetry = 15 * time.Second
+
 func (r *Runner) next(ctx context.Context) bool {
 	key, shutdown := r.queue.Get()
 	if shutdown {
@@ -191,6 +195,15 @@ func (r *Runner) next(ctx context.Context) bool {
 		// its work. The round is planned again on the object as it is now.
 		klog.V(2).InfoS("An object changed since it was read; the round is planned again", "modelServing", key, "err", err)
 		r.queue.AddRateLimited(key)
+	case errors.Is(err, errTargetUnknown):
+		// The revision of the template cannot be recorded. No event tells
+		// when it can be again, and every event of the ModelServing and its
+		// groups starts another round that fails in the meantime, so that the
+		// growing delay of the queue is at many minutes within seconds. The
+		// round is tried again at a fixed interval instead.
+		klog.ErrorS(err, "Round of a ModelServing failed; trying again later", "modelServing", key, "after", targetRetry)
+		r.queue.Forget(key)
+		r.queue.AddAfter(key, targetRetry)
 	case err != nil:
 		klog.ErrorS(err, "Round of a ModelServing failed", "modelServing", key)
 		r.queue.AddRateLimited(key)

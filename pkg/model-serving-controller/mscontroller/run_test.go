@@ -17,6 +17,8 @@ limitations under the License.
 package mscontroller
 
 import (
+	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -64,5 +66,46 @@ func TestServingGroupEventsReachTheModelServing(t *testing.T) {
 			t.Errorf("%s: queued %v, want %v", tt.name, got, tt.want)
 		}
 		r.queue.ShutDown()
+	}
+}
+
+// A round that cannot record the revision of the template is tried again at a
+// fixed interval. The growing delay of the queue is not used for it: every
+// event of the ModelServing and its groups starts another round that fails
+// while the revisions cannot be written, and after a few seconds of that the
+// delay would be many minutes, long after the revisions can be written again.
+// Any other failure keeps the growing delay.
+func TestARoundWithoutATargetIsTriedAgainAtAFixedInterval(t *testing.T) {
+	s := newSystem(t, modelServing())
+	s.settle()
+	key := testNamespace + "/" + testName
+	run := func() int {
+		t.Helper()
+		caches, snapshot := s.caches()
+		s.ms.SetCaches(caches, snapshot.Listers().Services)
+		r := NewRunner(s.ms)
+		defer r.queue.ShutDown()
+		for range 3 {
+			r.queue.Add(key)
+			r.next(context.Background())
+		}
+		return r.queue.NumRequeues(key)
+	}
+
+	s.outage()
+	s.update(setImage("model:v2"))
+	if requeues := run(); requeues != 0 {
+		t.Errorf("three rounds without a target left %d failures on the delay of the queue, want none", requeues)
+	}
+
+	// A write that fails for another reason is retried with the growing delay.
+	s.cluster.BeforeWrite = func(write apitestWrite) error {
+		if write.Resource == "servinggroups" {
+			return errors.New("the API server is not well")
+		}
+		return nil
+	}
+	if requeues := run(); requeues != 3 {
+		t.Errorf("three failed rounds left %d failures on the delay of the queue, want 3", requeues)
 	}
 }
