@@ -202,6 +202,8 @@ func analyzeModelServing(in modelServingInput) ModelServingReport {
 		a.rollout()
 		a.groupCount()
 		a.surgeMarks()
+		a.podStates()
+		a.strayPods()
 	}
 
 	a.groupInfo()
