@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"strconv"
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
@@ -146,6 +147,9 @@ func (p *HeadlessServicePlugin) OnRoleDelete(ctx context.Context, req *HookReque
 	if req.KubeClient == nil {
 		return fmt.Errorf("Kubernetes client is not initialized")
 	}
+	if req.Owner != nil {
+		return p.deleteServicesOfGeneration(ctx, req)
+	}
 	cleanup := req.Cleanup
 	if cleanup == nil {
 		cleanup = &RoleCleanup{}
@@ -197,7 +201,7 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		return err
 	}
 	for _, pod := range pods.Items {
-		if utils.IsOwnedByModelServingWithUID(&pod, ms.UID) && pod.Spec.Subdomain == entry && pod.Labels[workloadv1alpha1.EntryLabelKey] != "true" {
+		if req.ownsPod(&pod) && pod.Spec.Subdomain == entry && pod.Labels[workloadv1alpha1.EntryLabelKey] != "true" {
 			return fmt.Errorf("MigrationRequired: Role %s/%s still has worker %s using legacy subdomain %s; create a new ModelServing and migrate traffic", req.ServingGroup, req.RoleID, pod.Name, entry)
 		}
 	}
@@ -210,10 +214,13 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		managedLabels := roleSelector(req)
 		managedLabels[workloadv1alpha1.ModelServingNameLabelKey] = ms.Name
 		managedLabels[HeadlessServicePluginLabelKey] = HeadlessServicePluginName
+		if req.Owner != nil {
+			managedLabels[workloadv1alpha1.InstanceGenerationLabelKey] = strconv.FormatInt(req.Generation, 10)
+		}
 		service, err := services.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			service, err = services.Create(ctx, &corev1.Service{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, Labels: managedLabels, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(ms, workloadv1alpha1.ModelServingKind)}},
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ms.Namespace, Labels: managedLabels, OwnerReferences: []metav1.OwnerReference{req.controller()}},
 				Spec:       corev1.ServiceSpec{ClusterIP: corev1.ClusterIPNone, Selector: selector, PublishNotReadyAddresses: true},
 			}, metav1.CreateOptions{})
 			if apierrors.IsAlreadyExists(err) {
@@ -223,7 +230,7 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		if err != nil {
 			return fmt.Errorf("ensure Headless Service %s/%s: %w", ms.Namespace, name, err)
 		}
-		if !isManagedHeadlessService(service, ms, req.ServingGroup, req.RoleName, req.RoleID) {
+		if !req.managesService(service) {
 			return fmt.Errorf("Headless Service name %s/%s is occupied by an object not managed by plugin %s", ms.Namespace, name, HeadlessServicePluginName)
 		}
 		if service.DeletionTimestamp != nil {
@@ -236,7 +243,18 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		maps.Copy(copy.Labels, managedLabels)
 		copy.Spec.Selector = selector
 		copy.Spec.PublishNotReadyAddresses = true
-		if !maps.Equal(copy.Labels, service.Labels) || !maps.Equal(selector, service.Spec.Selector) || !service.Spec.PublishNotReadyAddresses {
+		handOver := false
+		if owner := metav1.GetControllerOfNoCopy(service); req.Owner != nil && (owner == nil || owner.UID != req.Owner.UID) {
+			// The Service keeps its UID and its name: DNS does not change.
+			copy.OwnerReferences = []metav1.OwnerReference{*req.Owner}
+			for _, reference := range service.OwnerReferences {
+				if reference.Controller == nil || !*reference.Controller {
+					copy.OwnerReferences = append(copy.OwnerReferences, reference)
+				}
+			}
+			handOver = true
+		}
+		if handOver || !maps.Equal(copy.Labels, service.Labels) || !maps.Equal(selector, service.Spec.Selector) || !service.Spec.PublishNotReadyAddresses {
 			// Update carries resourceVersion and UID; conflicts are retried by the queue.
 			if _, err := services.Update(ctx, copy, metav1.UpdateOptions{}); err != nil {
 				return err
@@ -244,6 +262,84 @@ func (p *HeadlessServicePlugin) ensureService(ctx context.Context, req *HookRequ
 		}
 	}
 	return nil
+}
+
+// deleteServicesOfGeneration deletes the Services of a Role instance of a
+// ServingGroup that were made for the generation of the request or an earlier
+// one. The generation is on the Service, so a deletion that is retried, also
+// by another process, never removes the Service of the instance that was
+// created in the meantime.
+func (p *HeadlessServicePlugin) deleteServicesOfGeneration(ctx context.Context, req *HookRequest) error {
+	services := req.KubeClient.CoreV1().Services(req.ModelServing.Namespace)
+	entry := utils.GeneratePodName(req.ServingGroup, req.RoleID, 0)
+	for _, name := range []string{entry, DiscoveryServiceName(entry)} {
+		service, err := services.Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("get Headless Service %s/%s: %w", req.ModelServing.Namespace, name, err)
+		}
+		if !req.managesService(service) || serviceGeneration(service) > req.Generation {
+			continue
+		}
+		uid := service.UID
+		err = services.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete Headless Service %s/%s: %w", req.ModelServing.Namespace, name, err)
+		}
+	}
+	return nil
+}
+
+// serviceGeneration returns the generation of the Role instance a Service was
+// made for. A Service made before generations were recorded has none: 0.
+func serviceGeneration(service *corev1.Service) int64 {
+	generation, err := strconv.ParseInt(service.Labels[workloadv1alpha1.InstanceGenerationLabelKey], 10, 64)
+	if err != nil || generation < 0 {
+		return 0
+	}
+	return generation
+}
+
+// controller returns the controller reference of what a plugin creates for the request.
+func (req *HookRequest) controller() metav1.OwnerReference {
+	if req.Owner != nil {
+		return *req.Owner
+	}
+	return *metav1.NewControllerRef(req.ModelServing, workloadv1alpha1.ModelServingKind)
+}
+
+// ownsPod reports whether a Pod belongs to the workload of the request: the
+// ModelServing owns it, or the ServingGroup of the request controls it.
+func (req *HookRequest) ownsPod(pod *corev1.Pod) bool {
+	if req.Owner != nil {
+		if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.UID == req.Owner.UID {
+			return true
+		}
+	}
+	return utils.IsOwnedByModelServingWithUID(pod, req.ModelServing.UID)
+}
+
+// managesService reports whether a Service is one this plugin made for the
+// Role instance of the request. For a ServingGroup that is a Service the group
+// controls; one the ModelServing controls, made before groups were objects;
+// and one without a controller, left behind when a group was deleted with its
+// dependents orphaned. The names and the labels have to be those of the
+// instance in every case.
+func (req *HookRequest) managesService(service *corev1.Service) bool {
+	ms := req.ModelServing
+	if req.Owner == nil {
+		return isManagedHeadlessService(service, ms, req.ServingGroup, req.RoleName, req.RoleID)
+	}
+	if !hasHeadlessServiceIdentity(service, ms, req.ServingGroup, req.RoleName, req.RoleID) {
+		return false
+	}
+	owner := metav1.GetControllerOfNoCopy(service)
+	if owner == nil {
+		return service.Labels[HeadlessServicePluginLabelKey] == HeadlessServicePluginName
+	}
+	return owner.UID == req.Owner.UID || isModelServingController(owner, ms)
 }
 
 func requiresHeadlessService(role *workloadv1alpha1.Role) bool {
@@ -264,8 +360,19 @@ func isManagedHeadlessService(service *corev1.Service, ms *workloadv1alpha1.Mode
 	if service == nil || ms == nil || group == "" || role == "" || id == "" {
 		return false
 	}
-	owner := metav1.GetControllerOf(service)
-	if owner == nil || owner.UID != ms.UID || owner.Name != ms.Name || owner.Kind != workloadv1alpha1.ModelServingKind.Kind || owner.APIVersion != workloadv1alpha1.SchemeGroupVersion.String() {
+	owner := metav1.GetControllerOfNoCopy(service)
+	return owner != nil && isModelServingController(owner, ms) && hasHeadlessServiceIdentity(service, ms, group, role, id)
+}
+
+func isModelServingController(owner *metav1.OwnerReference, ms *workloadv1alpha1.ModelServing) bool {
+	return owner.UID == ms.UID && owner.Name == ms.Name && owner.Kind == workloadv1alpha1.ModelServingKind.Kind &&
+		owner.APIVersion == workloadv1alpha1.SchemeGroupVersion.String()
+}
+
+// hasHeadlessServiceIdentity reports whether a Service has the name, the type
+// and the labels of a Service of this plugin for one Role instance.
+func hasHeadlessServiceIdentity(service *corev1.Service, ms *workloadv1alpha1.ModelServing, group, role, id string) bool {
+	if service == nil || ms == nil || group == "" || role == "" || id == "" {
 		return false
 	}
 	parent, ordinal := utils.GetParentNameAndOrdinal(id)

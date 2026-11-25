@@ -21,6 +21,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	listerv1 "k8s.io/client-go/listers/core/v1"
 
@@ -54,6 +55,14 @@ type HookRequest struct {
 	lwsPodDNS bool
 	// Cleanup retains auxiliary UID targets across retries of one Role deletion.
 	Cleanup *RoleCleanup
+	// Owner, when set, is the ServingGroup the Role instance belongs to. What a
+	// plugin creates for the instance is controlled by it instead of by the
+	// ModelServing, and what the ModelServing still controls is handed over.
+	Owner *metav1.OwnerReference
+	// Generation is the generation of the Role instance. It is read only when
+	// Owner is set. OnRoleDelete removes what was made for this generation or an
+	// earlier one, and leaves what was made for a later one.
+	Generation int64
 }
 
 // Plugin defines the lifecycle hooks implemented by a plugin.
