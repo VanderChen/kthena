@@ -28,6 +28,7 @@ import (
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/grouplevel"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
@@ -248,7 +249,9 @@ func (c *Controller) observe(ms *workloadv1alpha1.ModelServing, spec grouplevel.
 	parent := servinggroup.ParentOf(ms)
 	type found struct {
 		revisions map[string]bool
-		marked    bool
+		// updating holds the revisions that Pods are being updated to in place.
+		updating map[string]bool
+		marked   bool
 	}
 	ownerless := map[int]*found{}
 	for _, pod := range c.caches.UnadoptedPodsOf(ms.Namespace, ms.Name) {
@@ -266,16 +269,28 @@ func (c *Controller) observe(ms *workloadv1alpha1.ModelServing, spec grouplevel.
 			continue
 		}
 		if ownerless[ordinal] == nil {
-			ownerless[ordinal] = &found{revisions: map[string]bool{}}
+			ownerless[ordinal] = &found{revisions: map[string]bool{}, updating: map[string]bool{}}
 		}
 		ownerless[ordinal].revisions[utils.ObjectRevision(pod)] = true
+		if state := inplace.StateOf(pod); state.InProgress() && state.Revision != "" {
+			ownerless[ordinal].updating[state.Revision] = true
+		}
 		ownerless[ordinal].marked = ownerless[ordinal].marked ||
 			pod.Annotations[workloadv1alpha1.SurgeAnnotationKey] == workloadv1alpha1.SurgeScopeServingGroup
 	}
 	for ordinal, pods := range ownerless {
 		orphans := grouplevel.Orphans{Marked: pods.marked}
-		if len(pods.revisions) == 1 {
-			for revision := range pods.revisions {
+		// The Pods of a group that is being updated in place carry the label
+		// of the revision they came from until every one of them runs the new
+		// images. The group is at the revision they are updated to: with the
+		// one of the labels it would look as if the update had been taken
+		// back, and the group would be recreated.
+		revisions := pods.revisions
+		if len(pods.updating) > 0 {
+			revisions = pods.updating
+		}
+		if len(revisions) == 1 {
+			for revision := range revisions {
 				orphans.Revision = revision
 			}
 		}

@@ -17,19 +17,23 @@ limitations under the License.
 package mscontroller
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
@@ -219,6 +223,58 @@ func TestARolloutUnderWayIsTakenOver(t *testing.T) {
 	for _, write := range s.cluster.Writes() {
 		if strings.HasPrefix(write.Name, "llama-2-") && write.Resource == "pods" && write.Verb != "patch" {
 			t.Errorf("the group that was at the target already was touched: %s", write)
+		}
+	}
+}
+
+// An earlier version was updating a group in place when it was replaced: one
+// Pod of the group runs the new image, and both still carry the label of the
+// revision they came from. The update is carried on. Nothing is recreated.
+func TestAnInPlaceUpdateUnderWayIsTakenOver(t *testing.T) {
+	old := modelServing(updatedInPlace)
+	old.UID = "ms-uid"
+	ms := modelServing(updatedInPlace, setImage("model:v2"))
+	ms.UID = "ms-uid"
+	ms.Status = workloadv1alpha1.ModelServingStatus{
+		Replicas: 3, UpdatedReplicas: 0, CurrentReplicas: 3, AvailableReplicas: 2,
+		CurrentRevision: "rev-old", UpdateRevision: "rev-new",
+	}
+	objects := []runtime.Object{ms, legacyRevision(t, old, "rev-old", false), legacyRevision(t, ms, "rev-new", false)}
+	for ordinal := range 3 {
+		objects = append(objects, legacyPods(ms, ordinal, "rev-old", "model:v1", false)...)
+	}
+	s := newSystem(t, objects...)
+	s.runContainers()
+	patched, err := s.cluster.GetPod(testNamespace, "llama-2-serve-0-0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inplace.Start(context.Background(), s.cluster.Kube, patched, map[string]string{"model": "model:v2"}, "rev-new", s.cluster.Now()); err != nil {
+		t.Fatal(err)
+	}
+	before := s.podUIDs()
+	s.cluster.ResetWrites()
+
+	s.invariant = func() {
+		if ready := s.readyGroups(); ready < 2 {
+			t.Fatalf("%d groups ready: %s", ready, s.summary())
+		}
+	}
+	s.settleContainers()
+	if got, want := s.summary(), "groups[0=model:v2 1=model:v2 2=model:v2] replicas=3 updated=3 current=3 available=3 Available"; got != want {
+		t.Fatalf("after the take-over and the rollout:\n got %s\nwant %s", got, want)
+	}
+	if after := s.podUIDs(); !reflect.DeepEqual(after, before) {
+		t.Errorf("Pods were replaced: %v, before %v", after, before)
+	}
+	for _, write := range s.cluster.Writes() {
+		if write.Verb == "delete" && (write.Resource == "pods" || write.Resource == "servinggroups") {
+			t.Errorf("the take-over of an in-place update deleted: %s", write)
+		}
+	}
+	for _, group := range s.groups() {
+		if meta.IsStatusConditionTrue(group.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionRecreateRequired)) {
+			t.Errorf("group %s asks to be recreated", group.Name)
 		}
 	}
 }
