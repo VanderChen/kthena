@@ -1,0 +1,97 @@
+/*
+Copyright The Volcano Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package mscontroller is the ModelServing controller. It reconciles one
+// ModelServing: it records the revision of its template, creates and deletes
+// its ServingGroup objects, rolls them from one revision to the next within
+// the rollout budget, hands the settings of the ModelServing down to them and
+// sums up their status.
+//
+// It never touches a Pod. What happens inside a group is the ServingGroup
+// controller; what this controller knows about a group is the object, its
+// status, and whether that status was computed from the Pods the cache shows.
+package mscontroller
+
+import (
+	"sync"
+	"time"
+
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"k8s.io/client-go/tools/record"
+
+	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/objcache"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+)
+
+// Controller reconciles ModelServings.
+type Controller struct {
+	kube     kubernetes.Interface
+	kthena   clientset.Interface
+	caches   objcache.Caches
+	services corelisters.ServiceLister
+	registry *plugins.Registry
+	recorder record.EventRecorder
+	now      func() time.Time
+
+	mu sync.Mutex
+	// targets caches the target revision resolved for a ModelServing, by UID.
+	targets map[types.UID]recorded
+}
+
+// Options are the dependencies of a Controller.
+type Options struct {
+	Kube     kubernetes.Interface
+	Kthena   clientset.Interface
+	Caches   objcache.Caches
+	Services corelisters.ServiceLister
+	// Registry holds the plugins; nil means plugins.DefaultRegistry.
+	Registry *plugins.Registry
+	Recorder record.EventRecorder
+	// Now is the clock; nil means time.Now.
+	Now func() time.Time
+}
+
+// New returns a Controller.
+func New(options Options) *Controller {
+	c := &Controller{
+		kube:     options.Kube,
+		kthena:   options.Kthena,
+		caches:   options.Caches,
+		services: options.Services,
+		registry: options.Registry,
+		recorder: options.Recorder,
+		now:      options.Now,
+		targets:  map[types.UID]recorded{},
+	}
+	if c.registry == nil {
+		c.registry = plugins.DefaultRegistry
+	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+	if c.recorder == nil {
+		c.recorder = &record.FakeRecorder{}
+	}
+	return c
+}
+
+// SetCaches replaces the stores the controller reads.
+func (c *Controller) SetCaches(caches objcache.Caches, services corelisters.ServiceLister) {
+	c.caches, c.services = caches, services
+}
