@@ -26,6 +26,10 @@ import (
 // settings copied from the ModelServing.
 func (r *round) settings(revision string) workload.Settings {
 	settings := workload.Settings{BaselineRevision: r.baseline, UpdateMethod: workloadv1alpha1.RecreateUpdateMethod}
+	if r.view.inPlace {
+		// A group is told InPlace only when it takes effect.
+		settings.UpdateMethod = workloadv1alpha1.InPlaceUpdateMethod
+	}
 	layout := revision
 	if r.view.spec.Mode == grouplevel.ModeRole {
 		settings.TargetRevision = r.target

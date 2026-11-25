@@ -47,6 +47,9 @@ type groupState struct {
 	comparison workload.Comparison
 	// unit is the group as the plan sees it.
 	unit grouplevel.Group
+	// fallback, when not empty, says why the group is recreated although the
+	// ModelServing is updated in place.
+	fallback string
 }
 
 func (g groupState) condition(conditionType workloadv1alpha1.ServingGroupConditionType) bool {
@@ -194,6 +197,9 @@ type view struct {
 	spec   grouplevel.Spec
 	groups []groupState
 	input  grouplevel.Input
+	// inPlace reports that the update method that takes effect is InPlace. It
+	// is handed down to the groups, which need it under either rollout strategy.
+	inPlace bool
 	// legacy reports that Pods exist which the ModelServing itself controls:
 	// workloads of a version without group objects that are not taken over yet.
 	legacy bool
@@ -211,13 +217,22 @@ func (v *view) group(ordinal int) *groupState {
 // observe builds the view of a round from the groups that were read and from
 // the Pod cache.
 func (c *Controller) observe(ms *workloadv1alpha1.ModelServing, spec grouplevel.Spec, history *workload.History, groups observed) *view {
-	v := &view{spec: spec}
+	inPlace := c.updatesInPlace(ms, spec)
+	// The plan itself updates in place only where it replaces whole groups.
+	spec.InPlace = inPlace && spec.Mode == grouplevel.ModeServingGroup
+	v := &view{spec: spec, inPlace: inPlace}
 	v.input = grouplevel.Input{Spec: spec, Foreign: groups.foreign, Orphans: map[int]grouplevel.Orphans{}}
 
 	taken := map[int]bool{}
+	fallbacks := map[string]string{}
 	for _, group := range groups.own {
 		_, ordinal, _ := objcache.OrdinalName(group.Name)
 		state, awaiting := c.state(ms, spec, history, group, ordinal)
+		if reason := inPlaceFallback(spec, history, state, fallbacks); reason != "" {
+			// Only for the plan of this round: the condition of the group is
+			// not written from here, and a later target is judged anew.
+			state.fallback, state.unit.RecreateRequired = reason, true
+		}
 		v.groups = append(v.groups, state)
 		v.input.Groups = append(v.input.Groups, state.unit)
 		taken[ordinal] = true
@@ -266,5 +281,6 @@ func (c *Controller) observe(ms *workloadv1alpha1.ModelServing, spec grouplevel.
 		}
 		v.input.Orphans[ordinal] = orphans
 	}
+	c.reportFallbacks(ms, v)
 	return v
 }
