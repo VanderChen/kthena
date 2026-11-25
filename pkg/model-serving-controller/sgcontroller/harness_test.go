@@ -30,6 +30,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
@@ -160,6 +161,8 @@ type harness struct {
 	cluster    *apitest.Cluster
 	controller *Controller
 	podGroups  *fakePodGroups
+	// recorder, when set, receives the events of the controller.
+	recorder record.EventRecorder
 }
 
 func newHarness(t *testing.T, objects ...runtime.Object) *harness {
@@ -174,7 +177,7 @@ func newHarness(t *testing.T, objects ...runtime.Object) *harness {
 // crash or a change of leader.
 func (h *harness) restart() {
 	h.controller = New(Options{
-		Kube: h.cluster.Kube, Kthena: h.cluster.Kthena, PodGroups: h.podGroups,
+		Kube: h.cluster.Kube, Kthena: h.cluster.Kthena, PodGroups: h.podGroups, Recorder: h.recorder,
 		Now: func() time.Time { return h.cluster.Now() },
 	})
 }

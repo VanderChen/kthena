@@ -559,6 +559,59 @@ func TestLegacyPodsAreAdoptedWithoutARestart(t *testing.T) {
 	}
 }
 
+// The cache may still show a group that was deleted and created again under
+// the same name. A Pod adopted by the object that is gone would be garbage
+// collected, so an adoption is decided on a direct read.
+func TestAPodIsNotAdoptedOnAStaleCache(t *testing.T) {
+	ms := testModelServing()
+	legacy := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: "llama-0-prefill-0-0",
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: "llama", workloadv1alpha1.GroupNameLabelKey: testGroup,
+				workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill-0",
+				workloadv1alpha1.RevisionLabelKey: "rev-a",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: "ModelServing", Name: "llama", UID: "ms-uid", Controller: ptr.To(true),
+			}},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "model", Image: "model:v1"}}},
+	}
+	h := newHarness(t, ms, revisionOf(t, ms, "rev-a"), groupOf(ms, "rev-a"), legacy)
+	stale := h.cluster.Snapshot()
+
+	groups := h.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace)
+	replacement := h.group()
+	if err := groups.Delete(context.Background(), testGroup, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	h.cluster.Settle()
+	replacement.UID, replacement.ResourceVersion = "", ""
+	if _, err := groups.Create(context.Background(), replacement, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	h.cluster.ResetWrites()
+
+	if _, err := h.roundOn(stale); err != nil {
+		t.Fatal(err)
+	}
+	if writes := h.cluster.Writes(); len(writes) != 0 {
+		t.Errorf("a round on a group that was replaced wrote %v", writesOf(writes))
+	}
+	pod, err := h.cluster.GetPod(testNamespace, legacy.Name)
+	if err != nil || metav1.GetControllerOf(pod).UID != "ms-uid" {
+		t.Errorf("the Pod after the round: %+v, %v; want it left with its owner", pod, err)
+	}
+
+	// On a cache that is up to date the Pod is adopted by the group that exists.
+	h.mustRound()
+	pod, _ = h.cluster.GetPod(testNamespace, legacy.Name)
+	if owner := metav1.GetControllerOf(pod); owner == nil || owner.UID != h.group().UID {
+		t.Errorf("the Pod is controlled by %+v, want the new group %s", owner, h.group().UID)
+	}
+}
+
 func TestAGroupThatIsGoingAwayOrHasNoOwnerIsLeftAlone(t *testing.T) {
 	ms := testModelServing()
 	deleting := groupOf(ms, "rev-a")

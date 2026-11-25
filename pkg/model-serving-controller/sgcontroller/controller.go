@@ -16,8 +16,9 @@ limitations under the License.
 
 // Package sgcontroller is the ServingGroup controller. It reconciles one
 // ServingGroup object: it creates and deletes the member Pods of the group,
-// keeps the ledger of its Role instances, recovers it from faults by the
-// recovery policy and reports its state in the status.
+// updates them in place when only their images change, keeps the ledger of
+// its Role instances, recovers it from faults by the recovery policy and
+// reports its state in the status.
 //
 // It decides from the spec of the group, the ControllerRevisions the spec
 // names and the member Pods. It never creates or deletes a ServingGroup; that
@@ -77,10 +78,13 @@ type Controller struct {
 
 	// readyNotified holds the UIDs of the Pods the OnPodReady hook was called
 	// for. known holds, by the UID of a group, the UIDs of the member Pods of its
-	// last round: what the process may remember something about.
+	// last round: what the process may remember something about. timeouts
+	// holds, by the UID of a group, the start of the in-place update whose
+	// missed deadline was reported last.
 	readyMu       sync.Mutex
 	readyNotified sets.Set[types.UID]
 	known         map[types.UID]sets.Set[types.UID]
+	timeouts      map[types.UID]time.Time
 }
 
 // Options are the dependencies of a Controller.
@@ -114,6 +118,7 @@ func New(options Options) *Controller {
 		faults:        servinggroup.NewFaultTracker(),
 		readyNotified: sets.New[types.UID](),
 		known:         map[types.UID]sets.Set[types.UID]{},
+		timeouts:      map[types.UID]time.Time{},
 	}
 	if c.registry == nil {
 		c.registry = plugins.DefaultRegistry

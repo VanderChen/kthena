@@ -193,9 +193,10 @@ type creation struct {
 }
 
 // execute carries out a round. The order is fixed: adopt; call the delete
-// hooks; write the status, which commits the ledger, a failure and the first
-// creation; delete; create. A write that fails ends the round: nothing that
-// was to follow it is issued.
+// hooks; write the status, which commits the ledger, a failure, the first
+// creation and that an instance is not ready while it is updated in place;
+// delete; create; patch in place. A write that fails ends the round: nothing
+// that was to follow it is issued.
 func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time.Duration, error) {
 	group := r.group
 	owner := OwnerReference(group)
@@ -205,7 +206,10 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		status := servinggroup.ComputeStatus(servinggroup.StatusInput{
 			Group: group, Now: now, Members: r.members, Instances: r.instances,
 			Ledger: group.Status.RoleInstances, LayoutUnknown: true,
-			Failure: &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
+			// No plan says which update is under way. An instance with a Pod
+			// that is patched and not relabelled is in the middle of one.
+			Updating: servinggroup.UnfinishedUpdates(r.instances),
+			Failure:  &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
 		})
 		if _, err := c.writeStatus(ctx, group, status); err != nil {
 			return 0, err
@@ -261,8 +265,8 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 
 	input := servinggroup.StatusInput{
 		Group: group, Now: now, Members: r.members, Instances: r.instances,
-		Ledger: ledger, Wants: r.plan.Wants,
-		Fail: r.fail, DrainBlocked: drainBlocked,
+		Ledger: ledger, Wants: r.plan.Wants, Updating: r.updating,
+		Fail: r.fail, RecreateRequired: r.recreate, DrainBlocked: drainBlocked,
 		PendingCreates: pending,
 		// First the status says that members are being created, then the first
 		// one is. The ModelServing controller changes the revision of a group
@@ -275,9 +279,10 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		return 0, err
 	}
 	input.Group = group
+	c.reportInPlace(r)
 
 	if failure == nil {
-		failure = c.act(ctx, r, group, owner, creations)
+		failure = c.act(ctx, r, group, owner, creations, now)
 	}
 	if failure != nil {
 		input.Failure = conditionOf(failure)
@@ -291,16 +296,12 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		return 0, failure
 	}
 
-	if !r.retryAt.IsZero() {
-		// The fault of a member starts to count at retryAt.
-		return max(r.retryAt.Sub(now), time.Second), nil
-	}
-	return 0, nil
+	return r.wakeAfter(now), nil
 }
 
-// act issues the deletions, the marks and the creations of a round, after its
-// status write.
-func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.ServingGroup, owner metav1.OwnerReference, creations []creation) error {
+// act issues the deletions, the marks, the creations and the in-place patches
+// of a round, after its status write.
+func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.ServingGroup, owner metav1.OwnerReference, creations []creation, now time.Time) error {
 	for i := range r.steps {
 		for _, pod := range r.steps[i].step.Delete {
 			if err := c.deletePod(ctx, pod); err != nil {
@@ -318,6 +319,9 @@ func (c *Controller) act(ctx context.Context, r *round, group *workloadv1alpha1.
 		if err := c.createMembers(ctx, r, group, owner, creation); err != nil {
 			return err
 		}
+	}
+	if err := c.updateInPlace(ctx, r, now); err != nil {
+		return err
 	}
 	return c.notifyReady(ctx, r, owner)
 }
@@ -376,6 +380,7 @@ func (c *Controller) forget(group types.UID, members []*corev1.Pod) {
 	}
 	if live.Len() == 0 {
 		delete(c.known, group)
+		delete(c.timeouts, group)
 	} else {
 		c.known[group] = live
 	}
