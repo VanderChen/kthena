@@ -688,3 +688,80 @@ func TestAStatusThatIsNotKeptStopsTheRound(t *testing.T) {
 		t.Errorf("Pods were created on a status that was not kept: %s", got)
 	}
 }
+
+// Under RoleRollingUpdate the instances of a Role run the layout of the
+// revision each was created from. One subgroup of a PodGroup has one size, so
+// while instances of two layouts exist the PodGroup asks for the smaller one:
+// asking every instance for the layout of the target, a gang with an instance
+// of the earlier layout is never complete and the Pods of the replacement are
+// never bound.
+func TestPodGroupOfRolledRolesUsesTheSmallestLayout(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		before, after int32
+	}{
+		{name: "the target adds a worker", before: 0, after: 1},
+		{name: "the target has no workers", before: 1, after: 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			layout := func(ms *workloadv1alpha1.ModelServing, workers int32) *workloadv1alpha1.ModelServing {
+				out := ms.DeepCopy()
+				role := &out.Spec.Template.Roles[0]
+				role.WorkerReplicas, role.WorkerTemplate = workers, nil
+				if workers > 0 {
+					role.WorkerTemplate = role.EntryTemplate.DeepCopy()
+				}
+				return out
+			}
+			ms := layout(testModelServing(func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{}
+				rolledByRole(ms)
+			}), tt.before)
+			target := layout(withImage(ms, "model:v2"), tt.after)
+			h := newHarness(t, ms, groupOf(ms, "rev-a"), revisionOf(t, ms, "rev-a"), revisionOf(t, target, "rev-b"))
+			h.podGroups.enabled = true
+			h.settleContainers()
+
+			workers := map[string]int32{"rev-a": tt.before, "rev-b": tt.after}
+			// smallest returns the fewest workers an instance of prefill that
+			// exists was created with.
+			smallest := func() int32 {
+				least := max(tt.before, tt.after)
+				for _, pod := range h.pods() {
+					if pod.DeletionTimestamp == nil && pod.Labels[workloadv1alpha1.RoleLabelKey] == "prefill" {
+						least = min(least, workers[pod.Labels[workloadv1alpha1.RevisionLabelKey]])
+					}
+				}
+				return least
+			}
+			h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+				group.Spec.TargetRevision, group.Spec.ExpectedPods = "rev-b", 3*(1+tt.after)+1
+			})
+			for range 40 {
+				existing, synced := smallest(), len(h.podGroups.views)
+				writes := h.mustRound()
+				for _, view := range h.podGroups.views[synced:] {
+					if got := view.Spec.Template.Roles[0]; got.WorkerReplicas > existing || *got.Replicas != 3 {
+						t.Fatalf("the PodGroup asks for %d workers in %d instances while an instance with %d exists; Pods: %s",
+							got.WorkerReplicas, *got.Replicas, existing, h.podFacts())
+					}
+				}
+				changed := h.runAll()
+				h.cluster.Settle()
+				if len(writes) == 0 && changed == 0 {
+					break
+				}
+			}
+			for _, pod := range h.pods() {
+				if pod.Labels[workloadv1alpha1.RoleLabelKey] == "prefill" && pod.Labels[workloadv1alpha1.RevisionLabelKey] != "rev-b" {
+					t.Fatalf("the Role was not rolled: %s", h.podFacts())
+				}
+			}
+			h.updateGroup(func(group *workloadv1alpha1.ServingGroup) { group.Annotations = map[string]string{"touch": "1"} })
+			h.mustRound()
+			if got := h.podGroups.views[len(h.podGroups.views)-1].Spec.Template.Roles[0]; got.WorkerReplicas != tt.after {
+				t.Errorf("at the target the PodGroup asks for %d workers, want %d", got.WorkerReplicas, tt.after)
+			}
+		})
+	}
+}

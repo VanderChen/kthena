@@ -30,24 +30,26 @@ import (
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
-// coordinatedPodGroupView returns the ModelServing the PodGroup of a group
-// whose Roles are rolled together is built from. view renders the revision of
-// the group; it is changed and returned.
+// podGroupView returns the ModelServing the PodGroup of a group whose Roles
+// are rolled is built from. view renders the revision of the group; it is
+// changed and returned.
 //
 // One subgroup of a PodGroup cannot express different worker counts within a
 // Role. While instances of several revisions exist, the PodGroup takes the
 // smallest layout an instance of the Role runs, so that a replacement within
-// the budget can be scheduled. Whether an instance is ready is still judged
-// by the full layout of its own revision.
+// the budget can be scheduled: a gang that asks every instance for the layout
+// of the target is never complete while an instance of the earlier layout
+// remains, and the Pods of the replacement would never be bound. Whether an
+// instance is ready is still judged by the full layout of its own revision.
 //
 // A Role that waits for the Roles it depends on creates no instance of the
 // target. While it waits, the PodGroup keeps the minimum it asks for that Role
 // now: the gang must not wait for instances that are not being created, or
 // the Roles it waits for could not be scheduled either. Only a minimum that
 // follows the replica count is held back; one set in gangPolicy is not.
-func (c *Controller) coordinatedPodGroupView(r *round, view *workloadv1alpha1.ModelServing, owner metav1.OwnerReference) (*workloadv1alpha1.ModelServing, error) {
+func (c *Controller) podGroupView(r *round, view *workloadv1alpha1.ModelServing, owner metav1.OwnerReference) (*workloadv1alpha1.ModelServing, error) {
 	strategy := r.group.Spec.RolloutStrategy
-	if !roleMode(r.group) || strategy.RoleCoordination == nil {
+	if !roleMode(r.group) {
 		return view, nil
 	}
 	// The revision each instance runs, or is created from when it does not
@@ -90,7 +92,7 @@ func (c *Controller) coordinatedPodGroupView(r *round, view *workloadv1alpha1.Mo
 	}
 
 	coordination := r.plan.Coordination
-	if coordination == nil || len(strategy.RoleCoordination.Dependencies) == 0 || view.Spec.SchedulerName != "volcano" {
+	if strategy.RoleCoordination == nil || coordination == nil || len(strategy.RoleCoordination.Dependencies) == 0 || view.Spec.SchedulerName != "volcano" {
 		return view, nil
 	}
 	published := c.podGroups.PublishedMinRoleReplicas(view, owner, r.group.Name)
