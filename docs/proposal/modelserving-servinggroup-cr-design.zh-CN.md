@@ -321,7 +321,7 @@ R11 汇总（status）
 | 项 | 估计 |
 | --- | --- |
 | `spec` | Role 至多 4 个，名字至多 12 个字符：2 KB 以内 |
-| 账本 | 每个实例一项，JSON 里 60 到 70 字节。16 个实例约 1 KB；1000 个实例约 70 KB。Role 的副本数没有上限，所以账本没有硬上限，也不截断：它是决定的输入。超过 500 项时发一次告警事件 |
+| 账本 | 每个实例一项，JSON 里 60 到 70 字节。16 个实例约 1 KB；1000 个实例约 70 KB。Role 的副本数没有上限，所以账本没有硬上限，也不截断：它是决定的输入。没有做超过某个项数时的告警；`status` 的大小可以从对象本身看到 |
 | 稳态下的写 | 没有。Pod 不变，摘要不变 |
 | 一个 Pod 启动 | 它的投影变三到五次（`phase`、`containerID`、Ready），组的 `status` 跟着写这么多次；就绪翻转时 ModelServing 的 `status` 写一次 |
 | 一个组从无到有 | 另多一次先写后建，每个实例建成时一次（一轮里多个实例的转换合成一次） |
@@ -520,7 +520,7 @@ client-go 的 fake clientset 不检查 resourceVersion 和 UID 的前置条件�
 
 | # | 做法 | 实现 |
 | --- | --- | --- |
-| X1 | 自查 | chart 给 controller-manager 的 Pod 模板加标签 `modelserving.volcano.sh/controller-protocol: servinggroup`。标的是协议的代，不是镜像版本：以后新版本之间的升级不应当被它挡住。进程拿到租约之后、启动任何 controller 之前，在自己的命名空间里列出带 `app.kubernetes.io/component: kthena-controller-manager`、不带这个标签、还没有结束（`Succeeded`、`Failed` 之外，终止中的也算在跑）的 Pod；有，就不启动任何 controller，只应答 webhook，每 5 秒查一次，在自己的 Pod 上发事件 `WaitingForPredecessor` 说明在等谁。运行中每 5 秒查一次；看到这样的 Pod，进程退出（退出码非零），容器重启之后回到启动自查。不在集群里跑（本地调试）时不查 |
+| X1 | 自查 | chart 给 controller-manager 的 Pod 模板加标签 `modelserving.volcano.sh/controller-protocol: servinggroup`。标的是协议的代，不是镜像版本：以后新版本之间的升级不应当被它挡住。进程启动时（参选之前）另外给自己的 Pod 补上这个标签，补不上就每 5 秒重试：不是用这个 chart 部署的 Deployment 可能没有模板上的标签，那样同一个版本的几个副本会互相当成旧版本、谁也不启动。自己的 Pod 名取环境变量 `POD_NAME`（chart 经 downward API 注入），没有时取主机名。进程拿到租约之后、启动任何 controller 之前，在自己的命名空间里列出带 `app.kubernetes.io/component: kthena-controller-manager`、不带这个标签、还没有结束（`Succeeded`、`Failed` 之外，终止中的也算在跑）的 Pod；有，就不启动任何 controller，只应答 webhook，每 5 秒查一次，在自己的 Pod 上发事件 `WaitingForPredecessor` 说明在等谁。运行中每 5 秒查一次；看到这样的 Pod，进程退出（退出码非零），容器重启之后回到启动自查。不在集群里跑（本地调试）时不查 |
 | X2 | CRD 和权限的闸 | 进程一启动就试着 LIST 一次 ServingGroup，每 5 秒重试，不论有没有拿到租约。成功之前 `/readyz` 返回 503（Deployment 的就绪探针指向它），`/healthz`（存活）照常，两个 controller 不启动。不退回旧的工作方式。新 Pod 不就绪时滚动更新不会停掉旧 Pod，旧版本接着工作：漏装 CRD 只是让升级停在那里。chart 里另用 `lookup` 在升级开始之前失败；`lookup` 在 `helm template` 和多数 GitOps 的渲染里返回空，所以只在「release 的命名空间查得到而 CRD 查不到」时才失败 |
 | X3 | 换凭据 | chart 里 controller-manager 的 ServiceAccount 改名为 `kthena-controller-manager-servinggroup`，两个绑定跟着改。`helm upgrade` 删掉旧的 ServiceAccount，旧版本的进程（包括失联节点上还活着的）随即失去凭据：Kind 上旧 Pod 在被 Deployment 删除之前就因为认证失败退出了一次，`kubectl get pod` 里短暂显示 `Error`，这是预期的。装回旧 chart 时反方向同样生效，回退靠它保证新版本的进程不再写。X2 和 X3 有一处相互作用：CRD 没装而 chart 的检查又没有触发（Helm 不能 `lookup`）时，X2 让新 Pod 不就绪、旧 Pod 留着，X3 却已经让旧 Pod 的凭据失效，这段时间没有 controller 在工作。不另加机制，写进升级步骤当作漏装 CRD 的代价：工作负载不受影响，只是不恢复、不滚动；装上 CRD 之后新进程自己变成就绪 |
 | X4 | 选主 | `--leader-elect` 默认改成真；失主的回调改成退出进程（今天只打一行日志，进程留着，已经在睡眠的 grace goroutine 还会去删 Pod）。`ReleaseOnCancel` 仍然是假 |

@@ -543,9 +543,10 @@ metadata:
   namespace: default
   ownerReferences:
   - apiVersion: workload.serving.volcano.sh/v1alpha1
+    blockOwnerDeletion: true
     controller: true
-    kind: ModelServing
-    name: llama-multinode
+    kind: ServingGroup
+    name: llama-multinode-0
     uid: a08cd31a-9f39-450e-a3dc-bc868e08ce0a
   resourceVersion: "2621200"
   uid: 3abd9759-1fd7-48d7-be6b-ac55e17b36a0
