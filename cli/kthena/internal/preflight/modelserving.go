@@ -189,6 +189,7 @@ func analyzeModelServing(in modelServingInput) ModelServingReport {
 	}
 	a.rolloutInfo()
 	a.sortPods()
+	a.compareRevisions()
 
 	switch {
 	case ms.DeletionTimestamp != nil:
@@ -198,6 +199,7 @@ func analyzeModelServing(in modelServingInput) ModelServingReport {
 	case a.takeoverStarted():
 	default:
 		a.observed()
+		a.rollout()
 	}
 
 	a.groupInfo()
