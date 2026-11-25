@@ -433,6 +433,35 @@ const (
 	// Role rolling update is waiting for a dependency, proportional progress,
 	// old-version retention, or admitted target-version readiness.
 	ModelServingCoordinatedRoleRolloutBlocked ModelServingConditionType = "CoordinatedRoleRolloutBlocked"
+
+	// ModelServingRolloutBlocked indicates that the ModelServing has ServingGroups
+	// to create, delete or replace, that the controller could do none of it, and
+	// that the cause has lasted longer than a threshold. The reason is one of the
+	// RolloutBlocked* constants. It can be true together with UpdateInProgress or
+	// Progressing, and is never true together with Available.
+	ModelServingRolloutBlocked ModelServingConditionType = "RolloutBlocked"
+)
+
+// Reasons of the ModelServingRolloutBlocked condition, in order of precedence.
+const (
+	// RolloutBlockedBaselineUnknown: a ServingGroup must be created from the
+	// baseline revision and the baseline cannot be resolved.
+	RolloutBlockedBaselineUnknown = "BaselineUnknown"
+	// RolloutBlockedOrdinalOccupied: the name of a ServingGroup to create is taken
+	// by an object that does not belong to the ModelServing.
+	RolloutBlockedOrdinalOccupied = "OrdinalOccupied"
+	// RolloutBlockedWaitingForDeletion: a ServingGroup is terminating, or has
+	// failed and is not drained yet.
+	RolloutBlockedWaitingForDeletion = "WaitingForDeletion"
+	// RolloutBlockedGroupNotObserved: the status of a ServingGroup does not reflect
+	// its spec or its Pods, or Pods without an owner are not adopted.
+	RolloutBlockedGroupNotObserved = "GroupNotObserved"
+	// RolloutBlockedTargetNotReady: a ServingGroup at the target revision does not
+	// become ready.
+	RolloutBlockedTargetNotReady = "TargetNotReady"
+	// RolloutBlockedBudgetExhausted: the number of ready ServingGroups is at the
+	// lower bound and the groups that are not ready cannot be replaced.
+	RolloutBlockedBudgetExhausted = "BudgetExhausted"
 )
 
 // ModelServingStatus defines the observed state of ModelServing

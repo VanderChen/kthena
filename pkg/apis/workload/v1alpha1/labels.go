@@ -35,4 +35,35 @@ const (
 
 	// InPlaceUpdateStateAnnotationKey is the pod annotation that records in-place update state.
 	InPlaceUpdateStateAnnotationKey = "modelserving.volcano.sh/inplace-update-state"
+
+	// InstanceGenerationLabelKey is the pod label key for the generation of the Role
+	// instance the Pod was created for. It matches the generation recorded for the
+	// instance in the ServingGroup status. A Pod without the label has generation 0.
+	InstanceGenerationLabelKey = "modelserving.volcano.sh/instance-generation"
+
+	// SurgeAnnotationKey marks temporary capacity created by a rolling update with
+	// maxSurge. On a ServingGroup the value is SurgeScopeServingGroup: the annotation
+	// is set when the group is created, removed when the group becomes a regular
+	// replica and never added later. On a Pod the value is SurgeScopeRole for a
+	// temporary Role instance, or SurgeScopeServingGroup as a copy of the mark of
+	// its ServingGroup.
+	SurgeAnnotationKey = "modelserving.volcano.sh/surge"
+	// SurgeScopeServingGroup is the value of SurgeAnnotationKey for a temporary ServingGroup.
+	SurgeScopeServingGroup = "serving-group"
+	// SurgeScopeRole is the value of SurgeAnnotationKey for a temporary Role instance.
+	SurgeScopeRole = "role"
+
+	// ServingGroupAdoptionAnnotationKey is the ModelServing annotation that records
+	// how far the workloads created by a version without ServingGroup objects have
+	// been taken over. An absent annotation means that it was not checked yet.
+	ServingGroupAdoptionAnnotationKey = "modelserving.volcano.sh/servinggroup-adoption"
+	// ServingGroupAdoptionInProgress: objects owned directly by the ModelServing
+	// remain. The ModelServing controller makes no group-level change.
+	ServingGroupAdoptionInProgress = "InProgress"
+	// ServingGroupAdoptionDone: every Pod, PodGroup and Service of the ModelServing
+	// is owned by a ServingGroup.
+	ServingGroupAdoptionDone = "Done"
+	// ServingGroupAdoptionRollingBack: the objects are being handed back to the
+	// ModelServing so that a version without ServingGroup objects can take over.
+	ServingGroupAdoptionRollingBack = "RollingBack"
 )
