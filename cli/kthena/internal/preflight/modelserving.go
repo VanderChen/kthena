@@ -200,6 +200,8 @@ func analyzeModelServing(in modelServingInput) ModelServingReport {
 	default:
 		a.observed()
 		a.rollout()
+		a.groupCount()
+		a.surgeMarks()
 	}
 
 	a.groupInfo()
