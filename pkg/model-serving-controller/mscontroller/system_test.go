@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -114,7 +115,7 @@ type system struct {
 	// stuck, when set, names the Pods the kubelet never gets ready.
 	stuck func(*corev1.Pod) bool
 	// rollback is the rollback switch.
-	rollback bool
+	rollback atomic.Bool
 	// registry, when set, holds the plugins of both controllers.
 	registry *plugins.Registry
 }
@@ -129,7 +130,7 @@ func newSystem(t *testing.T, objects ...runtime.Object) *system {
 // restart replaces both controllers by ones that remember nothing.
 func (s *system) restart() {
 	now := func() time.Time { return s.cluster.Now() }
-	rollingBack := func() bool { return s.rollback }
+	rollingBack := func() bool { return s.rollback.Load() }
 	// As in the manager: the two controllers share the lock of the rounds.
 	rounds := &sync.RWMutex{}
 	s.ms = New(Options{

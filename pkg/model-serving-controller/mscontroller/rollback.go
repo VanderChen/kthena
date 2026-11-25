@@ -94,10 +94,16 @@ func metadataPatch(object metav1.Object, metadata map[string]any) ([]byte, error
 func (c *Controller) rollBack(ctx context.Context, cached *workloadv1alpha1.ModelServing) (time.Duration, error) {
 	// A round of the ServingGroup controller that began before the switch was
 	// set may still be adopting or creating Pods. It ends before anything is
-	// handed back; every round after it sees the switch and does nothing.
+	// handed back, and no round of a group begins while this ModelServing is
+	// handed back: one that began in between, after the switch was removed,
+	// would adopt or create beside the hand-back.
 	c.rounds.Lock()
-	//nolint:staticcheck // Nothing is done under the lock: taking it is the wait.
-	c.rounds.Unlock()
+	defer c.rounds.Unlock()
+	if !c.rollingBack() {
+		// The switch was removed while this round waited. The rollback is
+		// abandoned; the removal of the switch brings the next round.
+		return 0, nil
+	}
 
 	ms, groups, ok, err := c.readDirect(ctx, cached)
 	if err != nil || !ok {

@@ -83,7 +83,7 @@ func TestRollbackHandsTheWorkloadsBack(t *testing.T) {
 	status := s.modelServing().Status
 	s.cluster.ResetWrites()
 
-	s.rollback = true
+	s.rollback.Store(true)
 	s.settle()
 
 	if groups := s.groups(); len(groups) != 0 {
@@ -142,7 +142,7 @@ func TestRollbackHandsTheWorkloadsBack(t *testing.T) {
 
 	// The rollback is abandoned: everything is taken over again, the surge
 	// group as a surge group, and the rollout goes on.
-	s.rollback = false
+	s.rollback.Store(false)
 	s.cluster.ResetWrites()
 	for range 10 {
 		s.kubelet()
@@ -180,7 +180,7 @@ func TestRollbackWaitsAndResumes(t *testing.T) {
 		t.Fatalf("groups = %s, want %s", got, want)
 	}
 
-	s.rollback = true
+	s.rollback.Store(true)
 	s.cluster.ResetWrites()
 	caches, snapshot := s.caches()
 	s.ms.SetCaches(caches, snapshot.Listers().Services)
@@ -204,7 +204,7 @@ func TestRollbackWaitsAndResumes(t *testing.T) {
 		t2 := newSystem(t, modelServing(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](2) }))
 		t2.settle()
 		before, _ := t2.podOwners()
-		t2.rollback = true
+		t2.rollback.Store(true)
 		writes, died := 0, false
 		t2.cluster.BeforeWrite = func(apitestWrite) error {
 			writes++
@@ -296,7 +296,7 @@ func TestRollbackWaitsForARoundInFlight(t *testing.T) {
 	}()
 	<-gate.entered
 
-	s.rollback = true
+	s.rollback.Store(true)
 	handedBack := make(chan error, 1)
 	go func() {
 		_, err := s.ms.Reconcile(context.Background(), testNamespace, testName)
@@ -330,6 +330,74 @@ func TestRollbackWaitsForARoundInFlight(t *testing.T) {
 	for name := range uids {
 		if kinds[name] != "ModelServing" {
 			t.Errorf("Pod %s is controlled by %q after the rollback", name, kinds[name])
+		}
+	}
+}
+
+// The rollback switch is removed while the hand-back of a ModelServing waits
+// for a round of one of its groups. The rollback is abandoned: nothing is
+// handed back by a round that only saw the switch before it waited. The rounds
+// that the removal of the switch lets go on would otherwise adopt and create
+// beside the hand-back.
+func TestRollbackIsAbandonedWhenTheSwitchIsRemovedWhileItWaits(t *testing.T) {
+	gate := &gatePlugin{entered: make(chan struct{}), release: make(chan struct{})}
+	s := &system{t: t, registry: plugins.NewRegistry()}
+	s.registry.Register("gate", func(workloadv1alpha1.PluginSpec) (plugins.Plugin, error) { return gate, nil })
+	s.cluster = apitest.New(modelServing(func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy
+		ms.Spec.Plugins = []workloadv1alpha1.PluginSpec{{Name: "gate", Type: workloadv1alpha1.PluginTypeBuiltIn}}
+	}))
+	s.restart()
+	s.settle()
+
+	lost := s.pods()[0]
+	if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), lost.Name, metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.cluster.Settle()
+	group := lost.Labels[workloadv1alpha1.GroupNameLabelKey]
+	caches, snapshot := s.caches()
+	s.sg.SetCaches(caches, snapshot.Listers().Services)
+	s.ms.SetCaches(caches, snapshot.Listers().Services)
+	gate.armed = true
+	roundDone := make(chan error, 1)
+	go func() {
+		_, err := s.sg.Reconcile(context.Background(), testNamespace, group)
+		roundDone <- err
+	}()
+	<-gate.entered
+
+	s.rollback.Store(true)
+	handedBack := make(chan error, 1)
+	go func() {
+		_, err := s.ms.Reconcile(context.Background(), testNamespace, testName)
+		handedBack <- err
+	}()
+	select {
+	case err := <-handedBack:
+		t.Fatalf("the rollback went ahead while a round was in flight (error: %v)", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	// The operator removes the switch; then the round in flight ends.
+	s.rollback.Store(false)
+	close(gate.release)
+	if err := <-roundDone; err != nil {
+		t.Fatalf("the round in flight: %v", err)
+	}
+	if err := <-handedBack; err != nil {
+		t.Fatalf("the round that waited: %v", err)
+	}
+
+	if state := s.modelServing().Annotations[workloadv1alpha1.ServingGroupAdoptionAnnotationKey]; state == workloadv1alpha1.ServingGroupAdoptionRollingBack {
+		t.Errorf("the ModelServing is marked as being rolled back")
+	}
+	uids, kinds := s.podOwners()
+	if len(s.groups()) != 3 || len(uids) != 6 {
+		t.Fatalf("%d groups and %d Pods, want three groups with their six Pods", len(s.groups()), len(uids))
+	}
+	for name := range uids {
+		if kinds[name] != "ServingGroup" {
+			t.Errorf("Pod %s is controlled by %q, want its group", name, kinds[name])
 		}
 	}
 }
