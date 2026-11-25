@@ -39,6 +39,25 @@ The Custom Resource Definition (CRD) of `ModelServing` is primarily divided into
 `Entry` Pod serves as the entry point to receive serving requests and distribute tasks, while the `Worker` Pod is responsible for executing the actual serving computations.
 - Supports network topology aware scheduling: Enables the co-location scheduling of `Entry` Pods and `Worker` Pods within the same `Role` to the same **HyperNode**.
 
+## ServingGroup objects and the two controllers
+
+The `ServingGroup` layer is also a Kubernetes object. For every group of a `ModelServing` there is one object of kind `ServingGroup`, named `<modelserving>-<ordinal>`. A `Role` instance is not an object: it is a set of Pods inside a group.
+
+Two controllers run in `kthena-controller-manager`, in one process and under one leader lease:
+
+| Controller | Decides | Writes |
+| --- | --- | --- |
+| ModelServing controller | Which ServingGroups exist, at which ordinals and at which revision; the order and the budget of a rolling update between groups. | `ServingGroup` objects (create, delete, `spec`) and the `status` of the `ModelServing`. It never creates or deletes Pods. |
+| ServingGroup controller | What is inside one group: the Role instances and their Pods, Role scaling, `RoleRollingUpdate`, in-place updates and recovery by `recoveryPolicy`. | The Pods, the PodGroup and the plugin resources of the group, and the `status` of the `ServingGroup`. It never creates or deletes a `ServingGroup`. |
+
+When a group has to be replaced as a whole, the ServingGroup controller sets the condition `Failed` on it, and the ModelServing controller deletes the object and creates one with the same name.
+
+Ownership follows the layers: the `ModelServing` owns its `ServingGroup` objects, and a `ServingGroup` owns the Pods, the PodGroup and the headless Services of the group. Deleting an owner deletes what it owns through garbage collection.
+
+What the controllers know about a group is stored on its object: the revision in `spec`, and in `status` the conditions and one record per Role instance (`status.roleInstances`) that says whether the instance was complete or is being removed. A controller that restarts, or a new leader, continues from these objects. A Pod of a complete Role instance that is lost while no controller runs is therefore recovered by `recoveryPolicy` afterwards.
+
+See [ServingGroup Objects](../user-guide/servinggroup.md) for how to read these objects, and [Upgrading to ServingGroup Objects](../user-guide/servinggroup-upgrade.md) for upgrading from a version without them.
+
 ## Revisions and conservative rolling updates
 
 The controller stores immutable **whole-ModelServing** snapshots in
@@ -94,10 +113,12 @@ rebuilt from current plugins. Explicit replica scale-down remains a scaling acti
 
 Missing ordinals below `partition` are recreated from the historical snapshot,
 including historical plugins and worker layout, while current operational replica
-counts and rollout controls remain in effect. Revision cleanup preserves observed
-ServingGroup and Role references and is deferred while partitions, rollout,
-recovery or unresolved history remain, so missing protected ordinals can recover
-after controller restart without introducing a new status/CRD field.
+counts and rollout controls remain in effect. Revision cleanup preserves the
+revisions that a `ServingGroup` names in its `spec` or lists in
+`status.referencedRevisions`, and is deferred while a partition is set, the
+`ModelServing` is not `Available`, or workloads of an earlier version are still
+being taken over, so missing protected ordinals can recover after controller
+restart.
 
 During a Role rollout that changes `workerReplicas`, old and new instances can
 have different sizes. The shared PodGroup temporarily uses the smallest complete
