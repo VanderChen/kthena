@@ -117,6 +117,9 @@ func (c *Controller) syncPodGroup(ctx context.Context, r *round, owner metav1.Ow
 	if err != nil || !c.podGroups.Enabled(view) {
 		return 0, nil
 	}
+	if view, err = c.coordinatedPodGroupView(r, view, owner); err != nil {
+		return 0, fmt.Errorf("sync the PodGroup: %w", err)
+	}
 	after, err := c.podGroups.SyncPodGroup(ctx, view, owner, r.group.Name)
 	if err != nil {
 		return after, fmt.Errorf("sync the PodGroup: %w", err)

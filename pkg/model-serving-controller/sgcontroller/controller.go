@@ -51,6 +51,10 @@ type PodGroups interface {
 	Enabled(ms *workloadv1alpha1.ModelServing) bool
 	// SyncPodGroup creates or updates the PodGroup of a group.
 	SyncPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelServing, owner metav1.OwnerReference, name string) (time.Duration, error)
+	// PublishedMinRoleReplicas returns, by Role name, the minimum number of
+	// Role instances asked for by the PodGroup that SyncPodGroup would update
+	// with the same arguments. It returns nil when there is none.
+	PublishedMinRoleReplicas(ms *workloadv1alpha1.ModelServing, owner metav1.OwnerReference, name string) map[string]int32
 	// AnnotatePodWithPodGroup binds a Pod to the PodGroup of its group.
 	AnnotatePodWithPodGroup(pod *corev1.Pod, ms *workloadv1alpha1.ModelServing, groupName, taskName string)
 	GenerateTaskName(roleName string, roleIndex int) string

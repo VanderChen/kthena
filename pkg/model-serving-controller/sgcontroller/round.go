@@ -179,13 +179,17 @@ func (c *Controller) decide(obs observation, now time.Time) *round {
 		return r.steps[a].key.Index < r.steps[b].key.Index
 	})
 
+	// While Roles are rolled together, whether an instance may be created
+	// depends on what the other instances are: a creation rests on a direct
+	// read then, like a deletion does.
+	coordinating := r.plan.Coordination != nil && r.plan.Coordination.InProgress
 	for i := range r.steps {
 		s := &r.steps[i]
 		s.step = servinggroup.Transition(s.inst, s.want, scope)
 		// An adoption rests on a direct read as well: the cache may still show
 		// a group that was deleted and created again under the same name, and
 		// a Pod adopted by the object that is gone would be garbage collected.
-		r.confirm = r.confirm || s.step.Confirm || len(s.step.Adopt) > 0
+		r.confirm = r.confirm || s.step.Confirm || len(s.step.Adopt) > 0 || coordinating && len(s.step.Create) > 0
 		if s.step.FailGroup != "" && r.fail == nil {
 			r.fail = &servinggroup.ConditionChange{
 				Reason:  s.step.FailGroup,

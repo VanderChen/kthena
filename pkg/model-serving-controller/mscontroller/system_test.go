@@ -90,6 +90,9 @@ func (noPodGroups) Enabled(*workloadv1alpha1.ModelServing) bool { return false }
 func (noPodGroups) SyncPodGroup(context.Context, *workloadv1alpha1.ModelServing, metav1.OwnerReference, string) (time.Duration, error) {
 	return 0, nil
 }
+func (noPodGroups) PublishedMinRoleReplicas(*workloadv1alpha1.ModelServing, metav1.OwnerReference, string) map[string]int32 {
+	return nil
+}
 func (noPodGroups) AnnotatePodWithPodGroup(*corev1.Pod, *workloadv1alpha1.ModelServing, string, string) {
 }
 func (noPodGroups) GenerateTaskName(roleName string, roleIndex int) string {

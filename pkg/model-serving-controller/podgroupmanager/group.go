@@ -95,12 +95,9 @@ func (m *Manager) SyncPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelSe
 	}
 
 	updated := current.DeepCopy()
-	controller := metav1.GetControllerOfNoCopy(current)
-	switch {
+	switch controller := metav1.GetControllerOfNoCopy(current); {
 	case controller != nil && controller.UID == owner.UID:
-	case controller != nil && controller.UID == ms.UID,
-		controller == nil && current.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name &&
-			current.Labels[workloadv1alpha1.GroupNameLabelKey] == name:
+	case handedOver(current, ms, name):
 		updated.OwnerReferences = withController(current.OwnerReferences, owner)
 	default:
 		return enqueueAfter, fmt.Errorf("%w: PodGroup %s/%s is not controlled by ServingGroup %s with UID %s", ErrNameOccupied, ms.Namespace, name, owner.Name, owner.UID)
@@ -116,6 +113,42 @@ func (m *Manager) SyncPodGroup(ctx context.Context, ms *workloadv1alpha1.ModelSe
 	}
 	klog.V(2).Infof("Updated PodGroup %s/%s", ms.Namespace, name)
 	return 0, nil
+}
+
+// handedOver reports whether SyncPodGroup hands a PodGroup of that name over
+// to the group: the ModelServing controls it, or nothing does and it carries
+// the labels of the group.
+func handedOver(podGroup *schedulingv1beta1.PodGroup, ms *workloadv1alpha1.ModelServing, name string) bool {
+	if controller := metav1.GetControllerOfNoCopy(podGroup); controller != nil {
+		return controller.UID == ms.UID
+	}
+	return podGroup.Labels[workloadv1alpha1.ModelServingNameLabelKey] == ms.Name &&
+		podGroup.Labels[workloadv1alpha1.GroupNameLabelKey] == name
+}
+
+// PublishedMinRoleReplicas returns, by Role name, the minimum number of Role
+// instances the PodGroup that SyncPodGroup would update asks of the scheduler
+// now. It returns nil when there is no such PodGroup: none of that name is in
+// the cache, it is being deleted, or it belongs to something else.
+func (m *Manager) PublishedMinRoleReplicas(ms *workloadv1alpha1.ModelServing, owner metav1.OwnerReference, name string) map[string]int32 {
+	lister := m.GetPodGroupLister()
+	if lister == nil {
+		return nil
+	}
+	podGroup, err := lister.PodGroups(ms.Namespace).Get(name)
+	if err != nil || podGroup.DeletionTimestamp != nil {
+		return nil
+	}
+	if controller := metav1.GetControllerOfNoCopy(podGroup); (controller == nil || controller.UID != owner.UID) && !handedOver(podGroup, ms, name) {
+		return nil
+	}
+	minimums := map[string]int32{}
+	for _, subgroup := range podGroup.Spec.SubGroupPolicy {
+		if subgroup.MinSubGroups != nil {
+			minimums[subgroup.Name] = *subgroup.MinSubGroups
+		}
+	}
+	return minimums
 }
 
 // applyPodGroupSpec sets what a PodGroup takes from ms. The queue the server

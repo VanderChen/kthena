@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
@@ -203,13 +204,21 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	c.forget(group.UID, r.members)
 
 	if r.failure != nil {
+		// What an earlier round said about the coordinated rollout stays until
+		// a round can say something about it again, unless it was said about
+		// another spec.
+		coordination := meta.FindStatusCondition(group.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionCoordinatedRoleRolloutBlocked))
+		if coordination != nil && coordination.ObservedGeneration != group.Generation {
+			coordination = nil
+		}
 		status := servinggroup.ComputeStatus(servinggroup.StatusInput{
 			Group: group, Now: now, Members: r.members, Instances: r.instances,
 			Ledger: group.Status.RoleInstances, LayoutUnknown: true, Revisions: r.history,
 			// No plan says which update is under way. An instance with a Pod
 			// that is patched and not relabelled is in the middle of one.
-			Updating: servinggroup.UnfinishedUpdates(r.instances),
-			Failure:  &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
+			Updating:     servinggroup.UnfinishedUpdates(r.instances),
+			Coordination: coordination,
+			Failure:      &servinggroup.ConditionChange{Reason: ReasonError, Message: r.failure.Error()},
 		})
 		if _, err := c.writeStatus(ctx, group, status); err != nil {
 			return 0, err
@@ -267,6 +276,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		Group: group, Now: now, Members: r.members, Instances: r.instances,
 		Ledger: ledger, Wants: r.plan.Wants, Updating: r.updating, Revisions: r.history,
 		Fail: r.fail, RecreateRequired: r.recreate, DrainBlocked: drainBlocked,
+		Coordination:   r.plan.Coordination.Condition(),
 		PendingCreates: pending,
 		// First the status says that members are being created, then the first
 		// one is. The ModelServing controller changes the revision of a group

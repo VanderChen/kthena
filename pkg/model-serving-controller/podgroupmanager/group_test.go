@@ -19,6 +19,7 @@ package podgroupmanager
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	apiextfake "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/fake"
@@ -228,5 +229,53 @@ func TestSyncPodGroupWithoutVolcano(t *testing.T) {
 	}
 	if retry, err := manager.SyncPodGroup(context.Background(), ms, groupOwner(), "test-ms-0"); err != nil || retry != 0 || len(client.Actions()) != 0 {
 		t.Errorf("SyncPodGroup() = %v, %v with writes %v, want nothing", retry, err, client.Actions())
+	}
+}
+
+// The minimum a PodGroup asks for is read from the PodGroup SyncPodGroup
+// would update, and from no other.
+func TestPublishedMinRoleReplicas(t *testing.T) {
+	ms := newMinimalMS("")
+	ms.UID = "ms-uid"
+	subgroups := func(podGroup *schedulingv1beta1.PodGroup) {
+		podGroup.Spec.SubGroupPolicy = []schedulingv1beta1.SubGroupPolicySpec{
+			{Name: "prefill", MinSubGroups: ptr.To[int32](4)}, {Name: "decode", MinSubGroups: ptr.To[int32](6)}, {Name: "unset"},
+		}
+	}
+	published := map[string]int32{"prefill": 4, "decode": 6}
+	tests := []struct {
+		name   string
+		cached *schedulingv1beta1.PodGroup
+		want   map[string]int32
+	}{
+		{name: "none"},
+		{name: "controlled by the group", cached: existingPodGroup(subgroups), want: published},
+		{name: "controlled by the ModelServing: it is handed over",
+			cached: existingPodGroup(subgroups, controlledBy(workloadv1alpha1.ModelServingKind.Kind, "test-ms", "ms-uid")), want: published},
+		{name: "without a controller, with the labels of the group: it is handed over",
+			cached: existingPodGroup(subgroups, func(podGroup *schedulingv1beta1.PodGroup) { podGroup.OwnerReferences = nil }), want: published},
+		{name: "controlled by something else",
+			cached: existingPodGroup(subgroups, controlledBy(workloadv1alpha1.ServingGroupKind.Kind, "test-ms-0", "another-uid"))},
+		{name: "being deleted",
+			cached: existingPodGroup(subgroups, func(podGroup *schedulingv1beta1.PodGroup) { podGroup.DeletionTimestamp = ptr.To(metav1.Now()) })},
+		{name: "without subgroups", cached: existingPodGroup(), want: map[string]int32{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cached []*schedulingv1beta1.PodGroup
+			if tt.cached != nil {
+				cached = append(cached, tt.cached)
+			}
+			manager, _ := groupManager(cached, nil)
+			if got := manager.PublishedMinRoleReplicas(ms, groupOwner(), "test-ms-0"); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("published minimums = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	manager, _ := groupManager(nil, nil)
+	manager.PodGroupLister = nil
+	if got := manager.PublishedMinRoleReplicas(ms, groupOwner(), "test-ms-0"); got != nil {
+		t.Errorf("without a PodGroup cache: %v, want nil", got)
 	}
 }

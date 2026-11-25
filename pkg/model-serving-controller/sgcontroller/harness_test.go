@@ -125,12 +125,21 @@ type fakePodGroups struct {
 	writes func() int
 	// syncedAt holds that number for each call of SyncPodGroup.
 	syncedAt []int
+	// views holds the ModelServing of each call of SyncPodGroup.
+	views []*workloadv1alpha1.ModelServing
+	// published is what PublishedMinRoleReplicas returns.
+	published map[string]int32
+}
+
+func (f *fakePodGroups) PublishedMinRoleReplicas(*workloadv1alpha1.ModelServing, metav1.OwnerReference, string) map[string]int32 {
+	return f.published
 }
 
 func (f *fakePodGroups) Enabled(*workloadv1alpha1.ModelServing) bool { return f.enabled }
 
 func (f *fakePodGroups) SyncPodGroup(_ context.Context, ms *workloadv1alpha1.ModelServing, owner metav1.OwnerReference, name string) (time.Duration, error) {
 	f.synced = append(f.synced, fmt.Sprintf("%s by %s for scheduler %s", name, owner.UID, ms.Spec.SchedulerName))
+	f.views = append(f.views, ms)
 	if f.writes != nil {
 		f.syncedAt = append(f.syncedAt, f.writes())
 	}
@@ -163,6 +172,8 @@ type harness struct {
 	podGroups  *fakePodGroups
 	// recorder, when set, receives the events of the controller.
 	recorder record.EventRecorder
+	// restarts makes quiesce run every round with a new controller.
+	restarts bool
 }
 
 func newHarness(t *testing.T, objects ...runtime.Object) *harness {
