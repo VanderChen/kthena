@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
@@ -57,6 +58,17 @@ const (
 	ModelBoosterController = "modelbooster"
 	AutoscalerController   = "autoscaler"
 )
+
+// ready reports that this process can take over from its predecessor.
+var ready atomic.Bool
+
+// Ready reports whether the process is ready: the ModelServing controllers
+// are not enabled, or the API server serves ServingGroups. It does not depend
+// on holding the lease. While a process is not ready, a rolling update of the
+// Deployment keeps the Pod of the earlier version, which goes on working: a
+// CustomResourceDefinition that was not installed delays the upgrade and
+// stops nothing.
+func Ready() bool { return ready.Load() }
 
 func SetupController(ctx context.Context, cc Config) {
 	config, err := kube.BuildConfig(cc.MasterURL, cc.Kubeconfig)
@@ -106,6 +118,16 @@ func SetupController(ctx context.Context, cc Config) {
 				ac = autoscaler.NewAutoscaleController(kubeClient, client, cc.AutoscalingSyncPeriodSeconds)
 			}
 		}
+	}
+
+	if msm == nil {
+		ready.Store(true)
+	} else {
+		go func() {
+			if msm.WaitForServingGroups(ctx) == nil {
+				ready.Store(true)
+			}
+		}()
 	}
 
 	startControllers := func(ctx context.Context) {

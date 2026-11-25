@@ -42,7 +42,7 @@ func managerPod(namespace, name string, mutate ...func(*corev1.Pod)) *corev1.Pod
 }
 
 func TestPredecessors(t *testing.T) {
-	current := func(pod *corev1.Pod) { pod.Labels[ServingGroupControllerLabel] = "true" }
+	current := func(pod *corev1.Pod) { pod.Labels[ControllerProtocolLabel] = ControllerProtocolServingGroup }
 	phase := func(phase corev1.PodPhase) func(*corev1.Pod) {
 		return func(pod *corev1.Pod) { pod.Status.Phase = phase }
 	}

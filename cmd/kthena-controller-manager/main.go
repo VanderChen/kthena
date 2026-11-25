@@ -238,6 +238,19 @@ func setupWebhook(ctx context.Context, wc webhookConfig) error {
 		}
 	})
 
+	// Ready is not healthy: a process that cannot work yet must not be
+	// restarted, and must not take the place of one that works.
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if !controller.Ready() {
+			http.Error(w, "the ServingGroup CustomResourceDefinition is not served", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		if _, err := w.Write([]byte("ok")); err != nil {
+			klog.Errorf("failed to write readiness check response: %v", err)
+		}
+	})
+
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", wc.port),
 		Handler:      mux,

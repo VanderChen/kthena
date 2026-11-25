@@ -16,10 +16,11 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/component: kthena-controller-manager
-        # Tells this version from one that does not know ServingGroup objects.
-        # The two must not work at the same time: this one waits for the other
-        # to be gone before it starts its controllers.
-        workload.serving.volcano.sh/servinggroup-controller: "true"
+        # How the ModelServing controller keeps the state of a ModelServing: in
+        # ServingGroup objects. A controller manager without this label keeps
+        # it in memory; the two must not work at the same time, so this one
+        # waits for the other to be gone before it starts its controllers.
+        modelserving.volcano.sh/controller-protocol: servinggroup
         {{- include "kthena.labels" . | nindent 8 }}
     spec:
       containers:
@@ -73,9 +74,11 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 10
+          # Not ready while the ServingGroup CustomResourceDefinition is not
+          # served: the Pod of the earlier version then stays and keeps working.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: 8443
               scheme: HTTPS
             initialDelaySeconds: 5

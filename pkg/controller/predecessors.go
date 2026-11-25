@@ -20,6 +20,7 @@ import (
 	"context"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -32,14 +33,18 @@ import (
 )
 
 const (
-	// ServingGroupControllerLabel is carried by the Pods of a controller
-	// manager whose ModelServing controller works with ServingGroup objects.
-	// The Pod template of the Deployment sets it.
-	ServingGroupControllerLabel = "workload.serving.volcano.sh/servinggroup-controller"
+	// ControllerProtocolLabel is carried by the Pods of the controller manager
+	// and names the way its ModelServing controller keeps the state of a
+	// ModelServing. ControllerProtocolServingGroup: in ServingGroup objects. A
+	// Pod without the label keeps it in memory. The label names the protocol,
+	// not the version: a later version that works the same way carries the
+	// same value and is not kept waiting.
+	ControllerProtocolLabel        = "modelserving.volcano.sh/controller-protocol"
+	ControllerProtocolServingGroup = "servinggroup"
 
 	componentLabel    = "app.kubernetes.io/component"
 	componentManager  = "kthena-controller-manager"
-	predecessorPeriod = 15 * time.Second
+	predecessorPeriod = 5 * time.Second
 )
 
 // A controller manager from before ServingGroup objects owns the Pods of a
@@ -50,7 +55,7 @@ const (
 // cannot be what keeps them apart: this process checks for itself.
 
 // predecessors returns the names of the Pods of the controller manager in
-// namespace that run and do not carry the ServingGroup controller label.
+// namespace that run and do not keep their state in ServingGroup objects.
 func predecessors(ctx context.Context, kube kubernetes.Interface, namespace, self string) ([]string, error) {
 	pods, err := kube.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: componentLabel + "=" + componentManager})
 	if err != nil {
@@ -59,7 +64,7 @@ func predecessors(ctx context.Context, kube kubernetes.Interface, namespace, sel
 	var names []string
 	for i := range pods.Items {
 		pod := &pods.Items[i]
-		if pod.Name == self || pod.Labels[ServingGroupControllerLabel] == "true" {
+		if pod.Name == self || pod.Labels[ControllerProtocolLabel] == ControllerProtocolServingGroup {
 			continue
 		}
 		// A Pod that is terminating still runs until it is gone.
@@ -92,7 +97,7 @@ func waitForPredecessors(ctx context.Context, kube kubernetes.Interface) error {
 		return nil
 	}
 	reported := ""
-	return wait.PollUntilContextCancel(ctx, 2*time.Second, true, func(ctx context.Context) (bool, error) {
+	return wait.PollUntilContextCancel(ctx, predecessorPeriod, true, func(ctx context.Context) (bool, error) {
 		names, err := predecessors(ctx, kube, namespace, self)
 		if err != nil {
 			klog.ErrorS(err, "Cannot tell whether a controller manager of an earlier version still runs; the ModelServing controllers do not start")
@@ -101,12 +106,35 @@ func waitForPredecessors(ctx context.Context, kube kubernetes.Interface) error {
 		if len(names) == 0 {
 			return true, nil
 		}
-		if current := names[0]; current != reported {
+		if current := strings.Join(names, ","); current != reported {
 			klog.InfoS("A controller manager of an earlier version still runs; the ModelServing controllers start when it is gone", "pods", names)
+			reportWaiting(ctx, kube, namespace, self, current)
 			reported = current
 		}
 		return false, nil
 	})
+}
+
+// reportWaiting records on the Pod of this process whom it waits for, for
+// whoever wonders why a new controller manager does nothing.
+func reportWaiting(ctx context.Context, kube kubernetes.Interface, namespace, self, predecessors string) {
+	pod, err := kube.CoreV1().Pods(namespace).Get(ctx, self, metav1.GetOptions{})
+	if err != nil {
+		return
+	}
+	now := metav1.NewTime(time.Now())
+	_, err = kube.CoreV1().Events(namespace).Create(ctx, &corev1.Event{
+		ObjectMeta:     metav1.ObjectMeta{Namespace: namespace, GenerateName: self + "."},
+		InvolvedObject: corev1.ObjectReference{Kind: "Pod", APIVersion: "v1", Namespace: namespace, Name: pod.Name, UID: pod.UID},
+		Type:           corev1.EventTypeNormal,
+		Reason:         "WaitingForPredecessor",
+		Message:        "The ModelServing controllers start when the controller manager of the earlier version is gone: " + predecessors,
+		Source:         corev1.EventSource{Component: componentManager},
+		FirstTimestamp: now, LastTimestamp: now, Count: 1,
+	}, metav1.CreateOptions{})
+	if err != nil {
+		klog.V(2).InfoS("Cannot record an event on the Pod of this process", "err", err)
+	}
 }
 
 // exitOnPredecessor ends the process when a controller manager of an earlier

@@ -1,0 +1,22 @@
+{{- /*
+Helm installs the CustomResourceDefinitions of crds/ when a release is
+installed and never afterwards. An upgrade from a version without ServingGroup
+objects therefore needs them applied by hand first:
+
+  kubectl apply --server-side -f charts/kthena/charts/workload/crds/
+
+Without the ServingGroup definition the new controller manager does not become
+ready and the old one keeps working, so nothing breaks; but the upgrade would
+sit there. This stops it at the start instead, with the remedy.
+
+lookup returns nothing where the cluster is not asked (helm template, most
+GitOps renderers). The check only fails when the cluster answers, which the
+namespace of the release shows, and the definition is not there.
+*/ -}}
+{{- if .Release.IsUpgrade }}
+{{- if lookup "v1" "Namespace" "" .Release.Namespace }}
+{{- if not (lookup "apiextensions.k8s.io/v1" "CustomResourceDefinition" "" "servinggroups.workload.serving.volcano.sh") }}
+{{- fail "The CustomResourceDefinition servinggroups.workload.serving.volcano.sh is not installed. helm upgrade does not install new CustomResourceDefinitions; apply the files of charts/kthena/charts/workload/crds/ first (kubectl apply --server-side -f <dir>), then upgrade again." }}
+{{- end }}
+{{- end }}
+{{- end }}

@@ -157,7 +157,7 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 // the definition there is no way of working that is safe, so the process
 // waits and says so rather than falling back to one.
 func (m *Manager) Run(ctx context.Context, workers int) {
-	if err := m.waitForServingGroups(ctx); err != nil {
+	if err := m.WaitForServingGroups(ctx); err != nil {
 		return
 	}
 	for _, informer := range m.informers {
@@ -178,9 +178,11 @@ func (m *Manager) Run(ctx context.Context, workers int) {
 	<-ctx.Done()
 }
 
-// waitForServingGroups blocks until the ServingGroup CustomResourceDefinition
-// is established and a ServingGroup can be listed.
-func (m *Manager) waitForServingGroups(ctx context.Context) error {
+// WaitForServingGroups blocks until the ServingGroup CustomResourceDefinition
+// is established and a ServingGroup can be listed. The process is ready to
+// take over from its predecessor once it returns nil, whether or not it holds
+// the lease.
+func (m *Manager) WaitForServingGroups(ctx context.Context) error {
 	reported := false
 	return wait.PollUntilContextCancel(ctx, 5*time.Second, true, func(ctx context.Context) (bool, error) {
 		_, err := m.kthena.WorkloadV1alpha1().ServingGroups(metav1.NamespaceAll).List(ctx, metav1.ListOptions{Limit: 1})
