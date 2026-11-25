@@ -27,6 +27,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/inplace"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
 
 // DefaultProgressDeadline is how long an in-place update may take when the
@@ -220,6 +221,12 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 	// another revision is not being updated. reverted: the unit went back to
 	// the revision a Pod is labelled with after its images were patched away.
 	stale, unpatched, reverted := false, false, false
+	// Of the unpatched Pods: differs, one whose Role the target renders
+	// differently; unread, one for which that cannot be told. A Pod that is
+	// neither is what the target renders, under the label of another revision:
+	// a rollout that replaces Role by Role leaves the Roles it does not
+	// change alone, labels included.
+	differs, unread := false, ""
 	for _, inst := range unit.Instances {
 		for _, member := range inst.Members {
 			if member.Membership != Owned {
@@ -238,6 +245,12 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 				reverted = reverted || revision == unit.Target
 			case revision != unit.Target:
 				unpatched = true
+				switch revisions.CompareRole(revision, unit.Target, member.Pod.Labels[workloadv1alpha1.RoleLabelKey]) {
+				case workload.Different:
+					differs = true
+				case workload.Unknown:
+					unread = fmt.Sprintf("revision %q of Pod %s, which cannot be resolved", revision, member.Pod.Name)
+				}
 			}
 		}
 	}
@@ -261,7 +274,17 @@ func PlanInPlace(unit InPlaceUnit, revisions Revisions) InPlaceStep {
 
 	if stale || unpatched {
 		if !unit.Allowed {
-			step.Obstacle = "the update method that takes effect is not InPlace"
+			switch {
+			case stale || differs:
+				step.Obstacle = "the update method that takes effect is not InPlace"
+			case unread != "":
+				// A revision that cannot be read is no reason to recreate.
+				step.Waiting = unread
+			default:
+				// Every Pod is what the target renders. Nothing is to be done
+				// about them, and no label is changed without an update.
+				return InPlaceStep{Revision: unit.Target}
+			}
 			return step
 		}
 		step.Patch, step.Obstacle, step.Waiting = checkInPlace(members, unit.Role, unit.Target, revisions)

@@ -17,11 +17,15 @@ limitations under the License.
 package mscontroller
 
 import (
+	"context"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -259,6 +263,184 @@ func TestRoleRollingUpdateOfOneRoleOfSeveral(t *testing.T) {
 	for name, pod := range uids("route") {
 		if routers[name] == pod {
 			t.Errorf("Pod %s of route was not replaced", name)
+		}
+	}
+}
+
+// The rollout strategy is changed while the groups run. Under
+// RoleRollingUpdate the spec of a group names no revision of its own; under
+// ServingGroupRollingUpdate it has to. Changing the strategy replaces nothing
+// that is at the target, and the next rollout goes by the new strategy.
+func TestTheRolloutStrategyIsChanged(t *testing.T) {
+	router := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles = append(ms.Spec.Template.Roles, workloadv1alpha1.Role{
+			Name: "route", Replicas: ptr.To[int32](1), EntryTemplate: podTemplate("route:v1"),
+		})
+	}
+	byGroups := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+			Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt32(1))},
+		}
+	}
+	byRoles := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+	}
+	const done = "replicas=2 updated=2 current=2 available=2 Available"
+	// images returns the images the Pods of the serve Role run.
+	images := func(s *system) string {
+		seen := map[string]bool{}
+		for _, pod := range s.pods() {
+			if pod.Labels[workloadv1alpha1.RoleLabelKey] == "serve" {
+				seen[pod.Spec.Containers[0].Image] = true
+			}
+		}
+		var out []string
+		for image := range seen {
+			out = append(out, image)
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
+	}
+	groupUIDs := func(s *system) map[string]types.UID {
+		out := map[string]types.UID{}
+		for _, group := range s.groups() {
+			out[group.Name] = group.UID
+		}
+		return out
+	}
+	settled := func(t *testing.T, s *system, step string) {
+		t.Helper()
+		if got := s.counts() + " " + s.condition(); got != done {
+			t.Fatalf("%s: status = %s, want %s", step, got, done)
+		}
+		for _, group := range s.groups() {
+			if meta.IsStatusConditionTrue(group.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionRecreateRequired)) {
+				t.Errorf("%s: group %s asks to be recreated", step, group.Name)
+			}
+		}
+	}
+
+	t.Run("to whole groups, after one Role of two was rolled", func(t *testing.T) {
+		s := newSystem(t, modelServing(roleRolling(), router))
+		s.settle()
+		// The Pods of route keep the label of the first revision.
+		s.update(setImage("model:v2"))
+		s.settle()
+		settled(t, s, "rolled Role by Role")
+		pods, groups := s.podUIDs(), groupUIDs(s)
+
+		s.update(byGroups)
+		s.settle()
+		settled(t, s, "after the change")
+		if after := s.podUIDs(); !reflect.DeepEqual(after, pods) {
+			t.Errorf("the change of the strategy replaced Pods: %v, before %v", after, pods)
+		}
+		target := s.modelServing().Status.UpdateRevision
+		for _, group := range s.groups() {
+			if group.Spec.Revision != target || group.Spec.TargetRevision != "" {
+				t.Errorf("group %s: revision %q, targetRevision %q; want revision %q alone", group.Name, group.Spec.Revision, group.Spec.TargetRevision, target)
+			}
+		}
+
+		// The next rollout replaces whole groups.
+		s.update(setImage("model:v3"))
+		s.settle()
+		settled(t, s, "rolled by groups")
+		if got := images(s); got != "model:v3" {
+			t.Errorf("images after the rollout by groups: %s", got)
+		}
+		for name, uid := range groupUIDs(s) {
+			if uid == groups[name] {
+				t.Errorf("group %s was not replaced by a rollout of whole groups", name)
+			}
+		}
+	})
+
+	t.Run("to Role by Role", func(t *testing.T) {
+		s := newSystem(t, modelServing(roleRolling(), router, byGroups))
+		s.settle()
+		settled(t, s, "created")
+		pods, groups := s.podUIDs(), groupUIDs(s)
+
+		s.update(byRoles)
+		s.settle()
+		settled(t, s, "after the change")
+		if after := s.podUIDs(); !reflect.DeepEqual(after, pods) {
+			t.Errorf("the change of the strategy replaced Pods: %v, before %v", after, pods)
+		}
+		target := s.modelServing().Status.UpdateRevision
+		for _, group := range s.groups() {
+			if group.Spec.Revision != "" || group.Spec.TargetRevision != target {
+				t.Errorf("group %s: revision %q, targetRevision %q; want targetRevision %q alone", group.Name, group.Spec.Revision, group.Spec.TargetRevision, target)
+			}
+		}
+
+		// The next rollout replaces Role instances and no group.
+		s.update(setImage("model:v2"))
+		s.settle()
+		settled(t, s, "rolled Role by Role")
+		if got := images(s); got != "model:v2" {
+			t.Errorf("images after the rollout Role by Role: %s", got)
+		}
+		if after := groupUIDs(s); !reflect.DeepEqual(after, groups) {
+			t.Errorf("groups were replaced by a rollout Role by Role: %v, before %v", after, groups)
+		}
+	})
+
+	t.Run("to whole groups, in the middle of a rollout Role by Role", func(t *testing.T) {
+		s := newSystem(t, modelServing(roleRolling(), router))
+		s.settle()
+		s.stuck = func(pod *corev1.Pod) bool { return pod.Spec.Containers[0].Image == "model:v2" }
+		s.update(setImage("model:v2"))
+		s.settle()
+		if got := images(s); got != "model:v1,model:v2" {
+			t.Fatalf("in the middle of the rollout: %s", got)
+		}
+
+		// The groups run two revisions each. They are rolled as groups now.
+		s.stuck = nil
+		s.invariant = func() {
+			if len(s.groups()) > 2 {
+				t.Fatalf("%d groups exist: %s", len(s.groups()), s.summary())
+			}
+		}
+		s.update(byGroups)
+		s.settle()
+		s.invariant = nil
+		settled(t, s, "after the change")
+		if got := images(s); got != "model:v2" {
+			t.Errorf("images after the change: %s", got)
+		}
+		target := s.modelServing().Status.UpdateRevision
+		for _, group := range s.groups() {
+			if group.Spec.Revision != target {
+				t.Errorf("group %s: revision %q, want %q", group.Name, group.Spec.Revision, target)
+			}
+		}
+	})
+}
+
+// The generation a spec was derived from keeps a controller with an old view
+// from undoing what a newer one handed down. A number that is ahead of the
+// ModelServing as the API server has it was not handed down by anyone: it
+// does not keep the group from being written for good.
+func TestASourceGenerationFromNowhereDoesNotStopTheHandDown(t *testing.T) {
+	s := newSystem(t, modelServing())
+	s.settle()
+	group := s.groups()[0]
+	group.Spec.SourceGeneration = 1000
+	if _, err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Update(context.Background(), group, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.RecoveryPolicy = workloadv1alpha1.NoneRestartPolicy })
+	s.settle()
+	generation := s.modelServing().Generation
+	for _, group := range s.groups() {
+		if group.Spec.RecoveryPolicy != workloadv1alpha1.NoneRestartPolicy || group.Spec.SourceGeneration != generation {
+			t.Errorf("group %s: recoveryPolicy %q from generation %d; want None from generation %d",
+				group.Name, group.Spec.RecoveryPolicy, group.Spec.SourceGeneration, generation)
 		}
 	}
 }

@@ -66,6 +66,11 @@ type round struct {
 	// gated reports that workloads of an earlier version are still being
 	// taken over: group objects are created for them and nothing else is rolled.
 	gated bool
+	// direct reports that the round was planned on a ModelServing read from
+	// the API server. upToDate remembers whether the cached one is what the
+	// API server has (see isCurrent).
+	direct   bool
+	upToDate *bool
 }
 
 // writes reports whether the round has a write to a group to issue.
@@ -119,6 +124,7 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 		if r, err = c.plan(ctx, direct, groups); err != nil {
 			return 0, err
 		}
+		r.direct = true
 	}
 
 	failure := c.execute(ctx, r)
@@ -402,15 +408,30 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 // handed down.
 func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]bool) error {
 	var failures []error
-	for _, g := range r.view.groups {
+	for i := range r.view.groups {
+		g := &r.view.groups[i]
 		group := g.object
-		if g.unit.Terminating || touched[g.ordinal] || group.Spec.SourceGeneration > r.ms.Generation {
+		if g.unit.Terminating || touched[g.ordinal] {
 			continue
 		}
-		if r.handedDown(group) {
+		// A spec derived from a later generation was handed down by a
+		// controller that knew more. When this round knows the ModelServing as
+		// the API server has it, there is no later generation: the number was
+		// put there by something else, and the group would never be written again.
+		if group.Spec.SourceGeneration > r.ms.Generation && !c.isCurrent(ctx, r) {
 			continue
 		}
-		desired := workload.GroupSpec(r.ms, r.settings(group.Spec.Revision))
+		revision, ok := r.revisionOf(g)
+		if !ok {
+			continue
+		}
+		desired := workload.GroupSpec(r.ms, r.settings(revision))
+		// The generation it was derived from changes with every change of the
+		// ModelServing. It is only written along with something else.
+		desired.SourceGeneration = group.Spec.SourceGeneration
+		if apiequality.Semantic.DeepEqual(desired, group.Spec) {
+			continue
+		}
 		desired.SourceGeneration = r.ms.Generation
 		updated := group.DeepCopy()
 		updated.Spec = desired
@@ -429,6 +450,50 @@ func (r *round) handedDown(group *workloadv1alpha1.ServingGroup) bool {
 	desired := workload.GroupSpec(r.ms, r.settings(group.Spec.Revision))
 	desired.SourceGeneration = group.Spec.SourceGeneration
 	return apiequality.Semantic.DeepEqual(desired, group.Spec)
+}
+
+// isCurrent reports whether the ModelServing of the round is the one the API
+// server has. It is asked there at most once in a round.
+func (c *Controller) isCurrent(ctx context.Context, r *round) bool {
+	if r.direct {
+		return true
+	}
+	if r.upToDate == nil {
+		direct, err := c.kthena.WorkloadV1alpha1().ModelServings(r.ms.Namespace).Get(ctx, r.ms.Name, metav1.GetOptions{})
+		upToDate := err == nil && direct.UID == r.ms.UID && direct.Generation == r.ms.Generation
+		r.upToDate = &upToDate
+	}
+	return *r.upToDate
+}
+
+// revisionOf returns the revision a group runs as a whole, for its spec. It
+// is the one the spec has. Under RoleRollingUpdate the spec has none; a group
+// that comes from there, because the rollout strategy was changed, gets the
+// revision its Pods run. ok is false while that cannot be told: the spec of
+// the group is then left as it is, for an empty revision would be one that no
+// rollout ever replaces.
+func (r *round) revisionOf(g *groupState) (revision string, ok bool) {
+	group := g.object
+	if group.Spec.Revision != "" || r.view.spec.Mode != grouplevel.ModeServingGroup {
+		return group.Spec.Revision, true
+	}
+	switch {
+	case !g.unit.Observed && group.Status.ObservedGeneration > 0, !g.unit.Fresh:
+		// What the group reports is not about the Pods of now.
+		return "", false
+	case g.unit.Memberless:
+		// Created from the revision its ordinal has, like a new group.
+		if g.ordinal < r.view.spec.Partition && r.baseline != "" {
+			return r.baseline, true
+		}
+		return r.target, true
+	case group.Status.Revision != "":
+		return group.Status.Revision, true
+	}
+	// Its Roles were being rolled when the strategy changed, and its Pods run
+	// more than one revision. It is taken for the baseline, and replaced
+	// within the budget like any group that is not at the target.
+	return r.baseline, r.baseline != ""
 }
 
 // writeStatus writes the status of the ModelServing when it changed, and
