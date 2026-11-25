@@ -124,6 +124,10 @@ func init() {
 
 See `pkg/model-serving-controller/plugins/demo_plugin.go` for a reference implementation.
 
+### Hooks and ServingGroup Objects
+
+Every ServingGroup of a ModelServing is an [object with a controller of its own](./servinggroup.md), and four things follow for the author of a plugin. `OnModelServingSync` runs once in every round of the ModelServing controller and, in addition, once in every round of each ServingGroup, so the number of calls grows with the number of groups; a blocking result, an error without `Continue`, ends the round of the ModelServing before anything is planned and lets the round of a group write only the status of the group, and the group asks again after `RequeueAfter` when the result sets it. A failing `OnRoleDelete` holds up one Role instance, not the ModelServing: the instance is not created again and its ServingGroup has the condition `DrainBlocked` until the hook succeeds, while other Role instances and other groups go on; when a whole ServingGroup is deleted, the hook is only attempted, and only for a group that is deleted with foreground propagation, so it can run more than once or not at all. `OnPodReady` is called once for a Pod by a controller process: after a restart of the controller manager or a change of the leader it is called again for the Pods that are ready. Resources that a plugin creates for a Role instance must be controlled by `HookRequest.Owner`, the ServingGroup of the instance, so that they are garbage-collected with the group; `HookRequest.Generation` is the generation of the instance, and `OnRoleDelete` removes what was made for that generation or an earlier one.
+
 ### Using Plugins
 
 Kthena ships with a built-in demo plugin `demo-pod-tweaks` that can set `runtimeClassName`, add annotations, and inject environment variables. Use it to validate the plugin flow before developing your own.

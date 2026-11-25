@@ -13,7 +13,7 @@ The commands assume the release name `kthena` and the namespace `kthena-system`,
 - **Pods are not recreated and not restarted.** They keep their names, UIDs and restart counts.
 - The controller owner of every Pod changes from the ModelServing to a new `ServingGroup` object with the name of the group, for example `sample-0`. Pods also get the label `modelserving.volcano.sh/instance-generation: "0"`.
 - PodGroups and the headless Services of the `headless-service` plugin keep their UIDs. Their owner changes to the ServingGroup as well.
-- The `status` of the ModelServing keeps its counts and revisions.
+- The `status` of the ModelServing is left as the earlier version wrote it while the ModelServing is taken over: the counts, the conditions and `status.observedGeneration` do not change, and the `Available` condition does not turn `False`. The status is computed again once every group has reported.
 - A rolling update that was stopped before the upgrade, for example by `partition`, is still stopped afterwards. A rolling update that was in progress continues after the take-over.
 
 Only metadata is written. The kubelet does not act on owner references, so containers are not affected.
@@ -45,7 +45,7 @@ The check changes nothing. It sends one server-side dry-run patch per ModelServi
 
 ### Check the Requirements
 
-- **Every ModelServing is reconciled.** `status.observedGeneration` equals `metadata.generation`:
+- **Every ModelServing is reconciled.** `status.observedGeneration` equals `metadata.generation`. The take-over leaves `status.observedGeneration` as it is, so a ModelServing that is behind before the upgrade stays behind until it is taken over:
 
   ```sh
   kubectl get modelservings -A \
@@ -163,7 +163,7 @@ This is what happens, in order:
      | grep "controllers started"
    ```
 
-6. **Every ModelServing is taken over.** The controller creates a ServingGroup for every group that has Pods, with the revision of these Pods, and changes the owner of the Pods, the PodGroup and the Services. Progress is recorded in the annotation `modelserving.volcano.sh/servinggroup-adoption` of the ModelServing: `InProgress` while Pods owned by the ModelServing remain, `Done` when every Pod is owned by a ServingGroup. While the annotation is `InProgress`, the ModelServing is not rolled and not scaled.
+6. **Every ModelServing is taken over.** The controller creates a ServingGroup for every group that has Pods, with the revision of these Pods, and changes the owner of the Pods, the PodGroup and the Services. Progress is recorded in the annotation `modelserving.volcano.sh/servinggroup-adoption` of the ModelServing: `InProgress` while Pods owned by the ModelServing remain, `Done` when every Pod is owned by a ServingGroup and every ServingGroup has reported its status. While the annotation is `InProgress`, the ModelServing is not rolled and not scaled, and its `status` does not move: the counts, the conditions and `status.observedGeneration` are the ones the earlier version wrote. A change that you make to the ModelServing in this time is acted on, and shows in `status.observedGeneration`, after the take-over.
 
 If the controller manager is restarted during the take-over, the next process continues it.
 
@@ -229,10 +229,13 @@ Apply the CRDs. The new process tries again every five seconds, becomes ready an
 - **The API client limits are higher.** The default is 50 queries per second with a burst of 100. Change them with `--kube-api-qps` and `--kube-api-burst`, or with the chart values `workload.controllerManager.kubeAPIQPS` and `workload.controllerManager.kubeAPIBurst`.
 - **`--workers` counts per controller.** The ModelServing controller and the ServingGroup controller each run that many workers (default 5).
 - **The ServiceAccount has a new name**, `kthena-controller-manager-servinggroup`. If you granted the old ServiceAccount, `kthena-controller-manager`, permissions of your own, grant them to the new one.
+- **The Pod template of the controller manager must carry the label `modelserving.volcano.sh/controller-protocol: servinggroup`.** The chart and the release manifest set it. If you deploy the controller manager from manifests of your own, put the label on the Pod template of the Deployment. A controller manager Pod without the label counts as a Pod of the earlier version, and the leader exits when it sees one. Every process also puts the label on its own Pod when it starts. Without the label on the template, a new replica has no label until its process has started, and the leader exits and waits each time the Deployment creates a Pod.
 
 ## Behaviour Changes
 
-Names of groups and Pods, labels, the ModelServing API, the counts in the status of the ModelServing, the meaning of `partition`, `maxUnavailable` and `maxSurge`, and what counts as a failed Pod are unchanged. `recoveryPolicy: None` and `restartGracePeriodSeconds: -1` keep their meaning.
+Names of groups and Pods, the ModelServing API, the definitions of the counts and of the `Available`, `Progressing` and `UpdateInProgress` conditions in the status of the ModelServing, the meaning of `partition`, `maxUnavailable` and `maxSurge`, and what counts as a failed Pod are unchanged. `recoveryPolicy: None` and `restartGracePeriodSeconds: -1` keep their meaning. Pods and headless Services keep their labels and get one more, `modelserving.volcano.sh/instance-generation`.
+
+The tables below list what changes.
 
 ### Recovery
 
@@ -250,23 +253,51 @@ The new controller handles the following cases differently from the earlier one.
 | Before | Now | Why |
 |---|---|---|
 | A group protected by `partition` that was not ready did not reduce the rollout budget. | It does: a rolling update does not take the number of ready groups below `replicas - maxUnavailable`, whichever group is not ready. | `maxUnavailable` is a limit for the whole ModelServing. |
-| With gaps in the group ordinals, the additional group of a `maxSurge` rollout could be created in a gap below `replicas`, without the surge mark. | Surge groups are always created at ordinals at or above `replicas`, and they carry the annotation `modelserving.volcano.sh/surge`. | A surge group is temporary and has to be recognisable to be removed. |
+| With gaps in the group ordinals, the additional group of a `maxSurge` rollout could be created in a gap below `replicas`, without the surge mark. | Surge groups are always created at ordinals at or above `replicas`. The ServingGroup carries the annotation `modelserving.volcano.sh/surge`, and its Pods carry a copy. When `replicas` grows to include the group, the annotation is removed from the ServingGroup and then from its Pods. | A surge group is temporary and has to be recognisable to be removed. |
 | Reducing `replicas` during a `maxSurge` rollout could remove a surge group. | Scale-down only selects regular groups. Surge groups are removed when the rollout ends. | Surge capacity belongs to the rollout, not to `replicas`. |
 | Replacing outdated groups and scaling down ran at the same time. | No group is replaced while a group removed by a scale-down still exists. | A group that is being deleted still counts until it is gone. |
-| `status.currentRevision` advanced when every group was updated and available. | It advances only when `partition` is 0 and no group has all its Roles at zero replicas. | A partition, or a group without Pods, does not show that the new revision works. |
+| `status.currentRevision` advanced when every group was updated and available. | It advances only when the rollout is complete: `partition` is 0 (under `RoleRollingUpdate`: no Role has a `partition`), `replicas` is greater than 0, exactly `replicas` groups exist and none of them is a surge group, every group runs the new revision and is ready, and no group has all its Roles at zero replicas. | A partition, a surge group that is still there, or a group without Pods does not show that the new revision works. |
+| Under `RoleRollingUpdate` with gang scheduling, when the revision that a Role instance runs could not be read, the PodGroup of the group was not updated and the rest of the reconcile went on. | The PodGroup is not updated, and the group creates and updates no Pod until the revision can be read. It still deletes what it has to delete. The ServingGroup reports `ReconcileFailed`; the message names the Role instance. | No Pod is created for a PodGroup whose layout is not known. |
+
+Under `RoleRollingUpdate`, the Role instances inside a group are planned by the same rules as the groups of a ModelServing, with `replicas`, `maxUnavailable`, `maxSurge` and `partition` of the Role in the place of those of the ModelServing. The first four rows of the table therefore hold for Role instances as well:
+
+- A Role instance below the `partition` of its Role that is not ready uses the `maxUnavailable` of the Role.
+- Surge instances are created at indexes at or above the `replicas` of the Role, and their Pods carry the annotation `modelserving.volcano.sh/surge: role`.
+- A scale-down of a Role does not select a surge instance.
+- No Role instance is replaced while an instance removed by a scale-down still exists.
+
+The earlier version had separate code for Roles. In these four cases its behaviour can differ from what is described here.
 
 ### Operation
 
 | Before | Now | Why |
 |---|---|---|
-| Pods, PodGroups and headless Services were owned by the ModelServing. | They are owned by a ServingGroup, which is owned by the ModelServing. Labels are unchanged. | See [ServingGroup Objects](./servinggroup.md). |
-| Replacing a whole group recreated its Pods. The PodGroup and the Services were updated in place. | The ServingGroup, its PodGroup and its Services are recreated with the group: same names, new UIDs. | They are owned by the ServingGroup and deleted with it. |
+| Pods, PodGroups and headless Services were owned by the ModelServing. | They are owned by a ServingGroup, which is owned by the ModelServing. The labels they had are unchanged; Pods and headless Services get one more, `modelserving.volcano.sh/instance-generation`. | See [ServingGroup Objects](./servinggroup.md). |
+| Replacing a whole group deleted its Pods, its PodGroup and its headless Services and created them again. There was no object for the group. | The same happens, and the ServingGroup object is deleted and created again with them: same name, new UID, new age. The Pods, the PodGroup and the Services are deleted by the garbage collector. | They are owned by the ServingGroup and deleted with it. |
 | Leader election was off by default. A process that lost the lease kept running. | Leader election is on by default. A process that loses the lease exits. | Two controller processes must not reconcile at the same time. |
 | A PodDisruptionBudget with `maxUnavailable`, or with `minAvailable` as a percentage, took the expected number from the scale of the ModelServing, which counts groups. | It takes it from the scale of the ServingGroups, which counts Pods. Check the allowed disruptions of such budgets after the upgrade. See [PodDisruptionBudgets and Eviction](./servinggroup.md#poddisruptionbudgets-and-eviction). | The controller owner of the Pods is the ServingGroup. |
-| No condition said why a rollout does not proceed. | The ModelServing gets the condition `RolloutBlocked` with a reason. See [When a Rollout Waits](./servinggroup.md#when-a-rollout-waits). | |
+| No condition said why a rollout does not proceed. | The ModelServing gets the condition `RolloutBlocked` with a reason. See [When a Rollout Waits](./servinggroup.md#when-a-rollout-waits). Once a ModelServing had the condition, it keeps it with status `False` and reason `NotBlocked` when the rollout goes on. A ModelServing that was never blocked does not have the condition. | |
 | The API client used 5 queries per second with a burst of 10. | 50 and 100. | The controllers write the status of every group and read from the API server before they delete or create. |
 | The controller manager ran under the ServiceAccount `kthena-controller-manager`. | `kthena-controller-manager-servinggroup`. | A process of the earlier version that is still alive loses its credentials. |
-| Plugins: `OnRoleDelete` was the place to remove the resources of a Role instance. | It is still called when a Role instance is removed or recreated. When a whole group is deleted, the hook is not guaranteed to run: resources that a plugin creates must be owned by the ServingGroup, so that they are deleted with it. | A deleted group is cleaned up by the garbage collector. |
+| Plugins: `OnRoleDelete` was the place to remove the resources of a Role instance. While it failed, the whole ModelServing was not reconciled. | It is still called when a Role instance is removed or recreated. While it fails, only that Role instance is held up; its ServingGroup reports `DrainBlocked`. When a whole group is deleted, the hook is not guaranteed to run: resources that a plugin creates must be controlled by the ServingGroup (`HookRequest.Owner`), so that they are deleted with it. | A deleted group is cleaned up by the garbage collector. |
+| Plugins: `OnModelServingSync` ran once in every reconcile of the ModelServing. `OnPodReady` ran when the controller saw a Pod become ready. | `OnModelServingSync` also runs once in every round of every ServingGroup. `OnPodReady` runs once for a Pod in a controller process, and again after a restart of the controller manager or a change of the leader. See [Hooks and ServingGroup Objects](./modelserving-plugin-framework.md#hooks-and-servinggroup-objects). | The Pods are managed by the ServingGroup controller, which asks the hooks as well. |
+| A change of the annotation `scheduling.volcano.sh/queue-name` of a ModelServing did not start a reconcile. Like every update that left `spec` unchanged, it took effect with the next reconcile. | Every update of a ModelServing starts a round, also one that only changes labels or annotations. A new queue name reaches the PodGroups at once. | The queue is part of the `spec` of every ServingGroup. |
+| Removing `networkTopology` from a ModelServing without `gangPolicy.minRoleReplicas` deleted all its PodGroups. They were created again afterwards. | The PodGroups are updated in place and keep their UIDs. | The PodGroup of a group is brought in line with the group in every round. |
+| Users with the `edit` or `admin` role in a namespace could delete the Pods of a group. | They may also delete ServingGroups, which restarts all Pods of the group. See [RBAC](./servinggroup.md#rbac). | Deleting a ServingGroup is the way to have one group rebuilt. |
+| | `kubectl scale servinggroup` is accepted from a user who may update `servinggroups/scale`, and has no lasting effect: the ModelServing controller writes `spec.expectedPods` back. See [What You May and May Not Do](./servinggroup.md#what-you-may-and-may-not-do). | The `scale` subresource exists for PodDisruptionBudgets. |
+| With `--debug-port`, the path `/debug/modelserving/cache` returned the store that the controller kept in memory. | The path returns the ServingGroups of every ModelServing as the cache of the controllers holds them: name, UID, revisions, generations, conditions, Role instances and Pods. The JSON has another shape. | The controllers keep no store of their own. |
+
+### Status, Events and API
+
+| Before | Now | Why |
+|---|---|---|
+| `status.observedGeneration` equal to `metadata.generation` meant that the controller had already created or deleted the Pods for that generation. | It means that the ModelServing controller has seen the generation and handed the settings down to the ServingGroups. The groups act on them afterwards. After a change that is not a new revision, for example of the `replicas` of a Role, the ModelServing can still show `Available` with full counts for a moment. Wait for what you changed: for a new template, `status.updatedReplicas` and the `Available` condition; for any other change, the ServingGroups. Each ServingGroup reports the `spec` it acted on in `status.observedGeneration` and whether it is complete in the `Ready` condition. | Pods are created and deleted by the ServingGroup controller, after the ModelServing controller has written the `spec` of the group. |
+| `status.availableReplicas` was computed from the Pods in the same reconcile. | It counts the ServingGroups whose `Ready` condition is `True`. It follows a change of a Pod once the ServingGroup controller has written the status of the group. | Whether a group is ready is decided in one place, the ServingGroup. |
+| After a restart of the controller manager, `RoleRunning` was recorded again for every Role instance. | `RoleCreating`, `RoleRunning` and `RoleDeleting` keep their meaning and are recorded on the ModelServing when a Role instance enters the state. A new controller process does not record `RoleRunning` again for the instances it finds running. | The controller process remembers what it reported last. |
+| The warning event `DeletionIdentityChanged` was recorded when a Pod had been replaced under the same name while its group or Role instance was being deleted. | The event does not exist any more. | Every deletion applies only to the Pod that was read. A Pod that took its name is not touched. |
+| | New events on the ModelServing: `ServingGroupCreated`, `ServingGroupDeleted`, `OrdinalOccupied`, `PodNotTakenOver`, `RolledBack`. New events on the ServingGroup: `OwnerNotFound`, `StatusNotPersisted`. `PluginError`, `RevisionUnresolved` and the in-place update events are still recorded on the ModelServing. See [Events](./servinggroup.md#events). | |
+| Every update of a ModelServing was validated by the admission webhook. | An update that leaves `spec` unchanged, for example of labels or annotations, is admitted without validating the object. | The controller writes an annotation to every ModelServing, also to one that was stored before a validation rule existed. |
+| The Go type of `spec.template` in `pkg/apis/workload/v1alpha1` was `ServingGroup`. | It is `ServingGroupTemplate`; `ServingGroup` is the type of the new resource. The JSON and YAML form of a ModelServing is unchanged. Go code that imports the package has to follow the rename. | The kind needs the name. |
 
 ## Rolling Back
 
@@ -309,7 +340,7 @@ kubectl get events -A --field-selector reason=RolledBack
 kubectl -n kthena-system get events --field-selector reason=RollbackMode
 ```
 
-Every Pod is owned by its ModelServing again. This command must print nothing:
+Every Pod is owned by its ModelServing again. Pods and headless Services keep the label `modelserving.volcano.sh/instance-generation`; the earlier version ignores it. This command must print nothing:
 
 ```sh
 kubectl get pods -A -l modelserving.volcano.sh/name \
@@ -357,7 +388,8 @@ To stay on the new version after all, delete the ConfigMap before you install th
 | The new controller manager Pod restarts repeatedly. Its log says `A controller manager of an earlier version runs next to this one`. | A Pod of the earlier version appeared while the new version was working, for example because the Deployment was rolled back without the [rollback procedure](#rolling-back). | Remove the Pod of the earlier version, or follow the rollback procedure. |
 | The new version runs and takes nothing over. The ConfigMap `kthena-servinggroup-rollback` exists and has a `RollbackMode` event. | The rollback switch was left in place. | Delete the ConfigMap. |
 | The annotation of a ModelServing stays `InProgress`. | A Pod owned by the ModelServing is not taken over, or a ServingGroup does not report. | Run the owner check of [step 5](#5-verify) to find Pods that are still owned by the ModelServing. A Pod whose name is not the name of a member, `<group>-<role>-<instance>-<member>`, is never taken over: delete it, or remove its owner reference. Then look at the conditions of the ServingGroups (`ReconcileFailed`) and at the log of the controller manager. |
-| A ServingGroup has `ReconcileFailed` with reason `NameOccupied`. | A Pod with the name of a member exists and does not belong to the group. | Remove that Pod. See [Conditions](./servinggroup.md#conditions). |
+| A ServingGroup has `ReconcileFailed` with reason `NameOccupied`. | A Pod with the name of a member exists and does not belong to the group. Or Pods of an earlier ServingGroup object of the same name still exist, after that object was deleted in the background, which is the default of `kubectl delete`; the message says how many. | Remove the Pod that holds the name. Pods of an earlier object are deleted by the garbage collector: wait. See [Conditions](./servinggroup.md#conditions). |
+| During the upgrade, `status.observedGeneration` of a ModelServing stays below `metadata.generation`, or its conditions do not change. | The status of a ModelServing is not written while it is taken over. | Wait until the annotation is `Done`. See [step 4](#4-watch-the-take-over). |
 | The rollback does not finish: ServingGroups remain. | A ServingGroup that is being deleted cannot be handed back; the rollback waits until it is gone. Another cause is an error while changing owners. | Find the Pod of that group that does not terminate. Look for `hand back ServingGroup` in the log of the controller manager. |
 | After the upgrade a rolling update does not continue. | See the `RolloutBlocked` condition of the ModelServing. | [When a Rollout Waits](./servinggroup.md#when-a-rollout-waits). |
 

@@ -85,6 +85,7 @@ metadata:
     blockOwnerDeletion: true
 spec:
   revision: 79bdf4ffdf
+  targetRevision: 79bdf4ffdf
   baselineRevision: 79bdf4ffdf
   expectedPods: 3
   recoveryPolicy: RoleRecreate
@@ -119,7 +120,7 @@ status:
     generation: 1
 ```
 
-The `spec` is written by the ModelServing controller. It holds the revision of the group and the settings of the ModelServing that apply inside a group. It contains no Pod template: templates are read from the `ControllerRevision` of the revision.
+The `spec` is written by the ModelServing controller. It holds the revision of the group, the revision the rollout of the ModelServing moves to (`targetRevision`, the update revision of the ModelServing) and the settings of the ModelServing that apply inside a group. Under `ServingGroupRollingUpdate`, a group whose `revision` differs from `targetRevision` is at an earlier revision: it starts no update of its Pods. The ModelServing controller updates or replaces it within the rollout budget, unless `partition` protects it. Under `RoleRollingUpdate`, `revision` is empty and the Role instances are rolled to `targetRevision`. The `spec` contains no Pod template: templates are read from the `ControllerRevision` of the revision.
 
 The `status` is written by the ServingGroup controller:
 
@@ -146,9 +147,9 @@ The `status` is written by the ServingGroup controller:
 | `Ready` | `True` when every Role has its declared number of instances and every Pod of every instance is running and ready. A group whose Roles all have zero replicas is ready. | `AllInstancesReady`. `InstancesNotReady`: the message names an instance that is not ready or is being updated in place. `InstanceCountMismatch`: a Role has more or fewer instances than declared, as during Role scaling or a Role rolling update. `TemplateUnresolved`: the revision of the group cannot be read; the group then counts as ready when it has at least `spec.expectedPods` Pods and all of them are ready. | Look at the Pods of the group. |
 | `Failed` | The group is replaced as a whole. The condition never returns to `False`: the object is deleted and created again. | `MemberLost` and `MemberFaulty`, under `recoveryPolicy: ServingGroupRecreate`. `AllPodsLost`: under `ServingGroupRollingUpdate`, no Pod of the group is left. | Nothing. The ModelServing controller deletes the group once `Drained` is `True`. |
 | `Drained` | Present together with `Failed`. `True` when no Pod with a fault and no terminating Pod is left in the group, so that the remaining Pods may be deleted. | `NoFaultyMember`, `FaultyMembersRemain`. | If it stays `False`, a Pod of the group does not terminate. Look at that Pod. |
-| `RecreateRequired` | The group can only be brought to its revision by replacing it. It stays `True` until the group is replaced. | `InPlaceUpdateNotPossible`: an in-place update was requested and the Pods of the group cannot be updated in place. The message says why. | Nothing. The group is replaced within the rollout budget. See [Fallback to Recreate](./inplace-update.md#fallback-to-recreate). |
+| `RecreateRequired` | The group can only be brought to its revision by replacing it. Under `ServingGroupRollingUpdate` it stays `True` until the group is replaced. A group under `RoleRollingUpdate` does not have the condition; it is removed when the rollout strategy is changed to `RoleRollingUpdate`. | `InPlaceUpdateNotPossible`: the Pods of the group cannot be updated in place, or the group is updated by recreation and has Pods of another revision. The message says why. | Nothing. The group is replaced within the rollout budget. See [Fallback to Recreate](./inplace-update.md#fallback-to-recreate). |
 | `DrainBlocked` | A Role instance cannot be removed because the `OnRoleDelete` hook of a plugin keeps failing. The instance is not created again before the hook succeeds. | `RoleDeleteHookFailed`. The message carries the error of the hook. | Check the log of the controller manager and the resources of the plugin. |
-| `ReconcileFailed` | The last round of the ServingGroup controller for this group ended with an error. `Ready` is still reported from the Pods. The condition is removed when a round succeeds. | `NameOccupied`: a Pod with the name of a member exists and is not controlled by the group. `Error`: any other error; the message carries it. | For `NameOccupied`, remove the Pod that holds the name. The controller retries. |
+| `ReconcileFailed` | The last round of the ServingGroup controller for this group ended with an error. `Ready` is still reported from the Pods. The condition is removed when a round succeeds. | `NameOccupied`: an object with the name of a member Pod, of the PodGroup or of a Service of the group exists and is not controlled by the group. The same reason is reported while Pods of an earlier ServingGroup object of the same name still exist: the group creates no Pod until they are gone. `Error`: any other error; the message carries it. | For `NameOccupied`, remove the object that holds the name. Pods of an earlier object are deleted by the garbage collector: wait. The controller retries. |
 | `CoordinatedRoleRolloutBlocked` | Reported per group for a coordinated Role rolling update. See [`roleCoordination`](../reference/crd/workload.serving.volcano.sh.md#rolecoordination). | | |
 
 ### Role Instances
@@ -165,17 +166,63 @@ The `status` is written by the ServingGroup controller:
 
 ### Events
 
-The ModelServing controller records the creation and the deletion of groups as events on the ModelServing:
+Events about a group or a Role instance are recorded on the ModelServing, so that one command shows the history of the whole workload:
 
 ```sh
 kubectl describe modelserving gang
 ```
 
-| Event | Meaning |
-|---|---|
-| `ServingGroupCreated` | A ServingGroup was created. The message names the group, its revision and why: `regular` (a place below `replicas` is filled), `surge` (temporary capacity of a rolling update), `recover` (Pods of the group exist without the object). |
-| `ServingGroupDeleted` | A ServingGroup was deleted. The message names the group and why: `scale-down`, `replace` or `replace-notready` (rolling update), `failed` (recovery of the whole group), `reclaim-surge` (a surge group is removed), `memberless-out-of-range` or `empty-out-of-range` (a group without Pods at an ordinal at or above `replicas`). |
-| `OrdinalOccupied` | A ServingGroup object with the name of a group exists and is not controlled by this ModelServing. The group is not created until that object is gone. |
+Groups:
+
+| Event | Type | Meaning |
+|---|---|---|
+| `ServingGroupCreated` | Normal | A ServingGroup was created. The message names the group, its revision and why: `regular` (a place below `replicas` is filled), `surge` (temporary capacity of a rolling update), `recover` (Pods of the group exist without the object). |
+| `ServingGroupDeleted` | Normal | A ServingGroup was deleted. The message names the group and why: `scale-down`, `replace` or `replace-notready` (rolling update), `failed` (recovery of the whole group), `reclaim-surge` (a surge group is removed), `memberless-out-of-range` or `empty-out-of-range` (a group without Pods at an ordinal at or above `replicas`). |
+| `OrdinalOccupied` | Warning | A ServingGroup object with the name of a group exists and is not controlled by this ModelServing. The group is not created until that object is gone. |
+
+Role instances:
+
+| Event | Type | Meaning |
+|---|---|---|
+| `RoleCreating` | Normal | The Pods of a Role instance are being created, or a Pod of the instance is not ready. An instance whose Pods are updated in place is in this state until they are ready again. |
+| `RoleRunning` | Normal | Every Pod of the Role instance is ready. |
+| `RoleDeleting` | Normal | The Role instance is being removed: by a scale-down, a rolling update of the Role or a recovery. |
+
+An event is recorded when the instance enters the state, not in every round. The message names the instance and its group, for example `Role leader/leader-0 in ServingGroup gang-0 is now Running`. After a restart of the controller manager or a change of the leader, `RoleRunning` is not recorded again for the instances that are running.
+
+Rolling updates:
+
+| Event | Type | Meaning |
+|---|---|---|
+| `InPlaceUpdateStarted` | Normal | The images of the Pods of a group, or of a Role instance, were patched. See [In-place Update](./inplace-update.md). |
+| `InPlaceUpdateCompleted` | Normal | Every Pod of the group or of the Role instance runs the new revision and is ready. |
+| `InPlaceUpdateFallback` | Normal | A group or a Role instance is recreated instead of updated in place. The message says why. |
+| `InPlaceUpdateTimeout` | Warning | An in-place update did not finish within `progressDeadlineSeconds`. `recoveryPolicy` is applied to its Pods. |
+| `DependencyNotReady`, `MaxSkewLimitReached`, `OldVersionDependencyPresent`, `IncompatiblePartitions` | Warning | A coordinated Role rolling update waits. The event carries the reason and the message of the `CoordinatedRoleRolloutBlocked` condition of the ModelServing and is recorded when the condition changes. See [`roleCoordination`](../reference/crd/workload.serving.volcano.sh.md#rolecoordination). |
+| `ProgressAvailable`, `RolloutComplete` | Normal | The coordinated Role rolling update can go on, or is complete. |
+
+Failures:
+
+| Event | Type | Meaning |
+|---|---|---|
+| `PluginError` | Warning | The `OnPodCreate` hook of a plugin returned an error for a Pod that was to be created. The Pod is not created, and the ServingGroup reports `ReconcileFailed`. The message carries the error. |
+| `RevisionUnresolved` | Warning | A revision cannot be read or recorded. Either the `ControllerRevision` of the revision of a ServingGroup is missing, is not owned by the ModelServing or cannot be decoded; the message names the group, and the event is recorded once for a group and a revision. Or the revision of the current template of the ModelServing cannot be recorded. Nothing is created or replaced from such a revision until it can be read. A reduction of `replicas` is still carried out. |
+
+Upgrade and rollback (see [Upgrading to ServingGroup Objects](./servinggroup-upgrade.md)):
+
+| Event | Type | Meaning |
+|---|---|---|
+| `PodNotTakenOver` | Warning | A Pod is owned by the ModelServing and is not a member of one of its groups, for example a copy of a member Pod under another name. It is not taken over and not deleted. Recorded while the workloads of an earlier version are taken over. |
+| `RolledBack` | Normal | In rollback mode, the workloads were handed back to the ModelServing and its ServingGroup objects are gone. |
+
+Two events are recorded on the ServingGroup itself and show in `kubectl describe servinggroup`:
+
+| Event | Type | Meaning |
+|---|---|---|
+| `OwnerNotFound` | Warning | The ServingGroup is not controlled by a ModelServing, or its name is not `<modelserving>-<ordinal>`. The controller leaves such a group alone: it creates and deletes nothing for it. The event is not recorded for a group whose ModelServing is being deleted; the garbage collector deletes that group. |
+| `StatusNotPersisted` | Warning | The API server did not keep the status of the group as the controller wrote it. This happens when the `ServingGroup` CRD is older than the controller manager. The controller does not act on the group. Apply the CRDs of the installed version. |
+
+Two more events concern the controller manager, not a workload: `WaitingForPredecessor` on the controller manager Pod and `RollbackMode` on the rollback switch. See [Upgrading to ServingGroup Objects](./servinggroup-upgrade.md).
 
 ### When a Rollout Waits
 
@@ -253,7 +300,7 @@ kubectl delete servinggroup gang-0 --cascade=foreground
 
 The object stays, marked for deletion, until its Pods, Services and PodGroup are deleted. Then the ModelServing controller creates a ServingGroup with the same name and a new UID, and the group gets new Pods. The new group has the revision that its ordinal has now: the update revision, or the current revision when the ordinal is below `partition` under `ServingGroupRollingUpdate`. The deletion is not checked against `maxUnavailable`: the group is unavailable until its new Pods are ready.
 
-Without `--cascade=foreground`, `kubectl` removes the object at once and the garbage collector deletes the Pods afterwards. The result is the same. The new group can report `ReconcileFailed` until the objects of the old one are gone.
+Without `--cascade=foreground`, `kubectl` removes the object at once and the garbage collector deletes the Pods afterwards. The result is the same. The new ServingGroup creates no Pod while a Pod of the old object exists: it reports `ReconcileFailed` with reason `NameOccupied` until the last of them is gone.
 
 **Deleting with `--cascade=orphan` keeps the Pods.** The ModelServing controller creates the ServingGroup again and the new object adopts the Pods, the Services and the PodGroup that were left behind. Pods are not restarted. There is normally no reason to do this.
 
