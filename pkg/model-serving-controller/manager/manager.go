@@ -169,9 +169,23 @@ func New(kube kubernetes.Interface, kthena clientset.Interface, volcanoClient vo
 		return nil, fmt.Errorf("watch for the ModelServing controller: %w", err)
 	}
 	if rollbackSwitch != nil {
-		// Setting or removing the switch concerns every ModelServing.
-		all := func(any) { m.servings.EnqueueAll() }
-		if _, err := rollbackSwitch.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: all, DeleteFunc: all}); err != nil {
+		// Setting or removing the switch concerns every ModelServing. A
+		// controller that does nothing looks broken, so both say why.
+		set := func(obj any) {
+			klog.InfoS("Rollback mode is on: workloads are handed back to their ModelServings and nothing is reconciled",
+				"switch", mscontroller.RollbackSwitch)
+			if cm, ok := obj.(*corev1.ConfigMap); ok {
+				recorder.Event(cm, corev1.EventTypeWarning, "RollbackMode",
+					"ModelServings are not reconciled while this ConfigMap exists: their Pods are handed back so that "+
+						"a version without ServingGroup objects can be installed. Delete the ConfigMap to leave rollback mode.")
+			}
+			m.servings.EnqueueAll()
+		}
+		removed := func(any) {
+			klog.InfoS("Rollback mode is off: workloads are taken over again", "switch", mscontroller.RollbackSwitch)
+			m.servings.EnqueueAll()
+		}
+		if _, err := rollbackSwitch.AddEventHandler(cache.ResourceEventHandlerFuncs{AddFunc: set, DeleteFunc: removed}); err != nil {
 			return nil, fmt.Errorf("watch the rollback switch: %w", err)
 		}
 	}
