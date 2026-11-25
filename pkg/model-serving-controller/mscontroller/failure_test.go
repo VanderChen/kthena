@@ -107,3 +107,50 @@ func TestAWriteThatFailsEndsTheWritesOfThePlan(t *testing.T) {
 		})
 	}
 }
+
+// A round is planned on the ModelServing as it was read; its writes follow one
+// by one. When the cache shows, before a write, that the ModelServing has
+// changed since, the writes that are left are not issued: they were decided
+// for a spec that is no more, and a group created now would come from the
+// revision of before, right after the user asked for another. The next round
+// plans on the ModelServing as it is.
+func TestARoundStopsWritingWhenTheModelServingHasChanged(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		// behind is how many generations the round is behind the cache.
+		behind  int64
+		creates int
+	}{
+		{name: "planned on the ModelServing the cache shows", creates: 2},
+		{name: "planned on a ModelServing that has changed since", behind: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](1) }))
+			s.settle()
+			s.update(func(ms *workloadv1alpha1.ModelServing) { ms.Spec.Replicas = ptr.To[int32](3) })
+			caches, snapshot := s.caches()
+			s.ms.SetCaches(caches, snapshot.Listers().Services)
+
+			planned := s.modelServing()
+			planned.Generation -= tt.behind
+			r, err := s.ms.plan(context.Background(), planned, split(planned, caches.GroupsNamedAfter(testNamespace, testName)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.cluster.ResetWrites()
+			err = s.ms.execute(context.Background(), r)
+			if superseded := errors.Is(err, errSuperseded); superseded != (tt.behind > 0) {
+				t.Fatalf("execute = %v, want superseded = %t", err, tt.behind > 0)
+			}
+			creates := 0
+			for _, write := range s.cluster.Writes() {
+				if write.Verb == "create" && write.Resource == "servinggroups" {
+					creates++
+				}
+			}
+			if creates != tt.creates {
+				t.Errorf("%d groups created, want %d: %v", creates, tt.creates, s.cluster.Writes())
+			}
+		})
+	}
+}

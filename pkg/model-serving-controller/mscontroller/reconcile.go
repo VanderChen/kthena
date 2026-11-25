@@ -129,6 +129,13 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	}
 
 	failure := c.execute(ctx, r)
+	if errors.Is(failure, errSuperseded) {
+		// The change that superseded the round has put the ModelServing on
+		// the queue: the next round is planned on it. The status of this one
+		// would speak about a generation that is no more.
+		klog.V(2).InfoS("A round ends early: the ModelServing changed while it was carried out", "modelServing", klog.KObj(r.ms))
+		return 0, nil
+	}
 	status, blockedAfter, err := c.writeStatus(ctx, r)
 	if err != nil {
 		return 0, errors.Join(failure, err)
@@ -273,6 +280,9 @@ func (c *Controller) execute(ctx context.Context, r *round) error {
 	touched := map[int]bool{}
 	var failure error
 	for _, action := range r.actions {
+		if action.Kind != grouplevel.ActionWait && action.Kind != grouplevel.ActionAdvanceBaseline && c.superseded(r) {
+			return errSuperseded
+		}
 		var err error
 		switch action.Kind {
 		case grouplevel.ActionCreate:
@@ -295,7 +305,26 @@ func (c *Controller) execute(ctx context.Context, r *round) error {
 	if r.gated {
 		return failure
 	}
+	if c.superseded(r) {
+		return errors.Join(failure, errSuperseded)
+	}
 	return errors.Join(failure, c.handDown(ctx, r, touched))
+}
+
+// errSuperseded ends the writes of a round whose ModelServing has changed
+// since the round was planned.
+var errSuperseded = errors.New("the ModelServing changed while the round was carried out")
+
+// superseded reports whether the cache shows a newer generation of the
+// ModelServing than the one the round was planned on. A round is planned on
+// the ModelServing as it was read, and its writes follow one by one. A change
+// that is accepted in between does not undo a write that was issued; it does
+// stop the ones that are left, which were decided for a spec that is no more.
+// A group that would be created now would be created from the revision of
+// before, right after the user asked for another.
+func (c *Controller) superseded(r *round) bool {
+	cached, err := c.caches.ModelServing(r.ms.Namespace, r.ms.Name)
+	return err == nil && cached.UID == r.ms.UID && cached.Generation > r.ms.Generation
 }
 
 func (c *Controller) createGroup(ctx context.Context, r *round, action grouplevel.Action) error {
