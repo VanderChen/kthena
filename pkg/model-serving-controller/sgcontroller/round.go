@@ -23,6 +23,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
@@ -51,12 +52,15 @@ type instanceStep struct {
 // decided again on a direct read of the same objects decides the same.
 type round struct {
 	observation
-	history   *workload.History
-	members   []*corev1.Pod
-	instances []servinggroup.Instance
-	strays    []*corev1.Pod
-	plan      servinggroup.RolePlan
-	steps     []instanceStep
+	history *workload.History
+	members []*corev1.Pod
+	// predecessors are the Pods of an earlier object of the group that still
+	// exist. No member is created beside them.
+	predecessors []*corev1.Pod
+	instances    []servinggroup.Instance
+	strays       []*corev1.Pod
+	plan         servinggroup.RolePlan
+	steps        []instanceStep
 	// fail, when not nil, sets the Failed condition in this round.
 	fail *servinggroup.ConditionChange
 	// failure is an error of the decision itself. Nothing is created or deleted.
@@ -113,6 +117,21 @@ func roleMode(group *workloadv1alpha1.ServingGroup) bool {
 	return strategy != nil && strategy.Type == workloadv1alpha1.RoleRollingUpdate
 }
 
+// predecessors returns the Pods of an earlier object of the group: Pods under
+// the label of the group that a ServingGroup of its name with another UID
+// controls. The object was deleted without waiting for them. The garbage
+// collector deletes them, or releases them to be adopted.
+func predecessors(pods []*corev1.Pod, group *workloadv1alpha1.ServingGroup) []*corev1.Pod {
+	var earlier []*corev1.Pod
+	for _, pod := range pods {
+		owner := metav1.GetControllerOfNoCopy(pod)
+		if owner != nil && owner.Kind == workloadv1alpha1.ServingGroupKind.Kind && owner.Name == group.Name && owner.UID != group.UID {
+			earlier = append(earlier, pod)
+		}
+	}
+	return earlier
+}
+
 // decide computes the round for an observation.
 func (c *Controller) decide(obs observation, now time.Time) *round {
 	group, parent := obs.group, obs.parent
@@ -123,6 +142,7 @@ func (c *Controller) decide(obs observation, now time.Time) *round {
 		Cautious(servinggroup.RecoveryOf(parent.Spec.RecoveryPolicy, parent.Spec.Template.RestartGracePeriodSeconds))
 	identity := servinggroup.ParentOf(parent)
 	r.members = servinggroup.Members(obs.pods, group.Name, group.UID, identity)
+	r.predecessors = predecessors(obs.pods, group)
 	// An in-place update that ran past its progress deadline is a fault of the
 	// Pods that keep it from finishing.
 	r.deadlines = servinggroup.CheckInPlaceDeadlines(group, r.members, recovery.Enabled, now)

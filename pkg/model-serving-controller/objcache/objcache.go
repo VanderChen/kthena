@@ -44,6 +44,10 @@ const (
 	// ModelServingIndex indexes an object by <namespace>/<value of the ModelServing name label>.
 	// A Pod is only indexed while no ServingGroup controls it.
 	ModelServingIndex = "modelserving"
+	// GroupObjectIndex indexes a Pod that a ServingGroup controls by
+	// <namespace>/<name of that ServingGroup>: the Pods of every object that
+	// has had the name of a group.
+	GroupObjectIndex = "group-object"
 	// OrdinalNameIndex indexes a ServingGroup named <prefix>-<ordinal> by
 	// <namespace>/<prefix>: the objects that take the names of the groups of a
 	// ModelServing called <prefix>, whoever made them.
@@ -66,7 +70,10 @@ func (c Caches) AddIndexers() error {
 		store    cache.Indexer
 		indexers cache.Indexers
 	}{
-		{c.Pods, cache.Indexers{ControllerIndex: controllerIndex, GroupIndex: unadoptedGroupIndex, ModelServingIndex: unadoptedModelServingIndex}},
+		{c.Pods, cache.Indexers{
+			ControllerIndex: controllerIndex, GroupIndex: unadoptedGroupIndex, ModelServingIndex: unadoptedModelServingIndex,
+			GroupObjectIndex: groupObjectIndex,
+		}},
 		{c.ServingGroups, cache.Indexers{ControllerIndex: controllerIndex, ModelServingIndex: modelServingIndex, OrdinalNameIndex: ordinalNameIndex}},
 		{c.ControllerRevisions, cache.Indexers{ModelServingIndex: modelServingIndex}},
 	} {
@@ -98,6 +105,17 @@ func unadopted(obj any) *corev1.Pod {
 		return nil
 	}
 	return pod
+}
+
+func groupObjectIndex(obj any) ([]string, error) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		return nil, nil
+	}
+	if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.Kind == workloadv1alpha1.ServingGroupKind.Kind {
+		return []string{pod.Namespace + "/" + owner.Name}, nil
+	}
+	return nil, nil
 }
 
 func unadoptedGroupIndex(obj any) ([]string, error) {
@@ -244,4 +262,17 @@ func (c Caches) UnadoptedPods(namespace, group string) []*corev1.Pod {
 // ServingGroup. Which of them are members is for servinggroup.MembershipOf to say.
 func (c Caches) PodsOfGroup(group *workloadv1alpha1.ServingGroup) []*corev1.Pod {
 	return append(c.PodsControlledBy(group.UID), c.UnadoptedPods(group.Namespace, group.Name)...)
+}
+
+// PodsOfEarlierObjects returns the Pods that a ServingGroup of the name of
+// group with another UID controls: what is left of an object that was deleted
+// without waiting for its Pods.
+func (c Caches) PodsOfEarlierObjects(group *workloadv1alpha1.ServingGroup) []*corev1.Pod {
+	var earlier []*corev1.Pod
+	for _, pod := range byIndex[*corev1.Pod](c.Pods, GroupObjectIndex, group.Namespace+"/"+group.Name) {
+		if owner := metav1.GetControllerOfNoCopy(pod); owner != nil && owner.UID != group.UID {
+			earlier = append(earlier, pod)
+		}
+	}
+	return earlier
 }

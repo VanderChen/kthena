@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 
@@ -816,5 +817,65 @@ func TestTheCopyOfTheSurgeMarkFollowsTheGroup(t *testing.T) {
 	h.cluster.Settle()
 	if writes := h.mustRound(); len(writes) != 0 || !h.isReady() {
 		t.Errorf("writes of the next round = %v, ready = %t; want none and the group ready", writes, h.isReady())
+	}
+}
+
+// A group object that a user deletes without waiting for its Pods is gone at
+// once, and the ModelServing controller creates the group again. The Pods of
+// the earlier object are deleted by the garbage collector one by one. The new
+// object creates no member beside them, not even one whose name is free
+// already: Pods of two objects of one group never exist side by side.
+func TestNoMemberIsCreatedBesidePodsOfAnEarlierObject(t *testing.T) {
+	ms := testModelServing()
+	earlier := func(name string) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Namespace: testNamespace, Name: name, UID: types.UID("earlier-" + name),
+			Labels: map[string]string{
+				workloadv1alpha1.ModelServingNameLabelKey: ms.Name, workloadv1alpha1.GroupNameLabelKey: testGroup,
+				workloadv1alpha1.RoleLabelKey: "prefill", workloadv1alpha1.RoleIDKey: "prefill-0",
+			},
+			OwnerReferences: []metav1.OwnerReference{{
+				APIVersion: workloadv1alpha1.SchemeGroupVersion.String(), Kind: workloadv1alpha1.ServingGroupKind.Kind,
+				Name: testGroup, UID: "earlier-sg-uid", Controller: ptr.To(true), BlockOwnerDeletion: ptr.To(true),
+			}},
+		}}
+	}
+	// The entry Pod of the earlier object is gone already; two workers are left.
+	h := newHarness(t, ms, revisionOf(t, ms, "rev-a"), groupOf(ms, "rev-a"), earlier("llama-0-prefill-0-1"), earlier("llama-0-prefill-0-2"))
+	created := func(writes []string) (out []string) {
+		for _, write := range writes {
+			if strings.HasPrefix(write, "create pods ") {
+				out = append(out, write)
+			}
+		}
+		return out
+	}
+	// The name of the entry Pod is free, and still nothing is created.
+	for range 2 {
+		writes, err := h.roundWrites()
+		if !errors.Is(err, errNameOccupied) || len(created(writes)) != 0 {
+			t.Fatalf("round beside Pods of the earlier object: error %v, writes %v; want the name reported and no Pod created", err, writes)
+		}
+		// The group has committed to no member: it still counts as one without.
+		if got := h.conditions(); got != "ReconcileFailed=NameOccupied" || h.group().Status.Pods != 0 {
+			t.Fatalf("conditions = %q, status.pods = %d; want the name reported and no member counted", got, h.group().Status.Pods)
+		}
+	}
+
+	// The garbage collector removes what the object that is gone controlled.
+	for _, name := range []string{"llama-0-prefill-0-1", "llama-0-prefill-0-2"} {
+		err := h.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), name, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Fatal(err)
+		}
+	}
+	h.cluster.Settle()
+	h.cluster.ResetWrites()
+	if writes := created(h.mustRound()); len(writes) != 3 {
+		t.Fatalf("after the last Pod of the earlier object is gone the round created %v, want the three members", writes)
+	}
+	h.settle()
+	if got := h.conditions(); got != "Ready=AllInstancesReady" {
+		t.Errorf("conditions = %q", got)
 	}
 }

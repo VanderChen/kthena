@@ -101,7 +101,10 @@ func (c *Controller) Reconcile(ctx context.Context, namespace, name string) (tim
 	}
 
 	now := c.now()
-	r := c.decide(observation{group: group, parent: parent, pods: c.caches.PodsOfGroup(group)}, now)
+	// The Pods of an earlier object of the group are no members. They are
+	// part of what the round is decided on: nothing is created beside them.
+	pods := append(c.caches.PodsOfGroup(group), c.caches.PodsOfEarlierObjects(group)...)
+	r := c.decide(observation{group: group, parent: parent, pods: pods}, now)
 	if err := c.syncPlugins(ctx, parent); err != nil {
 		// A hook of the ModelServing said that nothing may be done for it:
 		// the round creates, deletes and patches nothing, and says why.
@@ -374,6 +377,16 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	if podGroupFailure != nil {
 		requeue, creations = after, nil
 	}
+	// Pods of two objects of one group never exist side by side: the members
+	// of an object that was deleted without waiting for them are gone, or
+	// released and adopted, before a member is created. Creating each member
+	// as soon as its own name is free would mix the two.
+	var predecessorFailure error
+	if len(r.predecessors) > 0 && len(creations) > 0 {
+		creations = nil
+		predecessorFailure = fmt.Errorf("%w: %d Pods of an earlier object of the group still exist, among them %s",
+			errNameOccupied, len(r.predecessors), r.predecessors[0].Name)
+	}
 
 	input := servinggroup.StatusInput{
 		Group: group, Now: now, Members: r.members, Instances: r.instances,
@@ -388,7 +401,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 		// First the status says that members are being created, then the first
 		// one is. The ModelServing controller changes the revision of a group
 		// without a member freely; this write and that change exclude each other.
-		CreationCommitted: podGroupFailure == nil && pending > 0 && len(r.members) == 0 && group.Status.Pods == 0,
+		CreationCommitted: len(creations) > 0 && len(r.members) == 0 && group.Status.Pods == 0,
 		// Whether the round fails is known after it has acted.
 		FailurePending: true,
 	}
@@ -401,7 +414,7 @@ func (c *Controller) execute(ctx context.Context, r *round, now time.Time) (time
 	c.reportRoles(r, changes)
 
 	actFailure := c.act(ctx, r, group, owner, creations, now, podGroupFailure != nil)
-	failure := errors.Join(podGroupFailure, actFailure)
+	failure := errors.Join(podGroupFailure, predecessorFailure, actFailure)
 
 	// The failure of the round is settled once, here. A round that fails the
 	// way the one before it did leaves the status as it is; the queue then
