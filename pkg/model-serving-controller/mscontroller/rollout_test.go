@@ -153,6 +153,56 @@ func TestRollingUpdateKeepsTheBudget(t *testing.T) {
 	}
 }
 
+// The surge group leaves only when it is surplus. The last old group is
+// replaced first: the new object is created and the ServingGroup controller
+// creates its Pods. Until then the surge group is one of the three groups
+// that have Pods, whether it is ready or not. The ModelServing controller
+// runs twice in a row, so it also sees the new object before it has a Pod.
+func TestTheSurgeGroupLeavesAfterThePlaceOfTheLastOldGroupHasItsPods(t *testing.T) {
+	tests := []struct {
+		name  string
+		stuck bool
+	}{
+		{name: "a surge group that is ready"},
+		{name: "a surge group that never gets ready", stuck: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
+				config.MaxSurge = ptr.To(intstr.FromInt32(1))
+			})))
+			s.settle()
+			if tt.stuck {
+				s.stuck = func(pod *corev1.Pod) bool { return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-3" }
+			}
+			s.cluster.ResetWrites()
+			s.msRounds = 2
+			s.update(setImage("model:v2"))
+			s.settle()
+
+			if got, want := s.summary(), "groups[0=model:v2 1=model:v2 2=model:v2] replicas=3 updated=3 current=3 available=3 Available"; got != want {
+				t.Fatalf("after the rollout:\n got %s\nwant %s", got, want)
+			}
+			// The last creation of llama-0 is its replacement; llama-3 is deleted once.
+			created, pods, reclaimed := -1, -1, -1
+			writes := s.cluster.Writes()
+			for i, write := range writes {
+				switch {
+				case write.Verb == "create" && write.Resource == "servinggroups" && write.Name == "llama-0":
+					created, pods = i, -1
+				case write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-0-") && pods < 0:
+					pods = i
+				case write.Verb == "delete" && write.Resource == "servinggroups" && write.Name == "llama-3":
+					reclaimed = i
+				}
+			}
+			if created < 0 || pods < created || reclaimed < pods {
+				t.Errorf("llama-0 created at write %d, its first Pod at %d, llama-3 deleted at %d; want that order:\n%v", created, pods, reclaimed, writes)
+			}
+		})
+	}
+}
+
 func TestPartitionStopsTheRollout(t *testing.T) {
 	s := newSystem(t, modelServing(rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
 		config.Partition = ptr.To(intstr.FromInt32(2))

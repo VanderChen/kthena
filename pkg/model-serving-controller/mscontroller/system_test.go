@@ -112,6 +112,10 @@ type system struct {
 	sg      *sgcontroller.Controller
 	// invariant, when set, is checked after every pass.
 	invariant func()
+	// msRounds, when above 1, is how many rounds the ModelServing controller
+	// runs in a pass before the ServingGroup controller runs: it then sees
+	// the objects it wrote as the ServingGroup controller has not yet seen them.
+	msRounds int
 	// stuck, when set, names the Pods the kubelet never gets ready.
 	stuck func(*corev1.Pod) bool
 	// rollback is the rollback switch.
@@ -162,10 +166,12 @@ func (s *system) caches() (objcache.Caches, *apitest.Snapshot) {
 func (s *system) pass() int {
 	s.t.Helper()
 	before := len(s.cluster.Writes())
-	caches, snapshot := s.caches()
-	s.ms.SetCaches(caches, snapshot.Listers().Services)
-	if _, err := s.ms.Reconcile(context.Background(), testNamespace, testName); err != nil && !errors.Is(err, ErrNotSettled) {
-		s.t.Fatalf("round of the ModelServing: %v", err)
+	for range max(1, s.msRounds) {
+		caches, snapshot := s.caches()
+		s.ms.SetCaches(caches, snapshot.Listers().Services)
+		if _, err := s.ms.Reconcile(context.Background(), testNamespace, testName); err != nil && !errors.Is(err, ErrNotSettled) {
+			s.t.Fatalf("round of the ModelServing: %v", err)
+		}
 	}
 	for _, group := range s.groups() {
 		caches, snapshot := s.caches()
