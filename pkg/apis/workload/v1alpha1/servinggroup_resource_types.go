@@ -47,8 +47,11 @@ type ServingGroupSpec struct {
 	TargetRevision string `json:"targetRevision,omitempty"`
 
 	// BaselineRevision is a copy of the currentRevision of the ModelServing status.
-	// Role instances protected by a Role partition are created from it, and the
-	// ModelServing controller reads it back when its own status was lost.
+	// Role instances protected by a Role partition are created from it. A group
+	// whose annotation modelserving.volcano.sh/created-revision names the target
+	// revision is the exception: it is a new group, and creates those instances
+	// from the target revision like its other instances. The ModelServing
+	// controller reads the baseline back when its own status was lost.
 	// +optional
 	BaselineRevision string `json:"baselineRevision,omitempty"`
 
