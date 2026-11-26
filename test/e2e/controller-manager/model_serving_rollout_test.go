@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -418,6 +419,269 @@ func TestModelServingRollingUpdateMaxSurgeWithPartition(t *testing.T) {
 		assert.Equal(t, uid, string(pod.UID), "partition-protected Pod %s should not be recreated", name)
 	}
 	waitForRolloutOrdinalsContracted(t, ctx, kubeClient, modelServing.Name, workload.GroupNameLabelKey, modelServing.Name, replicas)
+}
+
+// TestModelServingRollingUpdateMaxSurgeSingleReplica verifies that the surge ServingGroup of a
+// single replica stays until the replacement of the only regular ServingGroup has a Pod.
+// With replicas 1, maxSurge 1 and the default maxUnavailable of 1, the round that creates the
+// surge ServingGroup may also delete the old one. Until the Pod of the surge ServingGroup is
+// there, no ServingGroup that is not terminating has a Pod. A surge ServingGroup that is
+// reclaimed in that state leaves the ModelServing without anything of the new template until
+// the old ServingGroup is gone and replaced.
+//
+// On its own that state lasts for milliseconds. The test makes it last: the new template names
+// a ServiceAccount that does not exist yet, so no Pod of it can be created before the test
+// creates the ServiceAccount, and the Pod of the old template takes ten seconds to stop.
+func TestModelServingRollingUpdateMaxSurgeSingleReplica(t *testing.T) {
+	ctx, kthenaClient, kubeClient := setupControllerManagerE2ETest(t)
+
+	const (
+		replicas       = int32(1)
+		serviceAccount = "test-maxsurge-single-replica"
+		// holdWindow is how long the surge ServingGroup is watched while it has no Pod. It ends
+		// well before the Pod of the old template has stopped.
+		holdWindow = 5 * time.Second
+	)
+	modelServing := createBasicModelServing("test-maxsurge-single-replica", replicas, 0)
+	// maxUnavailable is left to its default: the old ServingGroup may go before the surge
+	// ServingGroup is Ready.
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable = nil
+	modelServing.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxSurge = ptr.To(intstr.FromInt(1))
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.TerminationGracePeriodSeconds = ptr.To(int64(30))
+	modelServing.Spec.Template.Roles[0].EntryTemplate.Spec.Containers[0].Lifecycle = &corev1.Lifecycle{
+		PreStop: &corev1.LifecycleHandler{Exec: &corev1.ExecAction{Command: []string{"sleep", "10"}}},
+	}
+	// Registered before the ModelServing is created, so that it runs after the ModelServing
+	// has been deleted: the test leaves no Pod behind.
+	t.Cleanup(func() {
+		require.Eventually(t, func() bool {
+			pods, err := kubeClient.CoreV1().Pods(testNamespace).List(context.Background(), metav1.ListOptions{LabelSelector: modelServingLabelSelector(modelServing.Name)})
+			return err == nil && len(pods.Items) == 0
+		}, 2*time.Minute, 500*time.Millisecond, "the Pods of ModelServing %s should be gone when the test ends", modelServing.Name)
+	})
+	t.Log("Creating ModelServing with 1 replica, maxSurge=1 and the default maxUnavailable")
+	createAndWaitForModelServing(t, ctx, kthenaClient, modelServing)
+	ms, err := kthenaClient.WorkloadV1alpha1().ModelServings(testNamespace).Get(ctx, modelServing.Name, metav1.GetOptions{})
+	require.NoError(t, err, "Failed to get ModelServing")
+	require.NotNil(t, ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable, "maxUnavailable should be defaulted")
+	require.Equal(t, 1, ms.Spec.RolloutStrategy.RollingUpdateConfiguration.MaxUnavailable.IntValue(), "the default maxUnavailable should be 1")
+	initialRevision := ms.Status.CurrentRevision
+	require.NotEmpty(t, initialRevision, "Initial CurrentRevision should be set")
+	old := waitForServingGroups(t, ctx, kthenaClient, ms, int(replicas))[0]
+
+	surges := trackSurgeServingGroups(t, ctx, kthenaClient, kubeClient, ms, &old)
+
+	t.Logf("Changing the template to one whose Pods cannot be created yet: ServiceAccount %s does not exist", serviceAccount)
+	updateModelServingWithRetry(t, ctx, kthenaClient, ms.Name, func(current *workload.ModelServing) {
+		entry := &current.Spec.Template.Roles[0].EntryTemplate.Spec
+		entry.ServiceAccountName = serviceAccount
+		entry.Containers[0].Image = nginxAlpineImage
+		entry.Containers[0].Lifecycle = nil
+		entry.TerminationGracePeriodSeconds = ptr.To(int64(1))
+	})
+
+	// One round of the controller does both: it creates the surge ServingGroup and tells the
+	// only old ServingGroup to go.
+	require.Eventually(t, func() bool {
+		groups, err := servingGroupsOf(ctx, kthenaClient, ms)
+		if err != nil {
+			return false
+		}
+		group, ok := groups[old.Name]
+		return ok && group.UID == old.UID && group.DeletionTimestamp != nil && len(surges.Created()) > 0
+	}, servingGroupTimeout, 100*time.Millisecond, "the rolling update should create a surge ServingGroup and delete ServingGroup %s", old.Name)
+	surge := surges.Created()[0]
+
+	t.Logf("ServingGroup %s is terminating and surge ServingGroup %s has no Pod: for %s it has to stay", old.Name, surge.Name, holdWindow)
+	held := assert.Never(t, func() bool {
+		if len(surges.Departures()) > 0 {
+			return true
+		}
+		groups, err := servingGroupsOf(ctx, kthenaClient, ms)
+		if err != nil {
+			return false
+		}
+		group, ok := groups[surge.Name]
+		return !ok || group.UID != surge.UID || group.DeletionTimestamp != nil
+	}, holdWindow, 250*time.Millisecond,
+		"surge ServingGroup %s must stay while the only old ServingGroup %s is terminating and no other ServingGroup has a Pod", surge.Name, old.Name)
+	groups, err := servingGroupsOf(ctx, kthenaClient, ms)
+	require.NoError(t, err, "Failed to list the ServingGroups of %s", ms.Name)
+	t.Logf("ServingGroups of %s at the end of the window: %s", ms.Name, describeServingGroups(groups))
+	if !held {
+		t.Logf("What was seen when a surge ServingGroup was told to go: %+v", surges.Departures())
+	}
+	terminating, ok := groups[old.Name]
+	require.True(t, ok && terminating.UID == old.UID && terminating.DeletionTimestamp != nil,
+		"ServingGroup %s should still be terminating at the end of the window, or the window proved nothing", old.Name)
+
+	t.Logf("Creating ServiceAccount %s: the Pods of the new template can be created now", serviceAccount)
+	_, err = kubeClient.CoreV1().ServiceAccounts(testNamespace).Create(ctx,
+		&corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: serviceAccount, Namespace: testNamespace}}, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create ServiceAccount %s", serviceAccount)
+	t.Cleanup(func() {
+		err := kubeClient.CoreV1().ServiceAccounts(testNamespace).Delete(context.Background(), serviceAccount, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			t.Logf("Failed to delete ServiceAccount %s during cleanup: %v", serviceAccount, err)
+		}
+	})
+
+	finalMS := waitForRollingUpdateConverged(t, ctx, kthenaClient, kubeClient, ms.Name, replicas, initialRevision, nginxAlpineImage)
+	assert.Equal(t, replicas, finalMS.Status.Replicas)
+	assert.Equal(t, replicas, finalMS.Status.AvailableReplicas)
+	assert.Equal(t, replicas, finalMS.Status.UpdatedReplicas)
+	assert.Equal(t, finalMS.Status.UpdateRevision, finalMS.Status.CurrentRevision)
+	waitForRolloutOrdinalsContracted(t, ctx, kubeClient, ms.Name, workload.GroupNameLabelKey, ms.Name, replicas)
+	// Exactly one ServingGroup is left, at ordinal 0: the surge ServingGroup is gone.
+	replacement := waitForServingGroups(t, ctx, kthenaClient, ms, int(replicas))[0]
+	assert.NotEqual(t, old.UID, replacement.UID, "ServingGroup %s should have been replaced", replacement.Name)
+	assert.NotContains(t, replacement.Annotations, workload.SurgeAnnotationKey, "ServingGroup %s is a regular replica", replacement.Name)
+	pods := podsOfServingGroup(t, ctx, kubeClient, replacement.Name)
+	require.Len(t, pods, 1, "ServingGroup %s should have one Pod", replacement.Name)
+	assert.Equal(t, nginxAlpineImage, pods[0].Spec.Containers[0].Image, "Pod %s should be of the new template", pods[0].Name)
+	assert.Equal(t, serviceAccount, pods[0].Spec.ServiceAccountName, "Pod %s should be of the new template", pods[0].Name)
+
+	departures := surges.Stop()
+	require.NotEmpty(t, departures, "the surge ServingGroup should have been deleted when the rolling update completed")
+	for _, departure := range departures {
+		assert.NotEmpty(t, departure.Replacements,
+			"surge ServingGroup %s (%s) must be deleted only after the replacement of ServingGroup %s has a Pod that is not terminating; the ServingGroups when it was deleted: %s",
+			departure.Name, departure.UID, old.Name, departure.ServingGroups)
+	}
+}
+
+// surgeServingGroup names a ServingGroup object that carried the surge mark.
+type surgeServingGroup struct {
+	Name string
+	UID  types.UID
+}
+
+// surgeDeparture is what was found at the moment a surge ServingGroup was told to go.
+type surgeDeparture struct {
+	surgeServingGroup
+	// Replacements are the Pods under the name of the replaced ServingGroup that were not
+	// terminating at that moment and belong to another object than the replaced one.
+	Replacements []string
+	// ServingGroups describes the ServingGroups of the ModelServing at that moment.
+	ServingGroups string
+}
+
+// surgeTracker is the record trackSurgeServingGroups keeps.
+type surgeTracker struct {
+	mu         sync.Mutex
+	created    []surgeServingGroup
+	departures []surgeDeparture
+	stop       func()
+}
+
+// Created returns the surge ServingGroups seen so far, in the order they were first seen.
+func (s *surgeTracker) Created() []surgeServingGroup {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]surgeServingGroup(nil), s.created...)
+}
+
+// Departures returns what was found for every surge ServingGroup that has been told to go so far.
+func (s *surgeTracker) Departures() []surgeDeparture {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]surgeDeparture(nil), s.departures...)
+}
+
+// Stop ends the watch and returns the departures.
+func (s *surgeTracker) Stop() []surgeDeparture {
+	s.stop()
+	return s.Departures()
+}
+
+// trackSurgeServingGroups lists the ServingGroups of the test namespace and follows them from
+// there, so that no change is missed. It records every ServingGroup ms controls that carries
+// the surge mark, and for each the moment it is told to go: its first event with a deletion
+// timestamp, or its deletion when there was none. At that moment it reads which Pods the
+// replacement of the replaced ServingGroup has. It fails the test when the watch broke before
+// it was stopped: the record is incomplete then.
+func trackSurgeServingGroups(t *testing.T, ctx context.Context, kthenaClient *clientset.Clientset, kubeClient *kubernetes.Clientset,
+	ms *workload.ModelServing, replaced *workload.ServingGroup) *surgeTracker {
+	t.Helper()
+	tracker := &surgeTracker{}
+	gone := map[types.UID]bool{}
+	observe := func(eventType watch.EventType, group *workload.ServingGroup) {
+		if _, marked := group.Annotations[workload.SurgeAnnotationKey]; !marked || !metav1.IsControlledBy(group, ms) {
+			return
+		}
+		tracker.mu.Lock()
+		defer tracker.mu.Unlock()
+		known := false
+		for _, created := range tracker.created {
+			known = known || created.UID == group.UID
+		}
+		if !known {
+			tracker.created = append(tracker.created, surgeServingGroup{Name: group.Name, UID: group.UID})
+		}
+		if gone[group.UID] || (eventType != watch.Deleted && group.DeletionTimestamp == nil) {
+			return
+		}
+		gone[group.UID] = true
+		departure := surgeDeparture{surgeServingGroup: surgeServingGroup{Name: group.Name, UID: group.UID}}
+		pods, err := kubeClient.CoreV1().Pods(ms.Namespace).List(ctx, metav1.ListOptions{LabelSelector: workload.GroupNameLabelKey + "=" + replaced.Name})
+		if err != nil {
+			departure.ServingGroups = fmt.Sprintf("failed to list the Pods of ServingGroup %s: %v", replaced.Name, err)
+		} else {
+			for _, pod := range pods.Items {
+				owner := metav1.GetControllerOfNoCopy(&pod)
+				if pod.DeletionTimestamp == nil && owner != nil && owner.UID != replaced.UID {
+					departure.Replacements = append(departure.Replacements, pod.Name)
+				}
+			}
+			if groups, err := servingGroupsOf(ctx, kthenaClient, ms); err == nil {
+				departure.ServingGroups = describeServingGroups(groups)
+			}
+		}
+		tracker.departures = append(tracker.departures, departure)
+	}
+
+	list, err := kthenaClient.WorkloadV1alpha1().ServingGroups(ms.Namespace).List(ctx, metav1.ListOptions{})
+	require.NoError(t, err, "Failed to list the ServingGroups of namespace %s", ms.Namespace)
+	for i := range list.Items {
+		observe(watch.Added, &list.Items[i])
+	}
+	watchCtx, cancel := context.WithCancel(ctx)
+	watcher, err := kthenaClient.WorkloadV1alpha1().ServingGroups(ms.Namespace).Watch(watchCtx, metav1.ListOptions{ResourceVersion: list.ResourceVersion})
+	if err != nil {
+		cancel()
+		require.NoError(t, err, "Failed to watch the ServingGroups of namespace %s", ms.Namespace)
+	}
+
+	var watchErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for event := range watcher.ResultChan() {
+			group, ok := event.Object.(*workload.ServingGroup)
+			if !ok {
+				if watchCtx.Err() == nil {
+					watchErr = fmt.Errorf("unexpected %s event: %v", event.Type, event.Object)
+				}
+				return
+			}
+			observe(event.Type, group)
+		}
+		if watchCtx.Err() == nil {
+			watchErr = fmt.Errorf("watch closed before it was stopped")
+		}
+	}()
+
+	var once sync.Once
+	tracker.stop = func() {
+		once.Do(func() {
+			cancel()
+			watcher.Stop()
+			<-done
+		})
+		require.NoError(t, watchErr, "the watch of the ServingGroups of namespace %s broke", ms.Namespace)
+	}
+	t.Cleanup(tracker.stop)
+	return tracker
 }
 
 // TestModelServingRollingUpdateMaxUnavailableWithBadImage tests maxUnavailable constraint when transitioning to bad image
