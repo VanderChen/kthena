@@ -433,7 +433,7 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 	if err != nil {
 		return err
 	}
-	updated := told(group, workload.GroupSpec(r.ms, r.settings(action.Revision)))
+	updated := told(group, workload.GroupSpec(r.ms, r.settings(action.Revision)), r.view.group(action.Ordinal).unit.Memberless)
 	_, err = c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) && action.Reason == grouplevel.ReasonMemberless {
 		// The group got its first member, or another status, in between. That
@@ -445,18 +445,34 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 }
 
 // told returns group with the spec it is told, as it is written in one update.
+// memberless reports that the group has no member and has not committed to
+// creating one.
 //
 // A group that was created new says, in an annotation, which revision it was
-// created from: it was born in the rollout to that revision. It stops saying
-// so in the write that tells it another target. From then on it is a group
-// that ran before the rollout of now, like any other. The annotation goes in
-// the same write as the target changes, so no reader ever finds the new target
-// beside it; and it is never added here, so a template that returns to the
-// revision a group was born at finds a group that does not say it.
-func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec) *workloadv1alpha1.ServingGroup {
+// created from: it was born in the rollout to that revision. What it says
+// changes in the write that tells it another target.
+//
+// A group that has a member, or has committed to one, ran the revision it was
+// created from. It stops saying that it is new, and is from then on a group
+// that ran before the rollout of now, like any other. A group without a
+// member is still being born, and a new group is created whole from the
+// template of now: its annotation is rewritten to the new target. The write
+// carries the resourceVersion that was read, so it and the status write with
+// which the group commits to its first Pod exclude each other: whichever
+// comes first, the other is rejected and decided again.
+//
+// The annotation changes in the same write as the target, so no reader ever
+// finds the new target beside the old annotation. And it is never added to a
+// group that has none: a template that returns to the revision a group was
+// born at finds a group that does not say it.
+func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec, memberless bool) *workloadv1alpha1.ServingGroup {
 	updated := group.DeepCopy()
 	updated.Spec = spec
-	if outlived(group, spec.TargetRevision) {
+	switch {
+	case !outlived(group, spec.TargetRevision):
+	case memberless:
+		updated.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey] = spec.TargetRevision
+	default:
 		delete(updated.Annotations, workloadv1alpha1.CreatedRevisionAnnotationKey)
 	}
 	return updated
@@ -499,14 +515,19 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 		// The generation it was derived from changes with every change of the
 		// ModelServing. It is only written along with something else.
 		desired.SourceGeneration = group.Spec.SourceGeneration
-		// A group that names another revision than its target as the one it
-		// was created from is written as well: only this controller sets the
-		// annotation, and it never leaves it beside another target.
+		// The write that changes the target of a group also brings what the
+		// group says about where it comes from in line with it. A group whose
+		// spec is as it should be and whose annotation names another revision
+		// was therefore not left so by this controller: somebody put the
+		// annotation there, or changed it. Such a group is written once more,
+		// or the annotation would start to count on the day the target
+		// becomes that revision. After the write the annotation is gone, or
+		// names the target, and the group is not written again for it.
 		if apiequality.Semantic.DeepEqual(desired, group.Spec) && !outlived(group, desired.TargetRevision) {
 			continue
 		}
 		desired.SourceGeneration = r.ms.Generation
-		updated := told(group, desired)
+		updated := told(group, desired, g.unit.Memberless)
 		if _, err := c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
 			failures = append(failures, fmt.Errorf("hand the settings down to ServingGroup %s: %w", group.Name, err))
 		}

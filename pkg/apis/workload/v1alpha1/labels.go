@@ -57,11 +57,13 @@ const (
 	// the revision a group was created from. It says that the group was born
 	// in the rollout to that revision, and it stays for as long as that
 	// revision is the target of the group. The ModelServing controller sets it
-	// when it creates a new group under RoleRollingUpdate, and removes it in
-	// the write that tells the group another target. It is never added to an
-	// object that exists, and an object created for Pods that exist already
-	// does not carry it. A group that carries it creates every Role instance
-	// from that revision, the ones below the partition of a Role included.
+	// when it creates a new group under RoleRollingUpdate. In the write that
+	// tells the group another target it removes it; from a group that has no
+	// member yet, which is still being born, it does not, and makes it name
+	// the new target instead. It is never added to an object that has none,
+	// and an object created for Pods that exist already does not carry it. A
+	// group that carries it creates every Role instance from that revision,
+	// the ones below the partition of a Role included.
 	CreatedRevisionAnnotationKey = "modelserving.volcano.sh/created-revision"
 
 	// ServingGroupAdoptionAnnotationKey is the ModelServing annotation that records
