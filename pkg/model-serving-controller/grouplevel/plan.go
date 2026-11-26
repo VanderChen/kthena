@@ -32,7 +32,10 @@ type planner struct {
 	// there occupies its place and is no candidate of G2, G3b and G3c.
 	awaiting map[int]bool
 	foreign  map[int]bool
-	acts     []Action
+	// created holds the ordinals of the groups created in this round. Such a
+	// group has no member yet.
+	created map[int]bool
+	acts    []Action
 	// seen and count are the view and the tally of the working copy as it
 	// is now; put drops them.
 	seen  *View
@@ -195,6 +198,10 @@ func (p *planner) delete(g Group, why string) {
 // observed until its Pods are adopted.
 func (p *planner) create(ordinal int, rev string, surge bool, why string) {
 	p.acts = append(p.acts, Action{Kind: ActionCreate, Ordinal: ordinal, Revision: rev, Surge: surge, Reason: why})
+	if p.created == nil {
+		p.created = map[int]bool{}
+	}
+	p.created[ordinal] = true
 	p.put(Group{Ordinal: ordinal, Revision: rev, Surge: surge, Observed: why != ReasonRecover, Fresh: true})
 }
 
@@ -546,10 +553,21 @@ func (p *planner) createSurge(scaling bool) {
 
 // reclaimSurge is G3b: surge that is not needed any more, or that exceeds the
 // capacity. No work: every live marked group that does not await adoption.
-// Work and live > N + S: down to live = N + S. One that is confirmed not Ready
-// is reclaimed at once; every other one (confirmed Ready, not observed, not
-// fresh) only when ready stays at or above the floor. G3a and G3b never both
-// act in one round.
+// Work and live > N + S: down to live = N + S.
+//
+// A surge group is reclaimed only when it is surplus: N other live groups have
+// their members. The last old group of a rollout may still be terminating, or
+// its replacement may have no Pod yet; a surge group that left then would
+// leave fewer than N groups that serve, although no place is spare. The one
+// exception is that there is no room: fewer than N regular groups are live
+// while the live groups fill N + S (more surge groups than maxSurge allows,
+// after it was lowered), so the missing place can only be created after a
+// surge group has left.
+//
+// One that is confirmed not Ready is then reclaimed without asking the floor:
+// it takes nothing off ready. Every other one (confirmed Ready, not observed,
+// not fresh) only when ready stays at or above the floor. G3a and G3b never
+// both act in one round.
 func (p *planner) reclaimSurge() {
 	v := p.view()
 	bound := p.spec.Replicas + p.spec.MaxSurge
@@ -558,8 +576,20 @@ func (p *planner) reclaimSurge() {
 		return
 	}
 	var marked []Group
+	// filled counts the live groups that have their members, regular the live
+	// groups without the mark.
+	filled, regular := 0, 0
 	for _, g := range p.work {
-		if g.Surge && g.live() && !p.awaiting[g.Ordinal] {
+		if !g.live() {
+			continue
+		}
+		if !g.Surge {
+			regular++
+		}
+		if p.hasMembers(g) {
+			filled++
+		}
+		if g.Surge && !p.awaiting[g.Ordinal] {
 			marked = append(marked, g)
 		}
 	}
@@ -568,6 +598,15 @@ func (p *planner) reclaimSurge() {
 	for _, g := range marked {
 		if going && live <= bound {
 			return
+		}
+		others := filled
+		if p.hasMembers(g) {
+			others--
+		}
+		surplus := others >= p.spec.Replicas
+		noRoom := regular < p.spec.Replicas && live >= bound
+		if !surplus && !noRoom {
+			continue
 		}
 		if !g.confirmedNotReady() {
 			// A confirmed Ready one takes one off ready, the others take
@@ -583,7 +622,15 @@ func (p *planner) reclaimSurge() {
 		}
 		p.delete(g, ReasonReclaimSurge)
 		live--
+		filled = others
 	}
+}
+
+// hasMembers: the group is live and has its Pods, or expects none. A group
+// created in this round has none yet; one that awaits adoption has not adopted
+// them yet.
+func (p *planner) hasMembers(g Group) bool {
+	return g.live() && !p.created[g.Ordinal] && !p.awaiting[g.Ordinal] && (!g.Memberless || g.Empty)
 }
 
 // unfilled is a place G3c cannot fill, and why.

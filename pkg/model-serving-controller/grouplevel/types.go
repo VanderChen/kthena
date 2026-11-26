@@ -32,7 +32,7 @@ limitations under the License.
 //	     (b) set the revision of any other to the one of its ordinal
 //	G4   fill: create regular groups at the lowest free ordinals below N
 //	G3a  create surge groups while groups remain to be replaced
-//	G3b  reclaim surge groups that are not needed any more
+//	G3b  reclaim surge groups that are not needed any more, once they are surplus
 //	G3c  replace: delete replaceable groups within the two budgets, or
 //	     update them in place
 //	G6   advance the baseline when the rollout is complete

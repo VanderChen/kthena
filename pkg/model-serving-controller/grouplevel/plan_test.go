@@ -568,6 +568,68 @@ func TestPlanReclaimSurge(t *testing.T) {
 			want: []Action{del(2, ReasonReclaimSurge)},
 		},
 		{
+			// The end of a rollout: the last old group is terminating and its
+			// replacement is not created yet. N others do not have their
+			// members, so the surge group is not surplus.
+			name: "one that is confirmed not Ready is kept while the last old group is terminating",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, notReady)}},
+		},
+		{
+			name: "so is a confirmed Ready one, although ready would stay at the floor",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge)}},
+		},
+		{
+			name: "the group created in this round has no member yet: the place is filled, the surge group stays",
+			in:   Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(1, "v2"), group(2, "v2"), group(3, "v2", surge, notReady)}},
+			want: []Action{create(0, "v2", ReasonRegular)},
+		},
+		{
+			name: "it stays while the replacement has no Pod",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", memberless), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, notReady)}},
+		},
+		{
+			name: "it is reclaimed once N other groups have their members, Ready or not",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", notReady), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, notReady)}},
+			want: []Action{del(3, ReasonReclaimSurge)},
+		},
+		{
+			name: "a group that awaits adoption has not adopted its members: it does not count",
+			in: Input{Spec: steady(3, 1, 1), Groups: []Group{group(0, "v1"), group(1, "v1"), group(2, "v1"), group(3, "v1", surge)},
+				Orphans: map[int]Orphans{0: {Revision: "v1"}}},
+		},
+		{
+			name: "an empty group expects no member: it counts",
+			in:   Input{Spec: steady(2, 1, 1), Groups: []Group{group(0, "v1", empty), group(1, "v1"), group(2, "v1", surge)}},
+			want: []Action{del(2, ReasonReclaimSurge)},
+		},
+		{
+			name: "of two surge groups the one that is surplus is reclaimed, the other stays",
+			in: Input{Spec: steady(3, 1, 2), Groups: []Group{group(0, "v1", terminating), group(1, "v1"), group(2, "v1"),
+				group(3, "v1", surge, notReady), group(4, "v1", surge, notReady)}},
+			want: []Action{del(4, ReasonReclaimSurge)},
+		},
+		{
+			// maxSurge was lowered to 0 with a surge group left. The place of
+			// ordinal 1 cannot be created while two groups are live.
+			name: "no room: fewer than N regular groups are live and the live groups fill N + S",
+			in:   Input{Spec: steady(2, 1, 0), Groups: []Group{group(0, "v1"), group(2, "v1", surge)}},
+			want: []Action{del(2, ReasonReclaimSurge)},
+		},
+		{
+			name: "no room, and the floor still holds a confirmed Ready one",
+			in:   Input{Spec: steady(2, 0, 0), Groups: []Group{group(0, "v1"), group(2, "v1", surge)}},
+		},
+		{
+			name: "no room only until the live groups are below N + S",
+			in: Input{Spec: steady(3, 2, 1), Groups: []Group{group(0, "v1"), group(1, "v1"), group(3, "v1", surge, notReady),
+				group(4, "v1", surge, notReady)}},
+			want: []Action{del(4, ReasonReclaimSurge)},
+		},
+		{
 			name: "one that is not observed asks the floor of ready itself: kept",
 			in:   Input{Spec: steady(2, 0, 1), Groups: []Group{group(0, "v1"), group(1, "v1", notReady), group(2, "v1", surge, unobserved)}},
 		},

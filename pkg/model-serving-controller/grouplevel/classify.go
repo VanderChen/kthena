@@ -26,7 +26,7 @@ func (g Group) confirmedReady() bool {
 	return g.live() && g.Observed && g.Fresh && g.Ready
 }
 
-// confirmedNotReady is what G3b reclaims without asking the floor.
+// confirmedNotReady is what G3b, when it reclaims, reclaims without asking the floor.
 func (g Group) confirmedNotReady() bool {
 	return g.live() && g.Observed && g.Fresh && !g.Ready
 }
