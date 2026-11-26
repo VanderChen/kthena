@@ -256,6 +256,54 @@ func TestTheSurgeGroupStaysWhileTheLastOldGroupTerminates(t *testing.T) {
 	}
 }
 
+// With maxUnavailable at replicas the only old group is deleted in the round
+// that creates the surge group. The surge group is new then and no Pod of it
+// exists; the next round of the ModelServing controller sees it that way. It
+// stays, gets its Pods, and leaves after the replacement of the old group has
+// its first Pod.
+func TestTheSurgeGroupIsNotReclaimedBeforeItHasAPod(t *testing.T) {
+	s := newSystem(t, modelServing(func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Replicas = ptr.To[int32](1) // maxUnavailable is 1: all of them
+	}, rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
+		config.MaxSurge = ptr.To(intstr.FromInt32(1))
+	})))
+	s.settle()
+	s.cluster.ResetWrites()
+	// The ModelServing controller runs twice in a row: its second round sees
+	// the surge group before the ServingGroup controller has seen it.
+	s.msRounds = 2
+	s.update(setImage("model:v2"))
+
+	rest(s, lastOldGroup)
+	if got, want := s.images(), "0=model:v1! 1=model:v2+"; got != want {
+		t.Fatalf("at rest while the old group terminates:\n got %s\nwant %s", got, want)
+	}
+
+	rest(s, noPod)
+	if got, want := s.summary(), "groups[0=model:v2] replicas=1 updated=1 current=1 available=1 Available"; got != want {
+		t.Fatalf("after the rollout:\n got %s\nwant %s", got, want)
+	}
+	surgePod, created, pods, reclaimed, deletions := -1, -1, -1, -1, 0
+	writes := s.cluster.Writes()
+	for i, write := range writes {
+		switch {
+		case write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-1-") && surgePod < 0:
+			surgePod = i
+		case write.Verb == "create" && write.Resource == "servinggroups" && write.Name == "llama-0":
+			created, pods = i, -1
+		case write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-0-") && pods < 0:
+			pods = i
+		case write.Verb == "delete" && write.Resource == "servinggroups" && write.Name == "llama-1":
+			reclaimed = i
+			deletions++
+		}
+	}
+	if surgePod < 0 || created < surgePod || pods < created || reclaimed < pods || deletions != 1 {
+		t.Errorf("first Pod of llama-1 at write %d, llama-0 created at %d, its first Pod at %d, llama-1 deleted %d time(s), last at %d; want that order and one deletion:\n%v",
+			surgePod, created, pods, deletions, reclaimed, writes)
+	}
+}
+
 // Pods that are terminating are on their way out: a group that has no other
 // Pod is not one of the three. Here the Pods of a group of the target are
 // deleted from outside while the last old group terminates.
