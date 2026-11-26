@@ -582,3 +582,97 @@ func TestANewGroupOfCoordinatedRolesIsCreatedFromTheTarget(t *testing.T) {
 		t.Errorf("status = %s, want %s", got, want)
 	}
 }
+
+// A group that ran the baseline creates the instance its Role partition
+// protects from the baseline when that instance is lost. That the target is,
+// once more, the revision the group was created from changes nothing: the
+// group was told another target in between, and is no new group since.
+func TestAGroupThatRanTheBaselineCreatesItsProtectedInstanceFromTheBaseline(t *testing.T) {
+	one := ptr.To(intstr.FromInt32(1))
+	// changed returns an update of the image and the partition of serve and,
+	// when it is not 0, of the number of groups.
+	changed := func(image string, partition *intstr.IntOrString, groups int32) func(*workloadv1alpha1.ModelServing) {
+		return func(ms *workloadv1alpha1.ModelServing) {
+			setImage(image)(ms)
+			ms.Spec.Template.Roles[0].Partition = partition
+			if groups != 0 {
+				ms.Spec.Replicas = ptr.To(groups)
+			}
+		}
+	}
+	// lose deletes the Pods of the protected instance of a group.
+	lose := func(t *testing.T, s *system, group string) {
+		t.Helper()
+		for _, name := range []string{group + "-serve-0-0", group + "-serve-0-1"} {
+			if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s.settle()
+	}
+	// stands compares what the groups run after a step.
+	stands := func(t *testing.T, s *system, step, want string) {
+		t.Helper()
+		if got := s.instances(); got != want {
+			t.Fatalf("%s:\n got %s\nwant %s", step, got, want)
+		}
+	}
+
+	// Every group was created from v1. The rollout to v2 is complete, and is
+	// then taken back with a partition: v2 is the baseline now.
+	t.Run("a rollout that is complete is taken back with a Role partition", func(t *testing.T) {
+		const held = "0[0=model:v2 1=model:v1 2=model:v1] 1[0=model:v2 1=model:v1 2=model:v1]"
+		s := newSystem(t, modelServing(roleRolling()))
+		s.settle()
+		s.update(changed("model:v2", nil, 0))
+		s.settle()
+		s.update(changed("model:v1", one, 0))
+		s.settle()
+		stands(t, s, "at the partition", held)
+		lose(t, s, "llama-0")
+		stands(t, s, "after the protected instance of group 0 was lost", held)
+	})
+
+	// The third group is born at v2 during a canary. The canary is given up,
+	// and every group runs v1; then it is tried again.
+	t.Run("a canary is given up and tried again", func(t *testing.T) {
+		const held = "0[0=model:v1 1=model:v2 2=model:v2] 1[0=model:v1 1=model:v2 2=model:v2] 2[0=model:v1 1=model:v2 2=model:v2]"
+		s := newSystem(t, modelServing(roleRolling(), changed("model:v1", one, 0)))
+		s.settle()
+		s.update(changed("model:v2", one, 3))
+		s.settle()
+		stands(t, s, "the canary, with a group added",
+			"0[0=model:v1 1=model:v2 2=model:v2] 1[0=model:v1 1=model:v2 2=model:v2] 2[0=model:v2 1=model:v2 2=model:v2]")
+		s.update(changed("model:v1", nil, 0))
+		s.settle()
+		s.update(changed("model:v2", one, 0))
+		s.settle()
+		stands(t, s, "the canary again", held)
+		lose(t, s, "llama-2")
+		stands(t, s, "after the protected instance of group 2 was lost", held)
+	})
+
+	// The third group is born at v2 during a canary. The canary moves on to
+	// v3: the group is one of an earlier revision like the others, and stays
+	// one when the canary returns to v2.
+	t.Run("the target moves on and returns", func(t *testing.T) {
+		s := newSystem(t, modelServing(roleRolling(), changed("model:v1", one, 0)))
+		s.settle()
+		s.update(changed("model:v2", one, 3))
+		s.settle()
+		s.update(changed("model:v3", one, 0))
+		s.settle()
+		stands(t, s, "the target moved on",
+			"0[0=model:v1 1=model:v3 2=model:v3] 1[0=model:v1 1=model:v3 2=model:v3] 2[0=model:v2 1=model:v3 2=model:v3]")
+		lose(t, s, "llama-2")
+		stands(t, s, "after the protected instance of group 2 was lost",
+			"0[0=model:v1 1=model:v3 2=model:v3] 1[0=model:v1 1=model:v3 2=model:v3] 2[0=model:v1 1=model:v3 2=model:v3]")
+
+		const held = "0[0=model:v1 1=model:v2 2=model:v2] 1[0=model:v1 1=model:v2 2=model:v2] 2[0=model:v1 1=model:v2 2=model:v2]"
+		s.update(changed("model:v2", one, 0))
+		s.settle()
+		stands(t, s, "the target returned", held)
+		lose(t, s, "llama-2")
+		stands(t, s, "after the protected instance of group 2 was lost again", held)
+	})
+}
