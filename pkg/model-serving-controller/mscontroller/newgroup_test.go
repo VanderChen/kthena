@@ -18,7 +18,10 @@ package mscontroller
 
 import (
 	"context"
+	"errors"
+	"maps"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -181,4 +184,222 @@ func TestAnObjectForPodsThatExistDoesNotSayWhereItComesFrom(t *testing.T) {
 			t.Errorf("after a group was added: %s, want %s", got, want)
 		}
 	})
+}
+
+// The write that tells a group its spec takes the annotation away exactly
+// when the target it tells is another revision than the one the annotation
+// names. It never adds it.
+func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
+	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
+	surge := map[string]string{workloadv1alpha1.SurgeAnnotationKey: workloadv1alpha1.SurgeScopeServingGroup, "example.com/note": "kept"}
+	with := func(annotations map[string]string, revision string) map[string]string {
+		out := maps.Clone(annotations)
+		out[created] = revision
+		return out
+	}
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		// target is the target the group has, told the one it is told.
+		target, told string
+		want         map[string]string
+	}{
+		{name: "another target: the group stops saying where it comes from, and keeps what else it carries",
+			annotations: with(surge, "rev-b"), target: "rev-b", told: "rev-c", want: surge},
+		{name: "the same target with other settings: it still says so",
+			annotations: with(surge, "rev-b"), target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
+		{name: "the target returns to the revision the group was created from: nothing is added",
+			annotations: surge, target: "rev-c", told: "rev-b", want: surge},
+		{name: "a group without annotations gets none", target: "rev-a", told: "rev-b"},
+		{name: "an annotation that names another revision than the target the group has goes with the next write",
+			annotations: with(surge, "rev-a"), target: "rev-b", told: "rev-b", want: surge},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group := &workloadv1alpha1.ServingGroup{
+				ObjectMeta: metav1.ObjectMeta{Name: "llama-0", Annotations: maps.Clone(tt.annotations)},
+				Spec:       workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.target, BaselineRevision: "rev-a"},
+			}
+			spec := workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.told, BaselineRevision: "rev-a", RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy}
+
+			written := told(group, spec)
+			if !reflect.DeepEqual(written.Spec, spec) {
+				t.Errorf("spec = %+v, want %+v", written.Spec, spec)
+			}
+			if !maps.Equal(written.Annotations, tt.want) {
+				t.Errorf("annotations = %v, want %v", written.Annotations, tt.want)
+			}
+			if !maps.Equal(group.Annotations, tt.annotations) || group.Spec.TargetRevision != tt.target {
+				t.Errorf("the group that was read was changed: %v, target %s", group.Annotations, group.Spec.TargetRevision)
+			}
+		})
+	}
+}
+
+// The target of a group and what the group says about where it comes from
+// change in one write. Wherever a round is cut off, no group is left with
+// the new target beside the annotation: a group that found the two together
+// would take itself for one that was born at the new target.
+func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
+	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
+	// The groups are created Role by Role. Then they are replaced as a whole
+	// and in place: the target of a group changes in the write that starts
+	// its update, and in the hand-down for the others.
+	inPlace := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+			Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
+			UpdateMethod:               workloadv1alpha1.InPlaceUpdateMethod,
+			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt32(1))},
+		}
+	}
+	tests := []struct {
+		name string
+		// then, when set, changes the ModelServing after its groups were created.
+		then func(*workloadv1alpha1.ModelServing)
+		// write is a write of the round that changes the target of a group.
+		write string
+	}{
+		{name: "the settings are handed down", write: "update servinggroups default/llama-0"},
+		{name: "a group is updated in place", then: inPlace, write: "update servinggroups default/llama-2"},
+	}
+	cut := errors.New("the round was cut off")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for stopAt := 1; ; stopAt++ {
+				s := newSystem(t, modelServing(roleRolling(), threeGroups))
+				s.settleContainers()
+				if tt.then != nil {
+					s.update(tt.then)
+					s.settleContainers()
+				}
+				first := s.modelServing().Status.UpdateRevision
+				s.update(setImage("model:v2"))
+				s.cluster.ResetWrites()
+
+				writes := 0
+				s.cluster.BeforeWrite = func(apitestWrite) error {
+					if writes++; writes > stopAt {
+						return cut
+					}
+					return nil
+				}
+				if _, err := s.roundOfTheModelServing(); err != nil && !errors.Is(err, cut) && !errors.Is(err, ErrNotSettled) {
+					t.Fatalf("stop after write %d: round: %v", stopAt, err)
+				}
+				s.cluster.BeforeWrite = nil
+
+				told := 0
+				for _, group := range s.groups() {
+					revision, says := group.Annotations[created]
+					switch target := group.Spec.TargetRevision; {
+					case target == first && says && revision == first:
+					case target != first && !says:
+						told++
+					default:
+						t.Errorf("stop after write %d: group %s has the target %s and says that it was created from %q (%t); the first revision is %s",
+							stopAt, group.Name, target, revision, says, first)
+					}
+				}
+				if writes <= stopAt {
+					// The round was not cut off: every write of it was made.
+					var made []string
+					for _, write := range s.cluster.Writes() {
+						made = append(made, write.String())
+					}
+					if told != 3 || !slices.Contains(made, tt.write) {
+						t.Errorf("the whole round told %d of 3 groups the target with the writes %v; want all three, %q among the writes", told, made, tt.write)
+					}
+					return
+				}
+
+				// The rounds that follow repeat what was left.
+				s.settleContainers()
+				for _, group := range s.groups() {
+					if _, says := group.Annotations[created]; says || group.Spec.TargetRevision == first {
+						t.Errorf("stop after write %d: after the next rounds group %s has the target %s and the annotations %v",
+							stopAt, group.Name, group.Spec.TargetRevision, group.Annotations)
+					}
+				}
+			}
+		})
+	}
+}
+
+// A group says which revision it was created from for as long as that
+// revision is its target: it was born in the rollout that is under way. When
+// it is told another target it stops saying so, and it never says it again,
+// whatever the template returns to.
+func TestAGroupThatIsToldAnotherTargetStopsSayingWhereItComesFrom(t *testing.T) {
+	s := newSystem(t, modelServing(heldByARolePartition))
+	s.settle()
+	first := s.modelServing().Status.UpdateRevision
+	names := map[string]string{first: "first"}
+	if got, want := s.created(names), "0=first 1=first"; got != want {
+		t.Fatalf("created: %s, want %s", got, want)
+	}
+
+	// The template changes and a group is added. The groups that were there
+	// are told the new target; the new one is born at it.
+	s.update(func(ms *workloadv1alpha1.ModelServing) {
+		setImage("model:v2")(ms)
+		threeGroups(ms)
+	})
+	s.settle()
+	second := s.modelServing().Status.UpdateRevision
+	names[second] = "second"
+	if got, want := s.created(names), "0=- 1=- 2=second"; got != want || second == first {
+		t.Fatalf("after the target changed: %s, want %s", got, want)
+	}
+
+	// A setting that is no part of a revision is handed down in the same
+	// kind of write. The target stays, and so does what the new group says.
+	s.update(func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RecoveryPolicy = workloadv1alpha1.ServingGroupRecreate
+	})
+	s.settle()
+	for _, group := range s.groups() {
+		if group.Spec.RecoveryPolicy != workloadv1alpha1.ServingGroupRecreate {
+			t.Fatalf("group %s was not told the recovery policy", group.Name)
+		}
+	}
+	if got, want := s.created(names), "0=- 1=- 2=second"; got != want {
+		t.Errorf("after another setting was handed down: %s, want %s", got, want)
+	}
+
+	// The replacement of a group that failed is born at the target of now.
+	if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), "llama-0-serve-1-1", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.settle()
+	if got, want := s.created(names), "0=second 1=- 2=second"; got != want {
+		t.Errorf("after a group was replaced: %s, want %s", got, want)
+	}
+
+	// Only this controller sets the annotation, and never beside another
+	// target. One that somebody else put there is taken away.
+	foreign := s.groups()[1]
+	foreign.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: first}
+	if _, err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Update(context.Background(), foreign, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	s.settle()
+	if got, want := s.created(names), "0=second 1=- 2=second"; got != want {
+		t.Errorf("after an annotation was put on a group by hand: %s, want %s", got, want)
+	}
+
+	// The template moves on, and then returns to the revision two of the
+	// groups were born at. They are groups that ran before by then.
+	s.update(setImage("model:v3"))
+	s.settle()
+	if got, want := s.created(names), "0=- 1=- 2=-"; got != want {
+		t.Errorf("after the target moved on: %s, want %s", got, want)
+	}
+	s.update(setImage("model:v2"))
+	s.settle()
+	if target := s.modelServing().Status.UpdateRevision; target != second {
+		t.Fatalf("the template that was restored has the revision %s, want the one it had: %s", target, second)
+	}
+	if got, want := s.created(names), "0=- 1=- 2=-"; got != want {
+		t.Errorf("after the target returned: %s, want %s", got, want)
+	}
 }

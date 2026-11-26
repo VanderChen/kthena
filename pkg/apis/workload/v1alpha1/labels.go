@@ -54,10 +54,13 @@ const (
 	SurgeScopeRole = "role"
 
 	// CreatedRevisionAnnotationKey is the ServingGroup annotation that names
-	// the revision a group was created from. The ModelServing controller sets
-	// it when it creates a new group under RoleRollingUpdate. It is never added
-	// to an object that exists, and an object created for Pods that exist
-	// already does not carry it.
+	// the revision a group was created from. It says that the group was born
+	// in the rollout to that revision, and it stays for as long as that
+	// revision is the target of the group. The ModelServing controller sets it
+	// when it creates a new group under RoleRollingUpdate, and removes it in
+	// the write that tells the group another target. It is never added to an
+	// object that exists, and an object created for Pods that exist already
+	// does not carry it.
 	CreatedRevisionAnnotationKey = "modelserving.volcano.sh/created-revision"
 
 	// ServingGroupAdoptionAnnotationKey is the ModelServing annotation that records

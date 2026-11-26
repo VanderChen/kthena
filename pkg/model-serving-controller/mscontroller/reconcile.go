@@ -433,8 +433,7 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 	if err != nil {
 		return err
 	}
-	updated := group.DeepCopy()
-	updated.Spec = workload.GroupSpec(r.ms, r.settings(action.Revision))
+	updated := told(group, workload.GroupSpec(r.ms, r.settings(action.Revision)))
 	_, err = c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) && action.Reason == grouplevel.ReasonMemberless {
 		// The group got its first member, or another status, in between. That
@@ -443,6 +442,31 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 		return nil
 	}
 	return err
+}
+
+// told returns group with the spec it is told, as it is written in one update.
+//
+// A group that was created new says, in an annotation, which revision it was
+// created from: it was born in the rollout to that revision. It stops saying
+// so in the write that tells it another target. From then on it is a group
+// that ran before the rollout of now, like any other. The annotation goes in
+// the same write as the target changes, so no reader ever finds the new target
+// beside it; and it is never added here, so a template that returns to the
+// revision a group was born at finds a group that does not say it.
+func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec) *workloadv1alpha1.ServingGroup {
+	updated := group.DeepCopy()
+	updated.Spec = spec
+	if outlived(group, spec.TargetRevision) {
+		delete(updated.Annotations, workloadv1alpha1.CreatedRevisionAnnotationKey)
+	}
+	return updated
+}
+
+// outlived reports whether group says that it was created from a revision
+// other than target.
+func outlived(group *workloadv1alpha1.ServingGroup, target string) bool {
+	created, born := group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey]
+	return born && created != target
 }
 
 // handDown brings the spec of every group in line with the ModelServing: the
@@ -475,12 +499,14 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 		// The generation it was derived from changes with every change of the
 		// ModelServing. It is only written along with something else.
 		desired.SourceGeneration = group.Spec.SourceGeneration
-		if apiequality.Semantic.DeepEqual(desired, group.Spec) {
+		// A group that names another revision than its target as the one it
+		// was created from is written as well: only this controller sets the
+		// annotation, and it never leaves it beside another target.
+		if apiequality.Semantic.DeepEqual(desired, group.Spec) && !outlived(group, desired.TargetRevision) {
 			continue
 		}
 		desired.SourceGeneration = r.ms.Generation
-		updated := group.DeepCopy()
-		updated.Spec = desired
+		updated := told(group, desired)
 		if _, err := c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
 			failures = append(failures, fmt.Errorf("hand the settings down to ServingGroup %s: %w", group.Name, err))
 		}
