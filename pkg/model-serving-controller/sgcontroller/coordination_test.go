@@ -312,12 +312,13 @@ func TestCoordinatedRolloutStopsAtThePartition(t *testing.T) {
 
 // In a group that was created at the target every instance is one of the
 // target, the ones below the partition of a Role included. One that has lost
-// its Pods is a started instance like the others, and its Pods are created
+// its Pods is a started instance like the others, and with the recovery
+// policy None, which completes an instance in place, its Pods are created
 // again at once. Taken for an instance of the baseline, which is what the
 // place below a partition is in a group that ran the baseline, it would make
 // its Role look as if it had not started the target: a Role that depends on
 // another would give the instance up and wait for that Role once more.
-func TestCoordinatedGroupCreatedAtTheTargetCreatesALostInstanceAgainAtOnce(t *testing.T) {
+func TestCoordinatedGroupCreatedAtTheTargetCreatesALostInstanceAgainAtOnceWithRecoveryNone(t *testing.T) {
 	h := coordinatedHarness(t, coordinated(1, 1, 1, "100%", true), func(ms *workloadv1alpha1.ModelServing) {
 		ms.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt32(1))
 		ms.Spec.Template.Roles[1].Partition = ptr.To(intstr.FromInt32(1))
@@ -346,6 +347,80 @@ func TestCoordinatedGroupCreatedAtTheTargetCreatesALostInstanceAgainAtOnce(t *te
 	}
 	if got := h.progress("model:v2"); got != "prefill:1/0 decode:1/0" {
 		t.Errorf("progress = %s, want both instances at the target", got)
+	}
+}
+
+// With the recovery policy RoleRecreate, the default, an instance that has
+// lost a Pod is not completed in place: it is drained and created anew. What
+// is created anew below the partition differs between the two kinds of group.
+// In a group that was created at the target it is an instance of the target.
+// In a group that ran the baseline it is an instance of the baseline, which
+// nothing holds back.
+//
+// Most of the time the difference is the revision alone. Here it is also a
+// wait: the Role has one instance, and its partition covers it. With that
+// instance gone the Role has none of the target left and starts the target
+// anew, and such a start waits until the Role it depends on is ready. A Role
+// that has another instance left, or a place above its partition, creates
+// the instance again in the next round.
+func TestCoordinatedGroupRecreatesALostInstanceBelowThePartition(t *testing.T) {
+	const prefill = "prefill-0-0=model:%[1]s/%[2]s prefill-0-1=model:%[1]s/%[2]s"
+	tests := []struct {
+		name string
+		// created is the revision the group says it was created from.
+		created string
+		// image and revision are what the group runs below the partitions.
+		image, revision string
+		// held: the instance is not created again while decode is not ready.
+		held bool
+	}{
+		{name: "a group that was created at the target starts the target anew and waits for the dependency", created: "rev-b", image: "v2", revision: "rev-b", held: true},
+		{name: "a group that ran the baseline does not", image: "v1", revision: "rev-a"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := coordinatedHarness(t, coordinated(1, 1, 1, "100%", true), func(ms *workloadv1alpha1.ModelServing) {
+				ms.Spec.RecoveryPolicy = workloadv1alpha1.RoleRecreate
+				ms.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt32(1))
+				ms.Spec.Template.Roles[1].Partition = ptr.To(intstr.FromInt32(1))
+			})
+			h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+				if tt.created != "" {
+					group.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: tt.created}
+				}
+				group.Spec.TargetRevision = "rev-b"
+			})
+			h.settleContainers()
+			whole := fmt.Sprintf("decode-0-0=model:%[1]s/%[2]s decode-0-1=model:%[1]s/%[2]s "+prefill, tt.image, tt.revision)
+			if got := h.podRevisions(); got != whole {
+				t.Fatalf("at the start the group runs %s, want %s", got, whole)
+			}
+
+			// decode stops being ready and is recreated; prefill loses a Pod.
+			// No Pod becomes ready while the group comes to rest.
+			h.crash("llama-0-decode-0-0")
+			h.lose("llama-0-prefill-0-1")
+			h.quiesce()
+			want, ledger := whole, "decode-0:Established/1 prefill-0:Established/1"
+			if tt.held {
+				want, ledger = strings.TrimSuffix(whole, " "+fmt.Sprintf(prefill, tt.image, tt.revision)), "decode-0:Established/1"
+			}
+			if got := h.podRevisions(); got != want {
+				t.Errorf("while decode is not ready the group runs %s, want %s", got, want)
+			}
+			if got := h.ledger(); got != ledger {
+				t.Errorf("while decode is not ready the ledger is %q, want %q", got, ledger)
+			}
+			if got := h.blocked(); tt.held && got != "DependencyNotReady" {
+				t.Errorf("blocked = %q, want the instance to wait for the dependency", got)
+			}
+
+			h.readyAll()
+			h.quiesce()
+			if got := h.podRevisions(); got != whole {
+				t.Errorf("once decode is ready the group runs %s, want %s", got, whole)
+			}
+		})
 	}
 }
 
