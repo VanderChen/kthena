@@ -415,6 +415,37 @@ func AllPodsLost(instances []Instance, strays []*corev1.Pod) bool {
 	return established
 }
 
+// BeingBorn reports whether nothing of a group was ever established, which
+// is one half of a group that is still being born; the other half is that it
+// has no Pod, and is for the caller to know. Only the ledger of group is
+// read, so the answer belongs to the resourceVersion of group.
+//
+// An instance was established when the ledger has an entry for it that is
+// not Creating at generation 0: it is established, or is being drained, or
+// is being created again after a drain.
+//
+// The ledger is not a history, and in three cases it says less than that.
+//
+// A group can have Pods and no instance that is established. An instance is
+// established in the round after its last Pod was created, and an instance
+// of which one Pod is refused is not established at all. That is why the
+// caller looks at the Pods as well.
+//
+// A group whose instances were all drained and are not wanted for now, its
+// Roles having been scaled to nothing, has no entry left.
+//
+// An instance that was drained before it was ever complete, a Pod of it
+// having failed first, reads as one that was established.
+func BeingBorn(group *workloadv1alpha1.ServingGroup) bool {
+	for _, entry := range group.Status.RoleInstances {
+		creating := entry.Phase == workloadv1alpha1.RoleInstanceCreating || entry.Phase == ""
+		if !creating || entry.Generation > 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // ApplyLedger returns ledger with the changes applied, sorted by Role and
 // index. Entries are identified by Role and index; ledger is not modified.
 func ApplyLedger(ledger []workloadv1alpha1.RoleInstanceStatus, changes map[InstanceKey]LedgerChange) []workloadv1alpha1.RoleInstanceStatus {

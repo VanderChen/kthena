@@ -398,3 +398,40 @@ func TestApplyLedger(t *testing.T) {
 		t.Error("ApplyLedger modified its input")
 	}
 }
+
+// A group is being born while nothing of it was ever established: while its
+// ledger has no entry but entries that are Creating at generation 0.
+func TestBeingBorn(t *testing.T) {
+	entry := func(index int32, phase workloadv1alpha1.RoleInstancePhase, generation int64) workloadv1alpha1.RoleInstanceStatus {
+		return workloadv1alpha1.RoleInstanceStatus{Role: "serve", Index: index, Phase: phase, Generation: generation}
+	}
+	tests := []struct {
+		name   string
+		ledger []workloadv1alpha1.RoleInstanceStatus
+		want   bool
+	}{
+		{name: "an empty ledger: the group has committed itself at most", want: true},
+		{name: "an entry that is Creating at generation 0 was never established",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, creating, 0)}, want: true},
+		{name: "nor was an entry without a phase",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, "", 0)}, want: true},
+		{name: "one instance is established, the others do not exist yet",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(1, established, 0)}},
+		{name: "every instance is established",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, established, 0), entry(1, established, 0)}},
+		{name: "an instance that is being drained was established",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, draining, 0)}},
+		{name: "so was one that is created again after a drain",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, creating, 1)}},
+		{name: "an instance that was never established beside one that was",
+			ledger: []workloadv1alpha1.RoleInstanceStatus{entry(0, creating, 0), entry(1, established, 0)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group := &workloadv1alpha1.ServingGroup{Status: workloadv1alpha1.ServingGroupStatus{RoleInstances: tt.ledger}}
+			if got := BeingBorn(group); got != tt.want {
+				t.Errorf("being born = %t, want %t", got, tt.want)
+			}
+		})
+	}
+}
