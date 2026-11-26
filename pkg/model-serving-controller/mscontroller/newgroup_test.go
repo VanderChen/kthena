@@ -27,10 +27,12 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 )
 
 // heldByARolePartition turns ms into two groups of three instances of the
@@ -401,5 +403,182 @@ func TestAGroupThatIsToldAnotherTargetStopsSayingWhereItComesFrom(t *testing.T) 
 	}
 	if got, want := s.created(names), "0=- 1=- 2=-"; got != want {
 		t.Errorf("after the target returned: %s, want %s", got, want)
+	}
+}
+
+// protected returns the UIDs of the Pods of the lowest instance of the Roles,
+// the one a partition of 1 protects, in the first two groups.
+func (s *system) protected(roles ...string) map[string]types.UID {
+	s.t.Helper()
+	uids := map[string]types.UID{}
+	for _, group := range s.groups()[:2] {
+		for name, uid := range s.podsOf(group.Name) {
+			for _, role := range roles {
+				if strings.HasPrefix(name, group.Name+"-"+role+"-0-") {
+					uids[name] = uid
+				}
+			}
+		}
+	}
+	return uids
+}
+
+// The partition of a Role keeps the lowest instances of a group that runs the
+// baseline at the baseline. A group that is created while the rollout stands
+// at the partition never ran the baseline: every instance of it, the one
+// below the partition included, is created from the template of now. The
+// groups that were there keep their protected instance, Pod for Pod.
+func TestANewGroupIsCreatedFromTheTargetBelowARolePartition(t *testing.T) {
+	const (
+		created = "0[route-0=route:v1 0=model:v1 1=model:v1 2=model:v1] 1[route-0=route:v1 0=model:v1 1=model:v1 2=model:v1]"
+		held    = "0[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] 1[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2]"
+		grown   = held + " 2[route-0=route:v1 0=model:v2 1=model:v2 2=model:v2]"
+	)
+	tests := []struct {
+		name string
+		// steps are the updates of the ModelServing, each settled before the next.
+		steps []func(*workloadv1alpha1.ModelServing)
+	}{
+		{name: "the count is raised after the rollout stopped at the partition",
+			steps: []func(*workloadv1alpha1.ModelServing){setImage("model:v2"), threeGroups}},
+		{name: "the count is raised with the template",
+			steps: []func(*workloadv1alpha1.ModelServing){func(ms *workloadv1alpha1.ModelServing) {
+				setImage("model:v2")(ms)
+				threeGroups(ms)
+			}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(heldByARolePartition))
+			s.settle()
+			if got := s.instances(); got != created {
+				t.Fatalf("created: %s", got)
+			}
+			baseline := s.modelServing().Status.CurrentRevision
+			kept := s.protected("serve")
+			if len(kept) != 4 {
+				t.Fatalf("the protected instances have the Pods %v, want an entry and a worker in each of two groups", kept)
+			}
+
+			for i, step := range tt.steps {
+				s.update(step)
+				s.settle()
+				if i+1 < len(tt.steps) {
+					if got := s.instances(); got != held {
+						t.Fatalf("at the partition: %s, want %s", got, held)
+					}
+				}
+			}
+
+			if got := s.instances(); got != grown {
+				t.Errorf("after the count was raised:\n got %s\nwant %s", got, grown)
+			}
+			if after := s.protected("serve"); !reflect.DeepEqual(after, kept) {
+				t.Errorf("Pods of the protected instances were replaced: %v, before %v", after, kept)
+			}
+			// The new group runs the target and counts as updated. The others
+			// stay where the partition holds them, and so does the baseline.
+			if got, want := s.counts()+" "+s.condition(), "replicas=3 updated=1 current=0 available=3 UpdateInProgress"; got != want {
+				t.Errorf("status = %s, want %s", got, want)
+			}
+			status := s.modelServing().Status
+			if status.CurrentRevision != baseline || status.UpdateRevision == baseline {
+				t.Errorf("revisions: current %s, update %s, before %s; want the baseline kept", status.CurrentRevision, status.UpdateRevision, baseline)
+			}
+			for _, group := range s.groups() {
+				if !groupReady(group) {
+					t.Errorf("group %s is not ready", group.Name)
+				}
+			}
+		})
+	}
+}
+
+// A group that is deleted comes back as a new object, and that is a new group
+// like one that is added: whole from the target. The other group keeps its
+// Pods.
+func TestAGroupThatIsDeletedUnderARolePartitionComesBackFromTheTarget(t *testing.T) {
+	s := newSystem(t, modelServing(heldByARolePartition))
+	s.settle()
+	s.update(setImage("model:v2"))
+	s.settle()
+	deleted, kept := s.groups()[1], s.podsOf("llama-0")
+
+	err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Delete(context.Background(), deleted.Name,
+		metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationForeground)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.settle()
+	if again := s.groups()[1]; again.Name != deleted.Name || again.UID == deleted.UID {
+		t.Fatalf("group %s has UID %s, before %s: want the same name and a new object", again.Name, again.UID, deleted.UID)
+	}
+	const want = "0[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] 1[route-0=route:v1 0=model:v2 1=model:v2 2=model:v2]"
+	if got := s.instances(); got != want {
+		t.Errorf("after the group came back:\n got %s\nwant %s", got, want)
+	}
+	if after := s.podsOf("llama-0"); !reflect.DeepEqual(after, kept) {
+		t.Errorf("Pods of the other group were replaced: %v, before %v", after, kept)
+	}
+}
+
+// The same when the Roles of a group are rolled together. The new group is
+// created whole from the target, in the order of the dependencies: the Role
+// that depends on another waits for it with every instance, the one below
+// its partition like the others.
+func TestANewGroupOfCoordinatedRolesIsCreatedFromTheTarget(t *testing.T) {
+	const (
+		held  = "0[decode-0=model:v1 decode-1=model:v2 prefill-0=model:v1 prefill-1=model:v2] 1[decode-0=model:v1 decode-1=model:v2 prefill-0=model:v1 prefill-1=model:v2]"
+		grown = held + " 2[decode-0=model:v2 decode-1=model:v2 prefill-0=model:v2 prefill-1=model:v2]"
+	)
+	s := newSystem(t, modelServing(coordinated, func(ms *workloadv1alpha1.ModelServing) {
+		for i := range ms.Spec.Template.Roles {
+			ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromInt32(1))
+		}
+	}))
+	s.settle()
+	s.update(setImages("model:v2"))
+	s.settle()
+	if got := s.instances(); got != held {
+		t.Fatalf("at the partitions: %s, want %s", got, held)
+	}
+	kept := s.protected("prefill", "decode")
+	if len(kept) != 8 {
+		t.Fatalf("the protected instances have the Pods %v, want an entry and a worker of each Role in each of two groups", kept)
+	}
+
+	// prefill depends on decode: no Pod of prefill is created in the new
+	// group before a Pod of decode is ready there.
+	s.invariant = func() {
+		prefill, ready := 0, 0
+		for _, pod := range s.pods() {
+			if pod.Labels[workloadv1alpha1.GroupNameLabelKey] != "llama-2" {
+				continue
+			}
+			switch pod.Labels[workloadv1alpha1.RoleLabelKey] {
+			case "prefill":
+				prefill++
+			case "decode":
+				if utils.IsPodRunningAndReady(pod) {
+					ready++
+				}
+			}
+		}
+		if prefill > 0 && ready == 0 {
+			t.Fatalf("the new group has %d Pods of prefill and no ready Pod of decode: %s", prefill, s.instances())
+		}
+	}
+	s.update(threeGroups)
+	s.settle()
+	s.invariant = nil
+
+	if got := s.instances(); got != grown {
+		t.Errorf("after the count was raised:\n got %s\nwant %s", got, grown)
+	}
+	if after := s.protected("prefill", "decode"); !reflect.DeepEqual(after, kept) {
+		t.Errorf("Pods of the protected instances were replaced: %v, before %v", after, kept)
+	}
+	if got, want := s.counts()+" "+s.coordination(), "replicas=3 updated=1 current=0 available=3 False/RolloutComplete"; got != want {
+		t.Errorf("status = %s, want %s", got, want)
 	}
 }
