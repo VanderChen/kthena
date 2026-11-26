@@ -64,7 +64,9 @@ const (
 	// is never added to an object that has none, and an object created for
 	// Pods that exist already does not carry it. A group that carries it
 	// creates every Role instance from that revision, the ones below the
-	// partition of a Role included. The annotation exists under
+	// partition of a Role included, while every Pod it has is of that
+	// revision; a group that has a Pod of another revision creates them from
+	// the baseline like any other group. The annotation exists under
 	// RoleRollingUpdate alone: it is removed in the write that tells the
 	// group that it is replaced as a whole.
 	CreatedRevisionAnnotationKey = "modelserving.volcano.sh/created-revision"
