@@ -456,6 +456,9 @@ func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if len(plan.Waiting) > 0 {
+				t.Errorf("waiting = %v, want nothing to wait for", plan.Waiting)
+			}
 			if got := wantsOf(plan); got != tt.want {
 				t.Errorf("wants = %q, want %q", got, tt.want)
 			}
