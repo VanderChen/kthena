@@ -60,6 +60,8 @@ The same revision values appear in `status.currentRevision` and `status.updateRe
 
 A ServingGroup with the annotation `modelserving.volcano.sh/surge: serving-group` is temporary capacity of a rolling update with `maxSurge`. It is removed when the rollout ends: every group runs the new revision and `replicas` other groups have a Pod. Until then it stays, and serves if it is ready. A surge group that stays after every other group is updated means that a regular group has no Pod: look for the group with 0 Pods in `kubectl get servinggroups` and read its `ReconcileFailed` condition (see [A quota that is too small](#a-quota-that-is-too-small)). The annotation is managed by the controller; do not set or remove it.
 
+Under `RoleRollingUpdate`, a ServingGroup that the controller created new carries the annotation `modelserving.volcano.sh/created-revision` for as long as the revision it was created from is the update revision of the ModelServing. Every Role instance of such a group is created from that revision. This matters when a Role has a `partition`. The partition keeps the lowest instances of a group at the current revision, and such an instance is created from the current revision again when it is lost. A group that is added during the rollout never ran the current revision: all its instances run the update revision, and one that is lost comes back at the update revision. The controller removes the annotation when the update revision changes, and never adds it later: from then on the group is treated like the groups that were there before. A ServingGroup that was created for Pods that existed already, during an upgrade from a version without ServingGroup objects or after a deletion with `--cascade=orphan`, does not carry it. Do not set or remove the annotation.
+
 ### Read the Status of a Group
 
 ```sh
@@ -306,7 +308,7 @@ Because the phase of each Role instance is stored in the `status` of the group, 
 kubectl delete servinggroup gang-0 --cascade=foreground
 ```
 
-The object stays, marked for deletion, until its Pods, Services and PodGroup are deleted. Then the ModelServing controller creates a ServingGroup with the same name and a new UID, and the group gets new Pods. The new group has the revision that its ordinal has now: the update revision, or the current revision when the ordinal is below `partition` under `ServingGroupRollingUpdate`. The deletion is not checked against `maxUnavailable`: the group is unavailable until its new Pods are ready.
+The object stays, marked for deletion, until its Pods, Services and PodGroup are deleted. Then the ModelServing controller creates a ServingGroup with the same name and a new UID, and the group gets new Pods. The new group has the revision that its ordinal has now: the update revision, or the current revision when the ordinal is below `partition` under `ServingGroupRollingUpdate`. Under `RoleRollingUpdate` every Role instance of the new group is created from the update revision, the instances below the `partition` of a Role included. The deletion is not checked against `maxUnavailable`: the group is unavailable until its new Pods are ready.
 
 Without `--cascade=foreground`, `kubectl` removes the object at once and the garbage collector deletes the Pods afterwards. The result is the same. The new ServingGroup creates no Pod while a Pod of the old object exists: it reports `ReconcileFailed` with reason `NameOccupied` until the last of them is gone.
 

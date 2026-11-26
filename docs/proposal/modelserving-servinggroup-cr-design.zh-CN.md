@@ -52,6 +52,7 @@
 | V10 | `Available`、`Progressing`、`UpdateInProgress` 同一时刻至多一个为真；message 写新的事实 | 原样沿用今天的 `utils.SetConditionWithRolloutAndProgressState`：`Progressing` 和 `UpdateInProgress` 可以同时为真，已经为真的 condition 不刷新 message | 008 对今天的描述不准确。照它做是一处行为变化，CLI 的显示次序也是按今天的语义写的 |
 | V11 | `status.currentRevision` 为空而有组时，读不回来就等（`BaselineUnknown`） | 平时照 008。只有接管（T3）这一处，`status.currentRevision` 为空时照今天的做法取存量的组里出现最多的非目标版本，都是目标版本时取 T。只数会被接管的 Pod（不在终止中，有成员身份，owner 是这个 ModelServing 或者是待接管的无主成员），只认这个 ModelServing 读得出来的版本 | 接管来的组上还没有基线的副本可读。旧版本在初次创建完成之前 `currentRevision` 是空的。同名的前一个 ModelServing 留下的 Pod、正在删除的 Pod 的版本不是这个 ModelServing 的：按它建出来的组渲染不出来（R2-M4） |
 | V12 | G3b：没有要滚的了就回收 surge 组。确认不就绪的立刻回收；其余的在 `ready` 不低于下限时回收。不看正式的位置补齐没有 | 多一个前提。**有成员的 surge 组顶替着一个正式的位置**：另外有 N 个活着的组已经有成员时它才是多余的，才回收。「有成员」看 Pod 缓存：有不在终止中的成员 Pod，或者本来就不要 Pod。`status.pods` 不算数：它在第一个 Pod 建出来之前就写上了（3.6 的先写后建），终止中的 Pod 也算在里面。这一轮刚建的组、还在等收养的组不算。自己没有成员的 surge 组不顶替任何位置，照 008 回收。一个例外是「没有余地」：缺一个正式的组（终止中的、失败的正式组还占着位置，不算缺），而活着的组已经占满 N + S（`maxSurge` 调小之后 surge 组比 S 多），空着的位置要等一个 surge 组走了才建得出来，这时照 008 回收。过了前提之后，「确认不就绪的立刻回收、其余的看下限」不变。Role 的临时实例用同一个函数，规则相同 | 行为规范测试查出来的（runner F9，`grace-restart` RUN-431，9A.3）。滚动的最后一步，最后一个旧组还在终止、或者它的替代刚建出对象还没有 Pod，这时删掉 surge 组，有 Pod 的组就不到 N 个。上游（`surge_rollout.go` 的 `retireSurgeServingGroups`、`expectedWithSurge`）要等终止中的旧组消失、空出来的序号重建之后才回收，就绪的和不就绪的一样；上游建组时 Pod 是同步建出来的，建不出来这一轮就在回收之前结束。这里组对象和 Pod 分两步，所以前提写成「有 Pod」。runner 的账本在有不在终止中的 Pod 的单元不多于 N 时删目标版本的单元记 `UNEXPECTED_TARGET_REPLACED`，不分就绪与否。用户选定照上游（决策 I-67、I-71、I-74）。代价也与上游相同：替代的组的 Pod 建不出来的时候 surge 组一直留着（第 10 章）。008 的参考模型不动；改了这一条规则的副本在任务 010 的 `evidence/model-vectors/model-010/`，对照向量从它重新导出，每个驱动的结果与 008 的逐项比较过（`results-vs-008.md`）|
+| V13 | Role 一级与组一级是同一套按序号的规则（4.9）：Role 的 partition 之下缺的实例按基线建，不分这个组是什么时候建的 | 在眼下这次滚动里新建的组，每个实例都按目标建，partition 之下的也是。组靠注解 `created-revision` 知道自己是新建的（2.3）。这样的组在同一次滚动里丢了 partition 之下的实例，也按目标建回来；上游这时按 `status.currentRevision` 建。给它下发别的目标时注解摘掉，从此它和别的组一样 | 行为规范测试查出来的（runner F13，`normal` RUN-231、233、273，9A.3）。上游新建一个组时整个组按当前模板建（`scaleUpServingGroups` 调 `CreatePodsForServingGroup`），契约的 P13、P14 也是这样：partition 保护的是已有的组里的旧版本，不是要新的组造出一个旧版本的实例。丢了之后也按目标建，是这条规则带来的：实例的版本每一轮从对象上现定，组不记得哪个实例是后来丢的；一个从来没有跑过旧版本的组里冒出一个旧版本的实例，也说不通（决策 I-77）|
 
 ### 1.4 对 upstream 用户的行为变化
 
@@ -78,7 +79,7 @@
 | --- | --- | --- |
 | `revision` | `ServingGroupRollingUpdate`：这个组的版本。`RoleRollingUpdate`：空 | 组里每个实例的模板 |
 | `targetRevision` | T，两种滚动方式下都下发 | `RoleRollingUpdate`：Role 一级滚动的目标。`ServingGroupRollingUpdate`：组用它判断自己是不是旧版本的组（表后的说明） |
-| `baselineRevision` | `ModelServing.status.currentRevision` | 受 Role partition 保护的实例；A4 |
+| `baselineRevision` | `ModelServing.status.currentRevision` | 受 Role partition 保护的实例（带 `created-revision` 注解的组不用它，2.3）；A4 |
 | `sourceGeneration` | `ModelServing.metadata.generation` | A2 |
 | `expectedPods` | 这个组的版本的模板：Σ `replicas` ×（1 + `workerReplicas`）。`RoleRollingUpdate` 下取 T 的布局 | `scale` 子资源；模板读不到时的 Ready（A1） |
 | `rolloutStrategy.type` | `spec.rolloutStrategy.type` | 哪一层的滚动参数生效 |
@@ -124,7 +125,7 @@
 | --- | --- |
 | ServingGroup 的名字 | `<ModelServing 名>-<序号>` |
 | ServingGroup 的标签 | `modelserving.volcano.sh/name` |
-| ServingGroup 的注解 | `modelserving.volcano.sh/surge: serving-group`：创建时写，转正时摘，不后加 |
+| ServingGroup 的注解 | `modelserving.volcano.sh/surge: serving-group`：创建时写，转正时摘，不后加。`modelserving.volcano.sh/created-revision: <版本>`：`RoleRollingUpdate` 下新建一个组时写，值是建它用的版本；给这个组下发别的目标的那一次写里摘掉，不后加（表后的说明） |
 | ServingGroup 的 owner | ModelServing，`controller`、`blockOwnerDeletion` |
 | Pod、PodGroup、Service 的 owner | ServingGroup，`controller`、`blockOwnerDeletion`。PodGroup 今天没有 `blockOwnerDeletion`，补上 |
 | Pod 的标签 | `modelserving.volcano.sh/instance-generation`：所在实例的代际号 |
@@ -137,6 +138,10 @@
 `scale` 子资源只给 PodDisruptionBudget 解析期望数用：PDB 对它选中的每个 Pod 找 controller owner，把这些 owner 的 `scale` 相加。选中一个 ModelServing 全部 Pod 的 PDB，分母是各组 `expectedPods` 之和，是对的。只选中某一种 Role 的 PDB，分母仍然是整组的 Pod 数，偏大；这是已知的限制，写进用户文档。今天 owner 是 ModelServing，分母是组的个数，比例型的 PDB 本来就不对。
 
 **Pod 上组一级 surge 标记的副本。**标记本身在组对象上。两个 controller 只在一处读 Pod 上的副本：组对象丢了而 Pod 还在时（orphan 方式删组，或者旧版本留下的存量），找回这个组的那一步（S1′、T3）靠它知道这是不是 surge 组。所以副本要跟着组走：ModelServing controller 把组转正（摘掉组上的注解）之后，ServingGroup controller 在这个组的下一轮里把自己名下 Pod 上值是 `serving-group` 的注解摘掉，每个 Pod 一次带 UID 和 resourceVersion 的 PATCH。这个注解不在摘要里（3.3），所以不引起 `status` 的写。没有 PodGroup 的轮次只做删除（3.7），这一步也不做，留到下一轮。上游在转正时就把 Pod 上的注解摘掉；第一版只摘了组上的，Pod 上的副本留到 Pod 消失：日后丢了对象的组会被当成 surge 组找回，读这个注解的工具会把在服务的 Pod 当成临时的（runner 的发现 F2，回归复核的 R-2）。
+
+**组上的 `created-revision` 注解。**`RoleRollingUpdate` 下组的 `spec.revision` 是空的，组自己看不出它是滚动之前就有的，还是滚动途中新建的。这两种组要分开：Role 的 partition 让已有的组里它之下的实例留在基线，缺了也按基线建；滚动途中新建的组没有跑过基线，整个组按目标建，partition 之下的实例也是（1.3 的 V13）。ModelServing controller 新建一个组（G4）时在创建请求里写上这个注解，值是建这个组用的版本，也就是这时的目标。为已有的 Pod 找回对象（S1′）和接管（T3）建出来的对象不写：它们代表的是已有的组。失败的组被替换、组被删掉之后重建，建出来的是新对象，也是新的组，照样写。ServingGroup controller 只在一处读它：注解的值等于 `spec.targetRevision` 时，这个组的 Role 计划把目标当作基线（第 5 章）。每一轮都从对象上读，账本里不记，所以先写后建之间换了进程、或者这样的组在同一次滚动里丢了 partition 之下的实例，建出来的仍然是目标。
+
+注解说的是「这个组是在眼下这次滚动里出生的」，所以目标一变就摘掉：ModelServing controller 给一个组下发的目标与注解的值不同时，在改 `spec.targetRevision` 的同一次 `Update` 里把它摘掉，此后不再加。会改到目标的写有两处：下发设置；改一个组的版本（发起整组原地更新，或者把没有成员的组改成它的序号现在该有的版本）。两处都这样做。不摘的话，模板回到早先的样子时它又会生效：版本的身份是从模板算出来的，模板改回去，身份就是原来的那个。比如每个组都是 v1 时建的，滚到 v2 做完之后带着 Role 的 partition 改回 v1；或者灰度途中加了一个组，灰度放弃了又重做。这时注解的值又等于目标，而这些组已经跑过基线，它们 partition 之下的实例丢了要按基线建。两样在同一次写里改，所以谁也读不到新的目标配着旧的注解；这次写失败或者冲突时两样都没有变，下一轮照样再发。不改目标的写不动它：目标版本记不下来时的受限轮次（7.4）只减副本数，转正只摘 surge 标记。只有 ModelServing controller 写这个注解；别人加上去、与组的目标不一致的，下发时摘掉。
 
 ## 3. ServingGroup `status` 的设计
 
@@ -511,8 +516,8 @@ client-go 的 fake clientset 不检查 resourceVersion 和 UID 的前置条件�
 
 | 部分 | 做法 |
 | --- | --- |
-| Role 的扩缩容；独立的 `RoleRollingUpdate`（额度、partition、surge、转正、回收、次序） | **调用同一个计划函数** `grouplevel.Plan`，单元是一个组里某种 Role 的实例。实例到单元的对应：清空中 = 终止中；已建成并且成员全部就绪 = 就绪；Role 一级的 surge 标记 = surge；版本按这个 Role 的模板比较，语义相同的算同一个版本。`ServingGroupRollingUpdate` 下用它「不分版本」的那一支：只扩缩、补洞、摘掉留下的标记 |
-| roleCoordination | 纯函数（`calculateRoleRolloutLimits`、`slowestReadyProgress`、`allowedStartedReplicas`、依赖闭包、稳定集合等）连同它们的测试原样搬进 `servinggroup/coordination.go`。读 `datastore` 的部分改成读账本和成员（`coordination_state.go`）。它不是另一套计划，而是 Role 计划上的一层过滤：`grouplevel.Plan` 给出候选，协调的上界决定哪些实例这一轮可以开始、哪些删除要压住。基线的副本数照旧记在 ControllerRevision 的注解上，另经 `spec.roles[].baselineReplicas` 下发；没拿到它的组这一轮报 `ReconcileFailed`、什么都不滚。组在 `status` 里报 `CoordinatedRoleRolloutBlocked`，ModelServing 取序号最小的那个组的；有组还没有按下发的 `spec` 报告时不说 `RolloutComplete`（保守的一侧：校验 webhook 读的是「不是 `RolloutComplete`」）。协调滚动途中的创建与删除一样要直读。从上游逐字搬来的规则里有两种停住而 condition 不说的状态，原样保留（第 10 章） |
+| Role 的扩缩容；独立的 `RoleRollingUpdate`（额度、partition、surge、转正、回收、次序） | **调用同一个计划函数** `grouplevel.Plan`，单元是一个组里某种 Role 的实例。实例到单元的对应：清空中 = 终止中；已建成并且成员全部就绪 = 就绪；Role 一级的 surge 标记 = surge；版本按这个 Role 的模板比较，语义相同的算同一个版本。基线取 `spec.baselineRevision`；带 `created-revision` 注解并且它等于目标的组，基线取目标（2.3）。`ServingGroupRollingUpdate` 下用它「不分版本」的那一支：只扩缩、补洞、摘掉留下的标记 |
+| roleCoordination | 纯函数（`calculateRoleRolloutLimits`、`slowestReadyProgress`、`allowedStartedReplicas`、依赖闭包、稳定集合等）连同它们的测试原样搬进 `servinggroup/coordination.go`。读 `datastore` 的部分改成读账本和成员（`coordination_state.go`）。它不是另一套计划，而是 Role 计划上的一层过滤：`grouplevel.Plan` 给出候选，协调的上界决定哪些实例这一轮可以开始、哪些删除要压住。基线的副本数照旧记在 ControllerRevision 的注解上，另经 `spec.roles[].baselineReplicas` 下发；没拿到它的组这一轮报 `ReconcileFailed`、什么都不滚。组在 `status` 里报 `CoordinatedRoleRolloutBlocked`，ModelServing 取序号最小的那个组的；有组还没有按下发的 `spec` 报告时不说 `RolloutComplete`（保守的一侧：校验 webhook 读的是「不是 `RolloutComplete`」）。协调滚动途中的创建与删除一样要直读。账本里有而还没有 Pod 的实例，协调按它将要用的版本算：partition 之下是基线，其余是目标；基线取目标的组里都是目标，与 Role 计划一致。从上游逐字搬来的规则里有两种停住而 condition 不说的状态，原样保留（第 10 章） |
 | PodGroup 的布局（`workloadForPodGroup`） | 搬成 `sgcontroller.podGroupView`。`RoleRollingUpdate` 下的组，不论有没有 roleCoordination，每个 Role 取各实例还在跑的最小布局；roleCoordination 另有一条，等依赖的 Role 的 gang 下限先不抬（7.3） |
 | 目标版本记不下来时的缩容（`scaleDownOnRevisionError`） | 搬成 `mscontroller` 里一个受限的轮次：只做副本数的减少，不建、不换（7.4） |
 | 原地更新 | `inplace` 包不动。`controller/inplace_update.go` 里按单元推进的部分搬进 `sgcontroller`，判定是纯函数 `servinggroup.PlanInPlace`（表后的说明）；「能不能原地更新」里只看模板的部分（`OnlyImagesChanged`）移到 ModelServing controller |
@@ -904,7 +909,7 @@ ModelServing controller 每一轮先把当前模板记成 ControllerRevision，�
 
 ### 9A.3 行为规范测试之后
 
-runner 在 `258927f7` 的构建上跑了 220 例，与变更前的基线逐例对比，查出下面几处。前三处是回归，都修了；第四处是加固；第五处是组一级的规则 G3b 与契约不同，当时没有改，列给用户之后按用户的选择改了（最后一行）。
+runner 在 `258927f7` 的构建上跑了 220 例，与变更前的基线逐例对比，查出下面几处。前三处是回归，都修了；第四处是加固；第五处是组一级的规则 G3b 与契约不同，当时没有改，列给用户之后按用户的选择改了（第五行）。最后一行是 `normal` 套件查出来的另一处回归，也修了。
 
 | 规则 | 没有它会怎样 | 来源 | 测试 |
 | --- | --- | --- | --- |
@@ -913,6 +918,7 @@ runner 在 `258927f7` 的构建上跑了 220 例，与变更前的基线逐例�
 | 同一轮里离开的同一个 Role 的实例，按序号从大到小删 | 上游和契约 2.2 都是降序；原先按升序发 DELETE | runner F7（`boundary-numeric` RUN-560）；I-65 | `sgcontroller.TestInstancesOfABatchLeaveInDescendingOrder` |
 | ModelServing controller 的一轮在每个写之前看一眼缓存：ModelServing 的 generation 已经变了就结束这一轮，不写 `status`，下一轮在新的 `spec` 上计划 | 一轮是在读到的 ModelServing 上计划的，写是一个一个发的。中间用户改了模板，剩下的写照旧发出去：新的要求被接受几十毫秒之后，还按旧版本建出一个组，随后要再换掉。窗口缩到 informer 送达变更的那几毫秒，没有消除 | runner F8（`servinggroup-compound-v2` RUN-637，三次里失败两次；基线上也失败）；I-66 | `mscontroller.TestARoundStopsWritingWhenTheModelServingHasChanged` |
 | 有成员的 surge 组只在多余的时候回收：另外有 N 个活着的组有不在终止中的 Pod（或者不要 Pod）；`status.pods`、这一轮刚建的组、等收养的组都不算。自己没有成员的 surge 组照旧回收。例外是没有余地（缺一个正式的组，而活着的组占满 N + S）。G3b，1.3 的 V12 | `N=3`、`maxSurge=1`、`maxUnavailable=1`，surge 组一直不就绪。最后一个旧组开始终止、它的替代还没建出来的时候，surge 组被删掉，新的 0 号组建出来之前只有两个组。可用的组数没有低于下限，但是 runner 的账本把它记成 `UNEXPECTED_TARGET_REPLACED`；上游在空出来的序号重建之前留着它。两种更窄的写法都不够，评审逐一指出：只对不就绪的 surge 组加「组数多于 N」，补位（G4）和回收在同一轮里，新的组对象建出来的那一轮 Pod 还没有，就绪的 surge 组在同一个位置上也一样被记违反；用「不是没有成员」（`status.pods` 不为 0）当「有成员」，替代的组刚写下要建 Pod、第一个 Pod 还没建出来时 surge 组就会走，Kind 上只差 5 毫秒，Pod 建不出来时必然走 | runner F9（`grace-restart` RUN-431，基线上通过）；I-67、I-71、I-74；第三轮独立评审和提案分析（任务 010 的 `subagents/i71-*.md`）| `grouplevel.TestPlanReclaimSurge`（从「is kept while the last old group is terminating」到「neither is a failed one that is not drained」的 21 例）；`servinggroup.TestPlanRolesOfAGroupThatIsRolledRoleByRole` 的 6 行；`sgcontroller.TestARoleSurgeInstanceStaysUntilTheLastPlaceHasAPod`；`mscontroller` 的三个 `TestTheSurgeGroupStays…`（两个 controller 一起跑：最后一个旧组慢慢终止、替代的 Pod 被拒绝创建、另一个组的 Pod 全在终止，各有就绪和不就绪的 surge 组两种）。规则和两处取数的 20 处单点改动都被判错。`TestPlanAgainstModel` 的向量从改过的参考模型重新导出 |
+| `RoleRollingUpdate` 下新建的组整个按目标建，Role 的 partition 之下的实例也是。ModelServing controller 新建组时写注解 `created-revision`，值是建它用的版本；给这个组下发别的目标时在同一次写里摘掉，不后加。注解的值等于 `spec.targetRevision` 的组，Role 计划的基线取目标；协调滚动读的是同一个计划。2.3，1.3 的 V13 | 两个组，Role `f` 三个实例、`maxUnavailable` 是 1、partition 是 1，模板从 A 改成 B，各组停在 `f0` 是 A、`f1` 和 `f2` 是 B。这时把组数调成 3，或者组数和模板在同一次请求里改：新的组的 `f0` 按基线建成 A。上游整个新组都是 B。注解要是不摘：版本的身份是从模板算出来的，模板改回这个组出生时的样子，身份就是原来的那个，注解的值又等于目标，这个早已跑过基线的组又被当成新建的，它 partition 之下的实例丢了按目标建回来。每个组都带着出生时的版本，所以「滚完之后带着 partition 改回去」这一种经过里每个组都是这样 | runner F13（normal RUN-231、233、273，基线上通过）；I-77 | `servinggroup.TestPlanRolesOfAGroupThatWasCreatedAtTheTarget`，`TestPlanRolesRolledTogether` 里「a group created at the target」的三行和「an annotation that names another revision」一行；`sgcontroller` 的三个 `TestAGroupCreatedAtTheTarget…`（第一轮、丢了 partition 之下的实例、每个写之前停一次共 15 个停点）和 `TestCoordinatedGroupCreatedAtTheTargetCreatesALostInstanceAgainAtOnce`；`mscontroller`（两个 controller 一起跑）：`TestANewGroupIsCreatedFromTheTargetBelowARolePartition`（RUN-231、233 和 RUN-273 两种）、`TestAGroupThatIsDeletedUnderARolePartitionComesBackFromTheTarget`、`TestANewGroupOfCoordinatedRolesIsCreatedFromTheTarget`、`TestANewGroupSaysWhichRevisionItWasCreatedFrom`、`TestAnObjectForPodsThatExistDoesNotSayWhereItComesFrom`；注解的摘除：`TestTheWriteThatTellsAGroupAnotherTarget`、`TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite`（一轮在每个写之后截断）、`TestAGroupThatIsToldAnotherTargetStopsSayingWhereItComesFrom`、`TestAGroupThatRanTheBaselineCreatesItsProtectedInstanceFromTheBaseline`（滚完之后改回去、灰度放弃又重做、目标走开又回来三种经过）|
 
 ## 10. 没有解决的
 
