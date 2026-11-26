@@ -32,7 +32,7 @@ func uidOf(ordinal int) types.UID {
 
 // group returns a regular group that is confirmed Ready and whose Pods are Ready.
 func group(ordinal int, rev string, mods ...func(*Group)) Group {
-	g := Group{Ordinal: ordinal, UID: uidOf(ordinal), Revision: rev, Observed: true, Fresh: true, Ready: true, PodsReady: true}
+	g := Group{Ordinal: ordinal, UID: uidOf(ordinal), Revision: rev, Observed: true, Fresh: true, Ready: true, PodsReady: true, HasPods: true}
 	for _, mod := range mods {
 		mod(&g)
 	}
@@ -65,12 +65,19 @@ func podsBad(g *Group) { g.PodsReady, g.Fresh = false, false }
 // memberless: the object is there, observed, and has no Pod.
 func memberless(g *Group) {
 	notReady(g)
-	g.Memberless = true
+	g.Memberless, g.HasPods = true, false
+}
+
+// noPods: the group is not memberless and no Pod of it is there to stay. Its
+// status says that Pods are being created, or every Pod it has is terminating.
+func noPods(g *Group) {
+	notReady(g)
+	g.HasPods = false
 }
 
 // empty: every Role has zero replicas; such a group has no Pod and is Ready.
 func empty(g *Group) {
-	g.Empty, g.Memberless, g.PodsReady = true, true, false
+	g.Empty, g.Memberless, g.PodsReady, g.HasPods = true, true, false, false
 }
 
 func cost(c int64) func(*Group) {
@@ -569,8 +576,8 @@ func TestPlanReclaimSurge(t *testing.T) {
 		},
 		{
 			// The end of a rollout: the last old group is terminating and its
-			// replacement is not created yet. N others do not have their
-			// members, so the surge group is not surplus.
+			// replacement is not created yet. The surge group stands in for
+			// that place: only two other groups have their members.
 			name: "one that is confirmed not Ready is kept while the last old group is terminating",
 			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
 				group(3, "v2", surge, notReady)}},
@@ -581,17 +588,29 @@ func TestPlanReclaimSurge(t *testing.T) {
 				group(3, "v2", surge)}},
 		},
 		{
-			name: "the group created in this round has no member yet: the place is filled, the surge group stays",
+			name: "the group created in this round has no Pod yet: the place is filled, the surge group stays",
 			in:   Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(1, "v2"), group(2, "v2"), group(3, "v2", surge, notReady)}},
 			want: []Action{create(0, "v2", ReasonRegular)},
 		},
 		{
-			name: "it stays while the replacement has no Pod",
+			name: "it stays while the replacement has no member",
 			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", memberless), group(1, "v2"), group(2, "v2"),
 				group(3, "v2", surge, notReady)}},
 		},
 		{
-			name: "it is reclaimed once N other groups have their members, Ready or not",
+			// The ServingGroup controller writes status.pods before it creates
+			// the first Pod. That is a promise, not a Pod.
+			name: "it stays while the status of the replacement only says that its Pods are being created",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", noPods), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, notReady)}},
+		},
+		{
+			name: "a Ready one stays then as well",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", noPods), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge)}},
+		},
+		{
+			name: "it is reclaimed once N other groups have a Pod, Ready or not",
 			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v2", notReady), group(1, "v2"), group(2, "v2"),
 				group(3, "v2", surge, notReady)}},
 			want: []Action{del(3, ReasonReclaimSurge)},
@@ -613,9 +632,35 @@ func TestPlanReclaimSurge(t *testing.T) {
 			want: []Action{del(4, ReasonReclaimSurge)},
 		},
 		{
+			name: "a surge group without a member of its own stands in for nothing: reclaimed while a place is open",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, memberless)}},
+			want: []Action{del(3, ReasonReclaimSurge)},
+		},
+		{
+			name: "so is one whose status only says that its Pods are being created",
+			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
+				group(3, "v2", surge, noPods)}},
+			want: []Action{del(3, ReasonReclaimSurge)},
+		},
+		{
+			// Group 3 comes first in the order and is kept; group 2 behind it
+			// has no member and goes. It takes nothing off the count of the others.
+			name: "a surge group that stands in is passed over, the one behind it is looked at",
+			in: Input{Spec: steady(2, 1, 2), Groups: []Group{group(0, "v1"), group(1, "v1", memberless),
+				group(2, "v1", surge, memberless), group(3, "v1", surge, notReady)}},
+			want: []Action{del(2, ReasonReclaimSurge)},
+		},
+		{
+			name: "one without a member takes nothing off the count of the others: the next one is surplus still",
+			in: Input{Spec: steady(2, 1, 2), Groups: []Group{group(0, "v1"), group(1, "v1"), group(2, "v1", surge, notReady),
+				group(3, "v1", surge, memberless)}},
+			want: []Action{del(3, ReasonReclaimSurge), del(2, ReasonReclaimSurge)},
+		},
+		{
 			// maxSurge was lowered to 0 with a surge group left. The place of
 			// ordinal 1 cannot be created while two groups are live.
-			name: "no room: fewer than N regular groups are live and the live groups fill N + S",
+			name: "no room: a regular place is missing and the live groups fill N + S",
 			in:   Input{Spec: steady(2, 1, 0), Groups: []Group{group(0, "v1"), group(2, "v1", surge)}},
 			want: []Action{del(2, ReasonReclaimSurge)},
 		},
@@ -628,6 +673,16 @@ func TestPlanReclaimSurge(t *testing.T) {
 			in: Input{Spec: steady(3, 2, 1), Groups: []Group{group(0, "v1"), group(1, "v1"), group(3, "v1", surge, notReady),
 				group(4, "v1", surge, notReady)}},
 			want: []Action{del(4, ReasonReclaimSurge)},
+		},
+		{
+			name: "a regular group that is terminating still holds its place: that is not no room",
+			in: Input{Spec: steady(3, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v1"), group(2, "v1"),
+				group(3, "v1", surge)}},
+		},
+		{
+			name: "neither is a failed one that is not drained",
+			in: Input{Spec: steady(3, 1, 0), Groups: []Group{group(0, "v1", failed), group(1, "v1"), group(2, "v1"),
+				group(3, "v1", surge, notReady)}},
 		},
 		{
 			name: "one that is not observed asks the floor of ready itself: kept",

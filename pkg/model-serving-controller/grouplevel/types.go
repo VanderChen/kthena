@@ -110,6 +110,11 @@ type Group struct {
 	PodsReady bool
 	// Memberless: status.pods is 0 and the Pod cache shows no member Pod.
 	Memberless bool
+	// HasPods is taken from the Pod cache: it shows a member Pod of the group
+	// that is not terminating. A group that is not Memberless may have none:
+	// status.pods also counts the Pods that are still to be created and the
+	// ones that are terminating. Only G3b reads it.
+	HasPods bool
 	// Empty: every Role has zero replicas (spec).
 	Empty bool
 	// RecreateRequired: the RecreateRequired condition is true.

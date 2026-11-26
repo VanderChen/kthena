@@ -14,13 +14,13 @@ holds it:
 
 - script: `issues/features/010-modelserving-servinggroup-cr-impl-*/evidence/model-vectors/export_vectors.py`
 - model: `issues/features/010-modelserving-servinggroup-cr-impl-*/evidence/model-vectors/model-010/`
-  (`grouplevel.py`, sha256 `06fd955b1bf0c8b034ab08752c7123a4b73247011f6f4537e322663fbcde6ed8`). It is the
+  (`grouplevel.py`, sha256 `2025c51542a5c054959381c1cfa7819b3427706b9239b117c94fb4e3eb1b2179`). It is the
   reviewed model of the design, `issues/features/008-modelserving-servinggroup-cr-design-IP/model/`
   (`grouplevel.py`, sha256 `04e9fc1436f151182ea8a49a8f13858737eebe1738fa4f70d6583261fe4e0d27`), with
-  one rule changed after the conformance run: G3b reclaims a surge group only when it is surplus (N
-  other live groups have their members) or when there is no room. `model-010.diff` next to it is the
-  whole difference; `results-vs-008.md` is what the change does to the results of the model's
-  drivers
+  one rule changed after the conformance run: G3b reclaims a surge group that has its members only
+  when it is surplus (N other live groups have a Pod that is not terminating, or expect none) or
+  when there is no room. `model-010.diff` next to it is the whole difference; `results-vs-008.md`
+  is what the change does to the results of the model's drivers
 
 ```bash
 cd issues/features/010-modelserving-servinggroup-cr-impl-*/evidence/model-vectors
@@ -40,13 +40,13 @@ script.
 | `normal` | 68 cases of the `normal` runner suite, every interleaving | 23 187 | 3 500 |
 | `group` | exhaustive explorer of the model | 31 509 | 3 500 |
 | `reference` | random states of the model's own differential check | 199 814 | 2 500 |
-| `fuzz` | random inputs made by the script for what the drivers rarely set (failed, not observed, not fresh, memberless, empty, `RecreateRequired`, ownerless Pods, foreign objects, `RoleRollingUpdate`, unknown baseline) | 5 811 | 4 000 |
-| total | | 318 572 | 17 504 |
+| `fuzz` | random inputs made by the script for what the drivers rarely set (failed, not observed, not fresh, memberless, a status that only promises Pods, empty, `RecreateRequired`, ownerless Pods, foreign objects, `RoleRollingUpdate`, unknown baseline) | 8 295 | 4 000 |
+| total | | 321 056 | 17 504 |
 
 The file keeps every vector of `scenarios` and a sample with a fixed seed of the other sources,
-so that it stays below 600 KB: 17 504 lines, 587 945 bytes, sha256 of the uncompressed lines
-`91fbdb1f2b937b0fd0461a3d04bf19253f5936ce2fae082b2f48102283b7773a` (Python 3.12.16).
+so that it stays below 600 KB: 17 504 lines, 594 177 bytes, sha256 of the uncompressed lines
+`2969cd8dee2ebd67f115572349f79de368cb74a2e6e3f3a00a9118b274fb0d57` (Python 3.12.16).
 
-The Go tests were also run once on the whole corpus of 318 572 inputs (`export_vectors.py --all`).
+The Go tests were also run once on the whole corpus of 321 056 inputs (`export_vectors.py --all`).
 The test reads every `testdata/plan_vectors*.jsonl.gz`, so a larger file can be dropped in next
 to this one for such a run.

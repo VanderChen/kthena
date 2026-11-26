@@ -32,10 +32,7 @@ type planner struct {
 	// there occupies its place and is no candidate of G2, G3b and G3c.
 	awaiting map[int]bool
 	foreign  map[int]bool
-	// created holds the ordinals of the groups created in this round. Such a
-	// group has no member yet.
-	created map[int]bool
-	acts    []Action
+	acts     []Action
 	// seen and count are the view and the tally of the working copy as it
 	// is now; put drops them.
 	seen  *View
@@ -194,14 +191,10 @@ func (p *planner) delete(g Group, why string) {
 	p.put(g)
 }
 
-// create adds a new group that is not Ready. A recovered group is not
-// observed until its Pods are adopted.
+// create adds a new group that is not Ready and has no Pod. A recovered
+// group is not observed until its Pods are adopted.
 func (p *planner) create(ordinal int, rev string, surge bool, why string) {
 	p.acts = append(p.acts, Action{Kind: ActionCreate, Ordinal: ordinal, Revision: rev, Surge: surge, Reason: why})
-	if p.created == nil {
-		p.created = map[int]bool{}
-	}
-	p.created[ordinal] = true
 	p.put(Group{Ordinal: ordinal, Revision: rev, Surge: surge, Observed: why != ReasonRecover, Fresh: true})
 }
 
@@ -555,14 +548,18 @@ func (p *planner) createSurge(scaling bool) {
 // capacity. No work: every live marked group that does not await adoption.
 // Work and live > N + S: down to live = N + S.
 //
-// A surge group is reclaimed only when it is surplus: N other live groups have
-// their members. The last old group of a rollout may still be terminating, or
-// its replacement may have no Pod yet; a surge group that left then would
-// leave fewer than N groups that serve, although no place is spare. The one
-// exception is that there is no room: fewer than N regular groups are live
+// A surge group that has its members stands in for a regular place until N
+// other groups have theirs, and is reclaimed only then. At the end of a
+// rollout the last old group is still terminating, or its replacement exists
+// and has no Pod yet; a surge group that left then would leave fewer than N
+// groups with Pods, although no place is spare. A surge group without a
+// member of its own stands in for nothing.
+//
+// The one exception is that there is no room: a regular place is missing
 // while the live groups fill N + S (more surge groups than maxSurge allows,
-// after it was lowered), so the missing place can only be created after a
-// surge group has left.
+// after it was lowered), so that place can only be created after a surge
+// group has left. A regular group that is terminating or failed still holds
+// its place.
 //
 // One that is confirmed not Ready is then reclaimed without asking the floor:
 // it takes nothing off ready. Every other one (confirmed Ready, not observed,
@@ -576,36 +573,26 @@ func (p *planner) reclaimSurge() {
 		return
 	}
 	var marked []Group
-	// filled counts the live groups that have their members, regular the live
-	// groups without the mark.
-	filled, regular := 0, 0
+	// filled counts the groups that have their members.
+	filled := 0
 	for _, g := range p.work {
-		if !g.live() {
-			continue
-		}
-		if !g.Surge {
-			regular++
-		}
 		if p.hasMembers(g) {
 			filled++
 		}
-		if g.Surge && !p.awaiting[g.Ordinal] {
+		if g.Surge && g.live() && !p.awaiting[g.Ordinal] {
 			marked = append(marked, g)
 		}
 	}
 	slices.SortFunc(marked, reclaimOrder)
+	// Only marked groups are deleted here, so the regular groups stay as they are.
+	missing := p.regulars() < p.spec.Replicas
 	live, ready := v.Live, v.Ready
 	for _, g := range marked {
 		if going && live <= bound {
 			return
 		}
-		others := filled
-		if p.hasMembers(g) {
-			others--
-		}
-		surplus := others >= p.spec.Replicas
-		noRoom := regular < p.spec.Replicas && live >= bound
-		if !surplus && !noRoom {
+		standsIn := p.hasMembers(g)
+		if standsIn && filled-1 < p.spec.Replicas && !(missing && live >= bound) {
 			continue
 		}
 		if !g.confirmedNotReady() {
@@ -622,15 +609,18 @@ func (p *planner) reclaimSurge() {
 		}
 		p.delete(g, ReasonReclaimSurge)
 		live--
-		filled = others
+		if standsIn {
+			filled--
+		}
 	}
 }
 
-// hasMembers: the group is live and has its Pods, or expects none. A group
-// created in this round has none yet; one that awaits adoption has not adopted
-// them yet.
+// hasMembers: the group is live and a member Pod of it that is not
+// terminating is there, or it expects none. A group created in this round has
+// none yet, and neither has one whose status only says that its Pods are
+// being created. One that awaits adoption has not adopted them yet.
 func (p *planner) hasMembers(g Group) bool {
-	return g.live() && !p.created[g.Ordinal] && !p.awaiting[g.Ordinal] && (!g.Memberless || g.Empty)
+	return g.live() && !p.awaiting[g.Ordinal] && (g.HasPods || g.Empty)
 }
 
 // unfilled is a place G3c cannot fill, and why.

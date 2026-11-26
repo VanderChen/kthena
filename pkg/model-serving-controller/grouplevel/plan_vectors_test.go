@@ -60,6 +60,7 @@ type vector struct {
 		Ready            bool   `json:"ready"`
 		PodsReady        bool   `json:"podsReady"`
 		Memberless       bool   `json:"memberless"`
+		HasPods          bool   `json:"hasPods"`
 		Empty            bool   `json:"empty"`
 		RecreateRequired bool   `json:"recreateRequired"`
 		DeletionCost     int64  `json:"deletionCost"`
@@ -131,6 +132,7 @@ func (v vector) input(t *testing.T) Input {
 			Ready:            g.Ready,
 			PodsReady:        g.PodsReady,
 			Memberless:       g.Memberless,
+			HasPods:          g.HasPods,
 			Empty:            g.Empty,
 			RecreateRequired: g.RecreateRequired,
 			DeletionCost:     g.DeletionCost,

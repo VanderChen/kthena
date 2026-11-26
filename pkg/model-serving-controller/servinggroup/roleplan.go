@@ -388,6 +388,7 @@ func (p *rolePlanner) unit(inst Instance) (unit grouplevel.Group, revision strin
 			continue
 		}
 		unit.Memberless = false
+		unit.HasPods = unit.HasPods || member.Pod.DeletionTimestamp == nil
 		unit.Surge = unit.Surge || member.Pod.Annotations[workloadv1alpha1.SurgeAnnotationKey] == workloadv1alpha1.SurgeScopeRole
 		unit.PodsReady = unit.PodsReady && member.State == MemberReady
 		unit.DeletionCost += deletionCost(member.Pod)

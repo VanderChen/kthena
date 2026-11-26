@@ -184,6 +184,9 @@ func (c *Controller) state(ms *workloadv1alpha1.ModelServing, spec grouplevel.Sp
 	awaiting := false
 	for _, pod := range g.members {
 		unit.PodsReady = unit.PodsReady && pod.DeletionTimestamp == nil && utils.IsPodRunningAndReady(pod)
+		// status.pods says so before the first Pod is created and while the
+		// last one terminates; only a Pod that is there and stays counts.
+		unit.HasPods = unit.HasPods || pod.DeletionTimestamp == nil
 		if cost, err := strconv.ParseInt(pod.Annotations[corev1.PodDeletionCost], 10, 64); err == nil {
 			unit.DeletionCost += cost
 		}
