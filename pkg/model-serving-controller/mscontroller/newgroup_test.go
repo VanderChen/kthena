@@ -323,7 +323,8 @@ func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 // left with the new target, or with the strategy of whole groups, beside the
 // annotation: a group that found the two together would take itself for one
 // that was born at the new target, now or on the day the strategy is changed
-// back.
+// back. And no group is left without the annotation and with the spec it had:
+// a group that the round has not written says what it said before.
 func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
 	asAWhole := func(ms *workloadv1alpha1.ModelServing) {
@@ -407,7 +408,7 @@ func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
 					switch {
 					case written(group) && !says:
 						done++
-					case !written(group) && (!says || revision == said[group.Name]):
+					case !written(group) && says == (said[group.Name] != "") && revision == said[group.Name]:
 					default:
 						t.Errorf("stop after write %d: group %s has the target %s and the strategy %s, and says that it was created from %q (%t); before the round it said %q",
 							stopAt, group.Name, group.Spec.TargetRevision, group.Spec.RolloutStrategy.Type, revision, says, said[group.Name])
