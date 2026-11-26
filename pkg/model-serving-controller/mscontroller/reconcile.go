@@ -345,9 +345,21 @@ func (c *Controller) createGroup(ctx context.Context, r *round, action groupleve
 		},
 		Spec: workload.GroupSpec(ms, r.settings(action.Revision)),
 	}
+	annotations := map[string]string{}
 	if action.Surge {
 		// The mark is set when the object is created and at no other time.
-		group.Annotations = map[string]string{workloadv1alpha1.SurgeAnnotationKey: workloadv1alpha1.SurgeScopeServingGroup}
+		annotations[workloadv1alpha1.SurgeAnnotationKey] = workloadv1alpha1.SurgeScopeServingGroup
+	}
+	if r.view.spec.Mode == grouplevel.ModeRole && action.Reason == grouplevel.ReasonRegular {
+		// A group that is new never ran the baseline, and under
+		// RoleRollingUpdate its spec names no revision of its own. It is told
+		// the revision it is created from, here and at no other time. An
+		// object created for Pods that exist is not told: it stands for a
+		// group that ran before.
+		annotations[workloadv1alpha1.CreatedRevisionAnnotationKey] = action.Revision
+	}
+	if len(annotations) > 0 {
+		group.Annotations = annotations
 	}
 	_, err := c.kthena.WorkloadV1alpha1().ServingGroups(ms.Namespace).Create(ctx, group, metav1.CreateOptions{})
 	if err == nil {
