@@ -1486,3 +1486,74 @@ func TestANewGroupOfCoordinatedRolesIsToldAnotherTargetWhileItIsBuilt(t *testing
 		})
 	}
 }
+
+// A group of coordinated Roles that was created at the target loses
+// instances of the Role that depends on another, while that other Role is
+// not ready. With RoleRecreate the instances are drained and created anew,
+// from the target. Whether they wait depends on what is left of the Role.
+// With an instance of it left, or with a place above its partition, the Role
+// goes on, and the instances are created again in the next round. With no
+// instance left and every place below the partition, the Role starts the
+// target anew, and waits until the Role it depends on is ready. A group that
+// ran the baseline creates them again from the baseline and never waits.
+func TestALostInstanceOfANewGroupOfCoordinatedRolesWaitsOnlyWhenItsRoleStartsAnew(t *testing.T) {
+	tests := []struct {
+		name      string
+		partition string
+		// group loses the Pods whose names start with lose.
+		group, lose string
+		// image is what the instances of the group run.
+		image string
+		waits bool
+	}{
+		{name: "a place above the partition, every instance lost", partition: "50%", group: "llama-2", lose: "llama-2-prefill-", image: "model:v2"},
+		{name: "every place below the partition, one instance lost", partition: "100%", group: "llama-2", lose: "llama-2-prefill-0-", image: "model:v2"},
+		{name: "every place below the partition, every instance lost", partition: "100%", group: "llama-2", lose: "llama-2-prefill-", image: "model:v2", waits: true},
+		{name: "the same in a group that ran the baseline", partition: "100%", group: "llama-1", lose: "llama-1-prefill-", image: "model:v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(coordinated, func(ms *workloadv1alpha1.ModelServing) {
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString(tt.partition))
+				}
+			}))
+			s.settle()
+			s.update(setImages("model:v2"))
+			s.settle()
+			s.update(threeGroups)
+			s.settle()
+			runs := func(step, want string) {
+				t.Helper()
+				ordinal := strings.TrimPrefix(tt.group, testName+"-")
+				got := s.instances()
+				got = got[strings.Index(got, ordinal+"["):]
+				if got = got[:strings.Index(got, "]")+1]; got != ordinal+"["+want+"]" {
+					t.Fatalf("%s: the group runs\n got %s\nwant %s[%s]", step, got, ordinal, want)
+				}
+			}
+			decode := "decode-0=" + tt.image + " decode-1=" + tt.image
+			whole := decode + " prefill-0=" + tt.image + " prefill-1=" + tt.image
+			runs("at the start", whole)
+
+			// decode is lost and comes back, and does not get ready.
+			s.stuck = func(pod *corev1.Pod) bool {
+				return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == tt.group && pod.Labels[workloadv1alpha1.RoleLabelKey] == "decode"
+			}
+			s.lose(tt.group + "-decode-")
+			s.settle()
+			runs("decode is not ready", whole)
+
+			s.lose(tt.lose)
+			s.settle()
+			if tt.waits {
+				runs("prefill was lost, decode is not ready", decode)
+			} else {
+				runs("prefill was lost, decode is not ready", whole)
+			}
+			s.stuck = nil
+			s.settle()
+			runs("decode is ready", whole)
+		})
+	}
+}
