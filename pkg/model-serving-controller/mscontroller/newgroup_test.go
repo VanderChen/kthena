@@ -28,6 +28,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -1556,4 +1557,100 @@ func TestALostInstanceOfANewGroupOfCoordinatedRolesWaitsOnlyWhenItsRoleStartsAne
 			runs("decode is ready", whole)
 		})
 	}
+}
+
+// An open point, written down as it is today. It is not what should happen.
+//
+// Nothing excludes a Pod that is created after the ModelServing controller
+// looked: creating a Pod is not a write of the group. A group that has
+// committed, and whose controller creates its Pods at that moment, can be
+// told that it was created from the new target and have Pods of the one
+// before (the last case of
+// TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth). Those Pods are
+// held below the partition of their Role like any others.
+//
+// Roles that are rolled together begin a staged rollout with every instance
+// below the partition. Then decode stays at the target of before in such a
+// group, and prefill, which does not exist yet, is of the new target and
+// waits for capacity of the new target: it is not created. The group is not
+// complete until the partitions are lowered, the template returns, or an
+// instance of decode is lost and comes back from the new target.
+//
+// The window is the time between the creation of the Pods and the moment the
+// ModelServing controller sees them.
+func TestANewGroupThatWasToldTheTargetWhileItsPodsWereCreatedWaits(t *testing.T) {
+	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
+	s := newSystem(t, modelServing(coordinated, func(ms *workloadv1alpha1.ModelServing) {
+		for i := range ms.Spec.Template.Roles {
+			ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString("100%"))
+		}
+	}))
+	s.settle()
+	s.update(setImages("model:v2"))
+	s.settle()
+	runs := func(step, want string) {
+		t.Helper()
+		got := s.instances()
+		if got = got[strings.Index(got, "2["):]; got != want {
+			t.Fatalf("%s: the new group runs\n got %s\nwant %s", step, got, want)
+		}
+	}
+	roundOfTheGroup := func() error {
+		caches, snapshot := s.caches()
+		s.sg.SetCaches(caches, snapshot.Listers().Services)
+		_, err := s.sg.Reconcile(context.Background(), testNamespace, "llama-2")
+		return err
+	}
+
+	// The group is created, commits to its Pods, and its controller dies.
+	s.update(threeGroups)
+	if _, err := s.roundOfTheModelServing(); err != nil && !errors.Is(err, ErrNotSettled) {
+		t.Fatal(err)
+	}
+	writes := 0
+	s.cluster.BeforeWrite = func(apitestWrite) error {
+		if writes++; writes > 1 {
+			return errDied
+		}
+		return nil
+	}
+	if err := roundOfTheGroup(); !errors.Is(err, errDied) {
+		t.Fatalf("round of the group: %v, want it to die after its first write", err)
+	}
+	s.cluster.BeforeWrite = nil
+
+	// The template changes. The ModelServing controller looks; then the
+	// Pods of decode are created, from v2; then it writes.
+	s.update(setImages("model:v3"))
+	caches, snapshot := s.caches()
+	if err := roundOfTheGroup(); err != nil {
+		t.Fatalf("round of the group: %v", err)
+	}
+	runs("the Pods of decode are created", "2[decode-0=model:v2 decode-1=model:v2]")
+	s.ms.SetCaches(caches, snapshot.Listers().Services)
+	if _, err := s.ms.Reconcile(context.Background(), testNamespace, testName); err != nil && !errors.Is(err, ErrNotSettled) {
+		t.Fatalf("round of the ModelServing on what it read before: %v", err)
+	}
+	third := s.modelServing().Status.UpdateRevision
+	if group := s.groups()[2]; group.Spec.TargetRevision != third || group.Annotations[created] != third {
+		t.Fatalf("the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], third)
+	}
+
+	s.settle()
+	runs("at rest", "2[decode-0=model:v2 decode-1=model:v2]")
+	condition := meta.FindStatusCondition(s.groups()[2].Status.Conditions, string(workloadv1alpha1.ServingGroupConditionCoordinatedRoleRolloutBlocked))
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "DependencyNotReady" {
+		t.Errorf("the new group reports %+v, want it blocked by DependencyNotReady", condition)
+	}
+	if got, want := s.counts(), "available=2"; !strings.HasSuffix(got, want) {
+		t.Errorf("the ModelServing reports %s, want %s", got, want)
+	}
+
+	s.update(func(ms *workloadv1alpha1.ModelServing) {
+		for i := range ms.Spec.Template.Roles {
+			ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString("50%"))
+		}
+	})
+	s.settle()
+	runs("the partitions are lowered", "2[decode-0=model:v2 decode-1=model:v3 prefill-0=model:v3 prefill-1=model:v3]")
 }
