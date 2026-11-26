@@ -22,6 +22,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -196,11 +197,12 @@ func TestAnObjectForPodsThatExistDoesNotSayWhereItComesFrom(t *testing.T) {
 
 // The write that tells a group its spec changes what the group says about
 // where it comes from exactly when the target it tells is another revision
-// than the one the annotation names. A group that has a member stops saying
-// it. A group without a member is still being born: it says the new target.
-// The annotation is never added to a group that has none. After the write the
-// annotation is gone or names the target, so the group is not written again
-// for it.
+// than the one the annotation names. A group that has built something, an
+// instance of it was established or it has a Pod, stops saying it, whole or
+// not. A group that has built nothing is still being born, and says the new
+// target. The annotation is never added to a group that has none. After the
+// write the annotation is gone or names the target, so the group is not
+// written again for it.
 //
 // All of that is for a group that is rolled Role by Role. A group that is
 // told that it is replaced as a whole stops saying where it comes from,
@@ -213,57 +215,90 @@ func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 		out[created] = revision
 		return out
 	}
+	// The group has two instances of serve. These are its ledgers.
+	ledger := func(entries ...workloadv1alpha1.RoleInstanceStatus) []workloadv1alpha1.RoleInstanceStatus {
+		return entries
+	}
+	entry := func(index int32, phase workloadv1alpha1.RoleInstancePhase, generation int64) workloadv1alpha1.RoleInstanceStatus {
+		return workloadv1alpha1.RoleInstanceStatus{Role: "serve", Index: index, Phase: phase, Generation: generation}
+	}
+	var (
+		nothing = ledger()
+		// an entry that never got further than Creating.
+		begun = ledger(entry(0, workloadv1alpha1.RoleInstanceCreating, 0))
+		// one instance is established, the other does not exist yet.
+		partly = ledger(entry(1, workloadv1alpha1.RoleInstanceEstablished, 0))
+		whole  = ledger(entry(0, workloadv1alpha1.RoleInstanceEstablished, 0), entry(1, workloadv1alpha1.RoleInstanceEstablished, 0))
+		// the only entry is of an instance that was lost: it is being
+		// drained, or is created again after the drain.
+		draining = ledger(entry(0, workloadv1alpha1.RoleInstanceDraining, 0))
+		again    = ledger(entry(0, workloadv1alpha1.RoleInstanceCreating, 1))
+	)
 	tests := []struct {
 		name        string
 		annotations map[string]string
-		// memberless: the group has no member and has not committed to one.
-		memberless bool
+		ledger      []workloadv1alpha1.RoleInstanceStatus
+		// pods is the number of Pods of the group the controller sees.
+		pods int
 		// asAWhole: the spec the group is told is one of ServingGroupRollingUpdate.
 		asAWhole bool
 		// target is the target the group has, told the one it is told.
 		target, told string
 		want         map[string]string
 	}{
-		{name: "another target, the group has members: it stops saying where it comes from, and keeps what else it carries",
-			annotations: with(surge, "rev-b"), target: "rev-b", told: "rev-c", want: surge},
-		{name: "another target, the group has no member: it is still being born, and says the new target",
-			annotations: with(surge, "rev-b"), memberless: true, target: "rev-b", told: "rev-c", want: with(surge, "rev-c")},
+		{name: "another target, the group is whole: it stops saying where it comes from, and keeps what else it carries",
+			annotations: with(surge, "rev-b"), ledger: whole, pods: 4, target: "rev-b", told: "rev-c", want: surge},
+		{name: "another target, nothing of the group was established: it is still being born, and says the new target",
+			annotations: with(surge, "rev-b"), ledger: nothing, target: "rev-b", told: "rev-c", want: with(surge, "rev-c")},
+		{name: "another target, an entry of the group never got further than Creating: it is still being born",
+			annotations: with(surge, "rev-b"), ledger: begun, target: "rev-b", told: "rev-c", want: with(surge, "rev-c")},
+		{name: "another target, one instance of the group is established and the other does not exist yet: it stops saying it",
+			annotations: with(surge, "rev-b"), ledger: partly, target: "rev-b", told: "rev-c", want: surge},
+		{name: "another target, the only instance in the ledger is being drained: it was established, the group stops saying it",
+			annotations: with(surge, "rev-b"), ledger: draining, target: "rev-b", told: "rev-c", want: surge},
+		{name: "another target, the only instance in the ledger is created again after a drain: the same",
+			annotations: with(surge, "rev-b"), ledger: again, target: "rev-b", told: "rev-c", want: surge},
+		{name: "another target, nothing of the group was established and it has a Pod: it stops saying it",
+			annotations: with(surge, "rev-b"), ledger: nothing, pods: 1, target: "rev-b", told: "rev-c", want: surge},
 		{name: "the same target with other settings: it still says so",
-			annotations: with(surge, "rev-b"), target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
-		{name: "the same target, no member: it still says so",
-			annotations: with(surge, "rev-b"), memberless: true, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
+			annotations: with(surge, "rev-b"), ledger: whole, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
+		{name: "the same target, a group that is being born: it still says so",
+			annotations: with(surge, "rev-b"), ledger: nothing, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
 		{name: "the target returns to the revision the group was created from: nothing is added",
-			annotations: surge, target: "rev-c", told: "rev-b", want: surge},
-		{name: "a group without a member that does not say where it comes from: nothing is added",
-			annotations: surge, memberless: true, target: "rev-b", told: "rev-c", want: surge},
-		{name: "a group without annotations gets none", memberless: true, target: "rev-a", told: "rev-b"},
+			annotations: surge, ledger: whole, target: "rev-c", told: "rev-b", want: surge},
+		{name: "a group that is being born and does not say where it comes from: nothing is added",
+			annotations: surge, ledger: nothing, target: "rev-b", told: "rev-c", want: surge},
+		{name: "a group without annotations gets none", ledger: nothing, target: "rev-a", told: "rev-b"},
 		{name: "an annotation that names another revision than the target the group has goes with the next write",
-			annotations: with(surge, "rev-a"), target: "rev-b", told: "rev-b", want: surge},
-		{name: "and on a group without a member it names the target after that write",
-			annotations: with(surge, "rev-a"), memberless: true, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
+			annotations: with(surge, "rev-a"), ledger: whole, target: "rev-b", told: "rev-b", want: surge},
+		{name: "and on a group that is being born it names the target after that write",
+			annotations: with(surge, "rev-a"), ledger: nothing, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
 		{name: "the group is told that it is replaced as a whole: it stops saying where it comes from, although the target is the same",
-			annotations: with(surge, "rev-b"), asAWhole: true, target: "rev-b", told: "rev-b", want: surge},
-		{name: "and a group without a member does not say the new target there",
-			annotations: with(surge, "rev-b"), memberless: true, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
+			annotations: with(surge, "rev-b"), ledger: whole, asAWhole: true, target: "rev-b", told: "rev-b", want: surge},
+		{name: "and a group that is being born does not say the new target there",
+			annotations: with(surge, "rev-b"), ledger: nothing, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
 		{name: "a group that is replaced as a whole and does not say where it comes from: nothing is added",
-			annotations: surge, memberless: true, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
+			annotations: surge, ledger: nothing, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			byRole := &workloadv1alpha1.ServingGroupRolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+			roles := []workloadv1alpha1.ServingGroupRole{{Name: "serve", Replicas: 2}}
 			group := &workloadv1alpha1.ServingGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "llama-0", Annotations: maps.Clone(tt.annotations)},
-				Spec:       workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.target, BaselineRevision: "rev-a", RolloutStrategy: byRole},
+				Spec:       workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.target, BaselineRevision: "rev-a", RolloutStrategy: byRole, Roles: roles},
+				Status:     workloadv1alpha1.ServingGroupStatus{RoleInstances: tt.ledger},
 			}
 			spec := workloadv1alpha1.ServingGroupSpec{
-				TargetRevision: tt.told, BaselineRevision: "rev-a", RolloutStrategy: byRole, RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy,
+				TargetRevision: tt.told, BaselineRevision: "rev-a", RolloutStrategy: byRole, Roles: roles,
+				RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy,
 			}
 			if tt.asAWhole {
 				spec.Revision = "rev-a"
 				spec.RolloutStrategy = &workloadv1alpha1.ServingGroupRolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate}
 			}
 
-			written := told(group, spec, tt.memberless)
+			written := told(group, spec, tt.pods)
 			if !reflect.DeepEqual(written.Spec, spec) {
 				t.Errorf("spec = %+v, want %+v", written.Spec, spec)
 			}
@@ -766,6 +801,41 @@ func TestAGroupThatRanTheBaselineCreatesItsProtectedInstanceFromTheBaseline(t *t
 	})
 }
 
+// lose deletes the Pods whose name starts with prefix: the Pods of a Role
+// instance, as "llama-2-serve-0-".
+func (s *system) lose(prefix string) {
+	s.t.Helper()
+	lost := 0
+	for _, pod := range s.pods() {
+		if !strings.HasPrefix(pod.Name, prefix) {
+			continue
+		}
+		if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{}); err != nil {
+			s.t.Fatal(err)
+		}
+		lost++
+	}
+	if lost == 0 {
+		s.t.Fatalf("no Pod is named %s*", prefix)
+	}
+}
+
+// ledgerOf renders the ledger of a group: "route-0=Established/0 ...".
+func (s *system) ledgerOf(group string) string {
+	s.t.Helper()
+	var entries []string
+	for _, g := range s.groups() {
+		if g.Name != group {
+			continue
+		}
+		for _, entry := range g.Status.RoleInstances {
+			entries = append(entries, entry.Role+"-"+strconv.Itoa(int(entry.Index))+"="+string(entry.Phase)+"/"+strconv.FormatInt(entry.Generation, 10))
+		}
+	}
+	slices.Sort(entries)
+	return strings.Join(entries, " ")
+}
+
 // aGroupBeingBorn returns a system whose ModelServing stands at the partition
 // of serve between v1 and v2, with a third group whose object was just
 // created: the group has had no round, and no Pod. It also returns the
@@ -816,12 +886,21 @@ func TestAGroupWithoutAMemberIsCreatedFromTheTargetItIsTold(t *testing.T) {
 	}
 }
 
-// The write that tells a group without a member another target, and the
-// status write with which the group commits to its first Pod, are each made
-// on what its controller read. Both carry the resourceVersion of that read,
-// so they exclude each other: the one that comes second meets a conflict and
-// is decided again on what the first one wrote. A group is never told that
-// it is born at a target after it has committed to Pods of another.
+// The write that tells a group another target, and a status write of the
+// group, are each made on what its controller read. Both carry the
+// resourceVersion of that read, so they exclude each other: the one that
+// comes second meets a conflict and is decided again on what the first one
+// wrote.
+//
+// What is decided again is whether the group has built anything. A group
+// that has Pods has: it ran the target of before, and stops saying that it
+// is new. A group that has committed to its Pods and has none has not: it is
+// told the new target and says that it was created from it. A group of which
+// an instance became established in between meets the conflict.
+//
+// The Pods themselves are not part of the exclusion: creating one is not a
+// write of the group. The last case is a Pod that the ModelServing controller
+// does not see yet.
 func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
 	const others = "0[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] 1[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] "
@@ -845,6 +924,26 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 		return err
 	}
 
+	// commitsAndDies runs a round of the group that dies right after its
+	// first write: the group has committed to its Pods and has none.
+	commitsAndDies := func(t *testing.T, s *system) {
+		t.Helper()
+		writes := 0
+		s.cluster.BeforeWrite = func(apitestWrite) error {
+			if writes++; writes > 1 {
+				return errDied
+			}
+			return nil
+		}
+		if err := roundOfTheGroup(s, now(s)); !errors.Is(err, errDied) {
+			t.Fatalf("round of the group: %v, want it to die after its first write", err)
+		}
+		s.cluster.BeforeWrite = nil
+		if group := s.groups()[2]; group.Status.Pods == 0 || len(s.podsOf(group.Name)) != 0 {
+			t.Fatalf("the group has committed to %d Pods and has the Pods %v; want a commitment and no Pod", group.Status.Pods, s.podsOf(group.Name))
+		}
+	}
+
 	t.Run("the group commits first", func(t *testing.T) {
 		s, second := aGroupBeingBorn(t)
 		s.update(setImage("model:v3"))
@@ -865,8 +964,8 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 			t.Fatalf("after the conflict the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], second)
 		}
 
-		// Decided again, the group has committed: it ran v2, and stops saying
-		// that it is new. Its protected instance stays at v2.
+		// Decided again, the group has Pods of v2: it ran v2, and stops
+		// saying that it is new. Its protected instance stays at v2.
 		s.settle()
 		if got, want := s.instances(), others+"2[route-0=route:v1 0=model:v2 1=model:v3 2=model:v3]"; got != want {
 			t.Errorf("at the end:\n got %s\nwant %s", got, want)
@@ -877,25 +976,53 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 	})
 
 	// The commitment alone excludes the other write, whether a Pod followed
-	// it or not: here the round of the group dies right after it.
+	// it or not: here the round of the group dies right after it. Decided
+	// again, the group has no Pod and nothing established. It is still being
+	// born, is told the new target, and is created whole from it.
 	t.Run("the group commits first and dies before its first Pod", func(t *testing.T) {
 		s, second := aGroupBeingBorn(t)
 		s.update(setImage("model:v3"))
 		before := now(s)
 
-		writes := 0
-		s.cluster.BeforeWrite = func(apitestWrite) error {
-			if writes++; writes > 1 {
-				return errDied
+		commitsAndDies(t, s)
+		if err := roundOfTheModelServing(s, before); !apierrors.IsConflict(err) {
+			t.Fatalf("round of the ModelServing on what it read before: %v, want a conflict", err)
+		}
+		if group := s.groups()[2]; group.Spec.TargetRevision != second || group.Annotations[created] != second {
+			t.Fatalf("after the conflict the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], second)
+		}
+
+		if err := roundOfTheModelServing(s, now(s)); err != nil && !errors.Is(err, ErrNotSettled) {
+			t.Fatalf("round of the ModelServing: %v", err)
+		}
+		third := s.modelServing().Status.UpdateRevision
+		if group := s.groups()[2]; third == second || group.Spec.TargetRevision != third || group.Annotations[created] != third {
+			t.Errorf("decided again, the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], third)
+		}
+		s.settle()
+		if got, want := s.instances(), others+"2[route-0=route:v1 0=model:v3 1=model:v3 2=model:v3]"; got != want {
+			t.Errorf("at the end:\n got %s\nwant %s", got, want)
+		}
+	})
+
+	// The ModelServing controller read a group that has committed and has
+	// built nothing, and would make it say the new target. The status write
+	// that says an instance is established comes first.
+	t.Run("an instance of the group becomes established first", func(t *testing.T) {
+		s, second := aGroupBeingBorn(t)
+		commitsAndDies(t, s)
+		s.update(setImage("model:v3"))
+		before := now(s)
+
+		// The Pods are created, and in the round after that the instances
+		// are established.
+		for range 2 {
+			if err := roundOfTheGroup(s, now(s)); err != nil {
+				t.Fatalf("round of the group: %v", err)
 			}
-			return nil
 		}
-		if err := roundOfTheGroup(s, now(s)); !errors.Is(err, errDied) {
-			t.Fatalf("round of the group: %v, want it to die after its first write", err)
-		}
-		s.cluster.BeforeWrite = nil
-		if group := s.groups()[2]; group.Status.Pods == 0 || len(s.podsOf(group.Name)) != 0 {
-			t.Fatalf("the group has committed to %d Pods and has the Pods %v; want a commitment and no Pod", group.Status.Pods, s.podsOf(group.Name))
+		if got := s.ledgerOf("llama-2"); !strings.Contains(got, "Established") {
+			t.Fatalf("the ledger of the group is %q, want instances that are established", got)
 		}
 		if err := roundOfTheModelServing(s, before); !apierrors.IsConflict(err) {
 			t.Fatalf("round of the ModelServing on what it read before: %v, want a conflict", err)
@@ -904,14 +1031,56 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 			t.Fatalf("after the conflict the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], second)
 		}
 
-		// Decided again, the group has committed: it is told the new target
-		// and stops saying that it is new.
-		if err := roundOfTheModelServing(s, now(s)); err != nil && !errors.Is(err, ErrNotSettled) {
-			t.Fatalf("round of the ModelServing: %v", err)
+		// Decided again, the group ran v2: it stops saying that it is new,
+		// and its protected instance comes back from the baseline.
+		s.settle()
+		if revision, says := s.groups()[2].Annotations[created]; says {
+			t.Errorf("at the end the group says that it was created from %q", revision)
 		}
-		group := s.groups()[2]
-		if revision, says := group.Annotations[created]; says || group.Spec.TargetRevision == second {
-			t.Errorf("decided again, the group has the target %s and says %q (%t); want the new target and no annotation", group.Spec.TargetRevision, revision, says)
+		s.lose("llama-2-serve-0-")
+		s.settle()
+		if got, want := s.instances(), others+"2[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3]"; got != want {
+			t.Errorf("after the protected instance was lost:\n got %s\nwant %s", got, want)
+		}
+	})
+
+	// Nothing excludes this one. The group has committed, and its controller
+	// creates the Pods without another write of the group. The ModelServing
+	// controller looked before they were there: it sees a group that has
+	// built nothing, and its write is accepted. The group now says that it
+	// was created from v3 and has Pods of v2. Below the partition they stay,
+	// like any Pods there; and one that is lost comes back from v3.
+	t.Run("the Pods of the group are created and the ModelServing controller does not see them yet", func(t *testing.T) {
+		s, second := aGroupBeingBorn(t)
+		commitsAndDies(t, s)
+		s.update(setImage("model:v3"))
+		before := now(s)
+
+		if err := roundOfTheGroup(s, now(s)); err != nil {
+			t.Fatalf("round of the group: %v", err)
+		}
+		if pods, ledger := s.podsOf("llama-2"), s.ledgerOf("llama-2"); len(pods) == 0 || ledger != "" {
+			t.Fatalf("the group has the Pods %v and the ledger %q; want Pods and nothing established", pods, ledger)
+		}
+		if err := roundOfTheModelServing(s, before); err != nil && !errors.Is(err, ErrNotSettled) {
+			t.Fatalf("round of the ModelServing on what it read before: %v", err)
+		}
+		third := s.modelServing().Status.UpdateRevision
+		if group := s.groups()[2]; third == second || group.Spec.TargetRevision != third || group.Annotations[created] != third {
+			t.Fatalf("the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], third)
+		}
+
+		s.settle()
+		if got, want := s.instances(), others+"2[route-0=route:v1 0=model:v2 1=model:v3 2=model:v3]"; got != want {
+			t.Errorf("at the end:\n got %s\nwant %s", got, want)
+		}
+		s.lose("llama-2-serve-0-")
+		s.settle()
+		if got, want := s.instances(), others+"2[route-0=route:v1 0=model:v3 1=model:v3 2=model:v3]"; got != want {
+			t.Errorf("after the protected instance was lost:\n got %s\nwant %s", got, want)
+		}
+		if got := s.groups()[2].Annotations[created]; got != third {
+			t.Errorf("at the end the group says %q, want %s", got, third)
 		}
 	})
 

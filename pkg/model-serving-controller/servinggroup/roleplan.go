@@ -173,10 +173,10 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 //
 // The ModelServing controller keeps the annotation in line with the target:
 // in the write that tells the group another target it takes it away, or,
-// while the group has no member, makes it name that target. So the revision
-// it names is the target of the group. The two are compared all the same: an
-// annotation that names another revision says nothing about the rollout of
-// now.
+// while the group has built nothing, makes it name that target. So the
+// revision it names is the target of the group. The two are compared all the
+// same: an annotation that names another revision says nothing about the
+// rollout of now.
 func createdAtTarget(group *workloadv1alpha1.ServingGroup) bool {
 	created := group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey]
 	return created != "" && created == group.Spec.TargetRevision

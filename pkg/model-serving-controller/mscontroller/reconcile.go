@@ -34,6 +34,7 @@ import (
 	workloadv1alpha1 "github.com/volcano-sh/kthena/pkg/apis/workload/v1alpha1"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/grouplevel"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/plugins"
+	"github.com/volcano-sh/kthena/pkg/model-serving-controller/servinggroup"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/utils"
 	"github.com/volcano-sh/kthena/pkg/model-serving-controller/workload"
 )
@@ -433,7 +434,7 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 	if err != nil {
 		return err
 	}
-	updated := told(group, workload.GroupSpec(r.ms, r.settings(action.Revision)), r.view.group(action.Ordinal).unit.Memberless)
+	updated := told(group, workload.GroupSpec(r.ms, r.settings(action.Revision)), len(r.view.group(action.Ordinal).members))
 	_, err = c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{})
 	if apierrors.IsConflict(err) && action.Reason == grouplevel.ReasonMemberless {
 		// The group got its first member, or another status, in between. That
@@ -445,21 +446,36 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 }
 
 // told returns group with the spec it is told, as it is written in one update.
-// memberless reports that the group has no member and has not committed to
-// creating one.
+// pods is the number of Pods of the group the controller sees.
 //
 // A group that was created new says, in an annotation, which revision it was
 // created from: it was born in the rollout to that revision. What it says
 // changes in the write that tells it another target.
 //
-// A group that has a member, or has committed to one, ran the revision it was
-// created from. It stops saying that it is new, and is from then on a group
-// that ran before the rollout of now, like any other. A group without a
-// member is still being born, and a new group is created whole from the
-// template of now: its annotation is rewritten to the new target. The write
-// carries the resourceVersion that was read, so it and the status write with
-// which the group commits to its first Pod exclude each other: whichever
-// comes first, the other is rejected and decided again.
+// A group that has built something ran the revision it was created from: an
+// instance of it was established, or it has a Pod. It stops saying that it is
+// new, and is from then on a group that ran before the rollout of now, like
+// any other. That holds for a group that is not whole yet as well. The
+// instances it does not have are then places of an ordinary group, and below
+// the partition of a Role they are created from the baseline.
+//
+// A group that has built nothing is still being born, and a new group is
+// created whole from the template of now: its annotation is rewritten to the
+// new target. That is a group that has no round behind it, and also one that
+// has committed to its Pods and has none: they are refused, or its controller
+// died before the first.
+//
+// Whether an instance was established is read from the ledger of the object
+// that is written, and the write carries the resourceVersion that was read.
+// An instance becomes established by a status write of the group, so the two
+// exclude each other: whichever comes first, the other is rejected and
+// decided again. Whether the group has a Pod is read from the cache. The
+// ledger alone would not do: an instance is established in the round after
+// its last Pod was created, and one of which a Pod is refused not at all, so
+// a group can have Pods of the target of before and nothing established. A
+// Pod that the cache does not show yet is not excluded by anything. The
+// group is then told that it was created from the new target and has a Pod
+// of the one before, which the partition of its Role holds like any other.
 //
 // The annotation changes in the same write as the target, so no reader ever
 // finds the new target beside the old annotation. And it is never added to a
@@ -471,12 +487,12 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 // partition of the groups is the baseline: what the annotation says would be
 // wrong there, and would be believed on the day the strategy is changed back.
 // It goes in the write that tells the group that strategy.
-func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec, memberless bool) *workloadv1alpha1.ServingGroup {
+func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec, pods int) *workloadv1alpha1.ServingGroup {
 	updated := group.DeepCopy()
 	updated.Spec = spec
 	switch {
 	case !outlived(group, &spec):
-	case memberless && rolledByRole(&spec):
+	case rolledByRole(&spec) && pods == 0 && servinggroup.BeingBorn(group):
 		updated.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey] = spec.TargetRevision
 	default:
 		delete(updated.Annotations, workloadv1alpha1.CreatedRevisionAnnotationKey)
@@ -544,7 +560,7 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 			continue
 		}
 		desired.SourceGeneration = r.ms.Generation
-		updated := told(group, desired, g.unit.Memberless)
+		updated := told(group, desired, len(g.members))
 		if _, err := c.kthena.WorkloadV1alpha1().ServingGroups(group.Namespace).Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
 			failures = append(failures, fmt.Errorf("hand the settings down to ServingGroup %s: %w", group.Name, err))
 		}
