@@ -465,12 +465,18 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 // finds the new target beside the old annotation. And it is never added to a
 // group that has none: a template that returns to the revision a group was
 // born at finds a group that does not say it.
+//
+// All of this is for a group that is rolled Role by Role. A group that is
+// replaced as a whole runs the revision its spec names, which below the
+// partition of the groups is the baseline: what the annotation says would be
+// wrong there, and would be believed on the day the strategy is changed back.
+// It goes in the write that tells the group that strategy.
 func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGroupSpec, memberless bool) *workloadv1alpha1.ServingGroup {
 	updated := group.DeepCopy()
 	updated.Spec = spec
 	switch {
-	case !outlived(group, spec.TargetRevision):
-	case memberless:
+	case !outlived(group, &spec):
+	case memberless && rolledByRole(&spec):
 		updated.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey] = spec.TargetRevision
 	default:
 		delete(updated.Annotations, workloadv1alpha1.CreatedRevisionAnnotationKey)
@@ -478,11 +484,17 @@ func told(group *workloadv1alpha1.ServingGroup, spec workloadv1alpha1.ServingGro
 	return updated
 }
 
-// outlived reports whether group says that it was created from a revision
-// other than target.
-func outlived(group *workloadv1alpha1.ServingGroup, target string) bool {
+// outlived reports whether what group says about where it comes from does not
+// go with spec: it names a revision other than the target, or the group is
+// not rolled Role by Role.
+func outlived(group *workloadv1alpha1.ServingGroup, spec *workloadv1alpha1.ServingGroupSpec) bool {
 	created, born := group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey]
-	return born && created != target
+	return born && (created != spec.TargetRevision || !rolledByRole(spec))
+}
+
+// rolledByRole reports whether a group with spec is rolled Role by Role.
+func rolledByRole(spec *workloadv1alpha1.ServingGroupSpec) bool {
+	return spec.RolloutStrategy != nil && spec.RolloutStrategy.Type == workloadv1alpha1.RoleRollingUpdate
 }
 
 // handDown brings the spec of every group in line with the ModelServing: the
@@ -515,15 +527,20 @@ func (c *Controller) handDown(ctx context.Context, r *round, touched map[int]boo
 		// The generation it was derived from changes with every change of the
 		// ModelServing. It is only written along with something else.
 		desired.SourceGeneration = group.Spec.SourceGeneration
-		// The write that changes the target of a group also brings what the
-		// group says about where it comes from in line with it. A group whose
-		// spec is as it should be and whose annotation names another revision
-		// was therefore not left so by this controller: somebody put the
-		// annotation there, or changed it. Such a group is written once more,
-		// or the annotation would start to count on the day the target
-		// becomes that revision. After the write the annotation is gone, or
-		// names the target, and the group is not written again for it.
-		if apiequality.Semantic.DeepEqual(desired, group.Spec) && !outlived(group, desired.TargetRevision) {
+		// The write that changes the target or the strategy of a group also
+		// brings what the group says about where it comes from in line with
+		// them. A group whose spec is as it should be and whose annotation
+		// does not go with it was therefore not left so by this build of the
+		// controller. Somebody put the annotation there, or changed it. Or an
+		// earlier build of this controller, which a rollback of the image
+		// brought back for a while, changed the target without looking at the
+		// annotation. Such a group is written once more, or the annotation
+		// would start to count on the day the target becomes that revision.
+		// After the write the annotation is gone, or names the target, and
+		// the group is not written again for it. An annotation that the
+		// earlier build left and that names the target again cannot be told
+		// from one that is right, and stays.
+		if apiequality.Semantic.DeepEqual(desired, group.Spec) && !outlived(group, &desired) {
 			continue
 		}
 		desired.SourceGeneration = r.ms.Generation

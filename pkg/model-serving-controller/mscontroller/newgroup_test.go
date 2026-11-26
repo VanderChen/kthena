@@ -201,6 +201,10 @@ func TestAnObjectForPodsThatExistDoesNotSayWhereItComesFrom(t *testing.T) {
 // The annotation is never added to a group that has none. After the write the
 // annotation is gone or names the target, so the group is not written again
 // for it.
+//
+// All of that is for a group that is rolled Role by Role. A group that is
+// told that it is replaced as a whole stops saying where it comes from,
+// whatever its target is.
 func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
 	surge := map[string]string{workloadv1alpha1.SurgeAnnotationKey: workloadv1alpha1.SurgeScopeServingGroup, "example.com/note": "kept"}
@@ -214,6 +218,8 @@ func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 		annotations map[string]string
 		// memberless: the group has no member and has not committed to one.
 		memberless bool
+		// asAWhole: the spec the group is told is one of ServingGroupRollingUpdate.
+		asAWhole bool
 		// target is the target the group has, told the one it is told.
 		target, told string
 		want         map[string]string
@@ -235,14 +241,27 @@ func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 			annotations: with(surge, "rev-a"), target: "rev-b", told: "rev-b", want: surge},
 		{name: "and on a group without a member it names the target after that write",
 			annotations: with(surge, "rev-a"), memberless: true, target: "rev-b", told: "rev-b", want: with(surge, "rev-b")},
+		{name: "the group is told that it is replaced as a whole: it stops saying where it comes from, although the target is the same",
+			annotations: with(surge, "rev-b"), asAWhole: true, target: "rev-b", told: "rev-b", want: surge},
+		{name: "and a group without a member does not say the new target there",
+			annotations: with(surge, "rev-b"), memberless: true, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
+		{name: "a group that is replaced as a whole and does not say where it comes from: nothing is added",
+			annotations: surge, memberless: true, asAWhole: true, target: "rev-b", told: "rev-c", want: surge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			byRole := &workloadv1alpha1.ServingGroupRolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
 			group := &workloadv1alpha1.ServingGroup{
 				ObjectMeta: metav1.ObjectMeta{Name: "llama-0", Annotations: maps.Clone(tt.annotations)},
-				Spec:       workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.target, BaselineRevision: "rev-a"},
+				Spec:       workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.target, BaselineRevision: "rev-a", RolloutStrategy: byRole},
 			}
-			spec := workloadv1alpha1.ServingGroupSpec{TargetRevision: tt.told, BaselineRevision: "rev-a", RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy}
+			spec := workloadv1alpha1.ServingGroupSpec{
+				TargetRevision: tt.told, BaselineRevision: "rev-a", RolloutStrategy: byRole, RecoveryPolicy: workloadv1alpha1.NoneRestartPolicy,
+			}
+			if tt.asAWhole {
+				spec.Revision = "rev-a"
+				spec.RolloutStrategy = &workloadv1alpha1.ServingGroupRolloutStrategy{Type: workloadv1alpha1.ServingGroupRollingUpdate}
+			}
 
 			written := told(group, spec, tt.memberless)
 			if !reflect.DeepEqual(written.Spec, spec) {
@@ -256,51 +275,82 @@ func TestTheWriteThatTellsAGroupAnotherTarget(t *testing.T) {
 			}
 			// What the hand-down asks before it writes a group whose spec is
 			// as it should be: after this write the answer is no.
-			if outlived(written, tt.told) {
-				t.Errorf("after the write the group still names another revision than its target: %v", written.Annotations)
+			if outlived(written, &spec) {
+				t.Errorf("after the write what the group says still does not go with its spec: %v", written.Annotations)
 			}
 		})
 	}
 }
 
-// The target of a group and what the group says about where it comes from
-// change in one write. Wherever a round is cut off, no group is left with
-// the new target beside the annotation: a group that found the two together
-// would take itself for one that was born at the new target.
+// The target of a group, its strategy, and what the group says about where it
+// comes from change in one write. Wherever a round is cut off, no group is
+// left with the new target, or with the strategy of whole groups, beside the
+// annotation: a group that found the two together would take itself for one
+// that was born at the new target, now or on the day the strategy is changed
+// back.
 func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
-	// The groups are created Role by Role. Then they are replaced as a whole
-	// and in place: the target of a group changes in the write that starts
-	// its update, and in the hand-down for the others.
-	inPlace := func(ms *workloadv1alpha1.ModelServing) {
+	asAWhole := func(ms *workloadv1alpha1.ModelServing) {
 		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
-			Type:                       workloadv1alpha1.ServingGroupRollingUpdate,
-			UpdateMethod:               workloadv1alpha1.InPlaceUpdateMethod,
-			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{MaxUnavailable: ptr.To(intstr.FromInt32(1))},
+			Type: workloadv1alpha1.ServingGroupRollingUpdate,
+			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				MaxUnavailable: ptr.To(intstr.FromInt32(1)), Partition: ptr.To(intstr.FromInt32(3)),
+			},
+		}
+	}
+	// threeThatSay returns three groups that were created Role by Role and say so.
+	threeThatSay := func(t *testing.T) *system {
+		s := newSystem(t, modelServing(roleRolling(), threeGroups))
+		s.settle()
+		return s
+	}
+	// oneBeingBorn returns two groups that were told a target since they were
+	// created, and a third that says it is new and has no member.
+	oneBeingBorn := func(t *testing.T) *system {
+		s, _ := aGroupBeingBorn(t)
+		return s
+	}
+	target := func(s *system) func(*workloadv1alpha1.ServingGroup) bool {
+		before := s.modelServing().Status.UpdateRevision
+		return func(group *workloadv1alpha1.ServingGroup) bool { return group.Spec.TargetRevision != before }
+	}
+	strategy := func(*system) func(*workloadv1alpha1.ServingGroup) bool {
+		return func(group *workloadv1alpha1.ServingGroup) bool {
+			return group.Spec.RolloutStrategy.Type == workloadv1alpha1.ServingGroupRollingUpdate
 		}
 	}
 	tests := []struct {
-		name string
-		// then, when set, changes the ModelServing after its groups were created.
-		then func(*workloadv1alpha1.ModelServing)
-		// write is a write of the round that changes the target of a group.
+		name  string
+		start func(*testing.T) *system
+		// change is the update of the ModelServing whose round is cut off.
+		change func(*workloadv1alpha1.ModelServing)
+		// written returns what tells that the round has written a group.
+		written func(*system) func(*workloadv1alpha1.ServingGroup) bool
+		// write is a write of the round that changes a group that says something.
 		write string
 	}{
-		{name: "the settings are handed down", write: "update servinggroups default/llama-0"},
-		{name: "a group is updated in place", then: inPlace, write: "update servinggroups default/llama-2"},
+		{name: "another target is handed down", start: threeThatSay, change: setImage("model:v2"), written: target,
+			write: "update servinggroups default/llama-0"},
+		{name: "the strategy of whole groups is handed down", start: threeThatSay, change: asAWhole, written: strategy,
+			write: "update servinggroups default/llama-0"},
+		// The write that gives a group without a member the revision of its
+		// place is another one than the hand-down.
+		{name: "a group without a member gets the revision of its place", start: oneBeingBorn, change: asAWhole, written: strategy,
+			write: "update servinggroups default/llama-2"},
 	}
 	cut := errors.New("the round was cut off")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			for stopAt := 1; ; stopAt++ {
-				s := newSystem(t, modelServing(roleRolling(), threeGroups))
-				s.settleContainers()
-				if tt.then != nil {
-					s.update(tt.then)
-					s.settleContainers()
+				s := tt.start(t)
+				said := map[string]string{}
+				for _, group := range s.groups() {
+					if revision, says := group.Annotations[created]; says {
+						said[group.Name] = revision
+					}
 				}
-				first := s.modelServing().Status.UpdateRevision
-				s.update(setImage("model:v2"))
+				written := tt.written(s)
+				s.update(tt.change)
 				s.cluster.ResetWrites()
 
 				writes := 0
@@ -315,16 +365,16 @@ func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
 				}
 				s.cluster.BeforeWrite = nil
 
-				told := 0
+				done := 0
 				for _, group := range s.groups() {
 					revision, says := group.Annotations[created]
-					switch target := group.Spec.TargetRevision; {
-					case target == first && says && revision == first:
-					case target != first && !says:
-						told++
+					switch {
+					case written(group) && !says:
+						done++
+					case !written(group) && (!says || revision == said[group.Name]):
 					default:
-						t.Errorf("stop after write %d: group %s has the target %s and says that it was created from %q (%t); the first revision is %s",
-							stopAt, group.Name, target, revision, says, first)
+						t.Errorf("stop after write %d: group %s has the target %s and the strategy %s, and says that it was created from %q (%t); before the round it said %q",
+							stopAt, group.Name, group.Spec.TargetRevision, group.Spec.RolloutStrategy.Type, revision, says, said[group.Name])
 					}
 				}
 				if writes <= stopAt {
@@ -333,18 +383,19 @@ func TestTheTargetAndTheAnnotationOfAGroupChangeInOneWrite(t *testing.T) {
 					for _, write := range s.cluster.Writes() {
 						made = append(made, write.String())
 					}
-					if told != 3 || !slices.Contains(made, tt.write) {
-						t.Errorf("the whole round told %d of 3 groups the target with the writes %v; want all three, %q among the writes", told, made, tt.write)
+					if done != 3 || len(said) == 0 || !slices.Contains(made, tt.write) {
+						t.Errorf("the whole round wrote %d of 3 groups, of which %d said something, with the writes %v; want all three, %q among the writes",
+							done, len(said), made, tt.write)
 					}
 					return
 				}
 
 				// The rounds that follow repeat what was left.
-				s.settleContainers()
+				s.settle()
 				for _, group := range s.groups() {
-					if _, says := group.Annotations[created]; says || group.Spec.TargetRevision == first {
-						t.Errorf("stop after write %d: after the next rounds group %s has the target %s and the annotations %v",
-							stopAt, group.Name, group.Spec.TargetRevision, group.Annotations)
+					if _, says := group.Annotations[created]; says || !written(group) {
+						t.Errorf("stop after write %d: after the next rounds group %s has the target %s, the strategy %s and the annotations %v",
+							stopAt, group.Name, group.Spec.TargetRevision, group.Spec.RolloutStrategy.Type, group.Annotations)
 					}
 				}
 			}
@@ -894,4 +945,115 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 			t.Errorf("at the end the group says %q, want %s", got, third)
 		}
 	})
+}
+
+// What a group says about where it comes from is for groups that are rolled
+// Role by Role. A group that is replaced as a whole runs the revision its
+// spec names, which below the partition of the groups is the baseline; an
+// annotation that named the target there would be believed when the strategy
+// is changed back. So the annotation goes when the strategy is changed to
+// whole groups, also from a group that has no member, and it is not put back:
+// after the change back every group is one that was there before, and creates
+// a lost instance below a Role partition from the baseline.
+func TestTheStrategyIsChangedWithAGroupThatSaysWhereItComesFrom(t *testing.T) {
+	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
+	asAWhole := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{
+			Type: workloadv1alpha1.ServingGroupRollingUpdate,
+			RollingUpdateConfiguration: &workloadv1alpha1.RollingUpdateConfiguration{
+				MaxUnavailable: ptr.To(intstr.FromInt32(1)), Partition: ptr.To(intstr.FromInt32(3)),
+			},
+		}
+	}
+	byRole := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+	}
+	// whole returns two groups that stand at the partition between v1 and
+	// v2, and a third that was added there and is whole at v2.
+	whole := func(t *testing.T) *system {
+		s := newSystem(t, modelServing(heldByARolePartition))
+		s.settle()
+		s.update(setImage("model:v2"))
+		s.settle()
+		s.update(threeGroups)
+		s.settle()
+		return s
+	}
+	beingBorn := func(t *testing.T) *system {
+		s, _ := aGroupBeingBorn(t)
+		return s
+	}
+	const old = "0[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] 1[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2] "
+	tests := []struct {
+		name  string
+		start func(*testing.T) *system
+		// change is made together with the change of the strategy.
+		change func(*workloadv1alpha1.ModelServing)
+		// asGroups is what the groups run under the strategy of whole groups,
+		// byRoles after the change back and the loss of the protected
+		// instance of the second and the third group.
+		asGroups, byRoles string
+	}{
+		{name: "a group that is whole", start: whole,
+			asGroups: old + "2[route-0=route:v1 0=model:v2 1=model:v2 2=model:v2]",
+			byRoles:  old + "2[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2]"},
+		// Below the partition of the groups a group without a member is
+		// created from the baseline.
+		{name: "a group without a member", start: beingBorn,
+			asGroups: old + "2[route-0=route:v1 0=model:v1 1=model:v1 2=model:v1]",
+			byRoles:  old + "2[route-0=route:v1 0=model:v1 1=model:v2 2=model:v2]"},
+		{name: "a group without a member, and another target with the strategy", start: beingBorn, change: setImage("model:v3"),
+			asGroups: old + "2[route-0=route:v1 0=model:v1 1=model:v1 2=model:v1]",
+			byRoles: "0[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] 1[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] " +
+				"2[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := tt.start(t)
+			if _, says := s.groups()[2].Annotations[created]; !says {
+				t.Fatal("the third group does not say where it comes from")
+			}
+
+			s.update(func(ms *workloadv1alpha1.ModelServing) {
+				asAWhole(ms)
+				if tt.change != nil {
+					tt.change(ms)
+				}
+			})
+			s.settle()
+			if got := s.instances(); got != tt.asGroups {
+				t.Fatalf("replaced as a whole:\n got %s\nwant %s", got, tt.asGroups)
+			}
+			if got, want := s.created(nil), "0=- 1=- 2=-"; got != want {
+				t.Fatalf("replaced as a whole, the groups say %s, want %s", got, want)
+			}
+
+			// An annotation that somebody puts there is taken away, although
+			// it names the target.
+			foreign := s.groups()[2]
+			foreign.Annotations = map[string]string{created: foreign.Spec.TargetRevision}
+			if _, err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Update(context.Background(), foreign, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			s.settle()
+			if got, want := s.created(nil), "0=- 1=- 2=-"; got != want {
+				t.Fatalf("after an annotation was put on a group by hand, the groups say %s, want %s", got, want)
+			}
+
+			s.update(byRole)
+			s.settle()
+			if got, want := s.created(nil), "0=- 1=- 2=-"; got != want {
+				t.Errorf("rolled Role by Role again, the groups say %s, want %s", got, want)
+			}
+			for _, name := range []string{"llama-1-serve-0-0", "llama-1-serve-0-1", "llama-2-serve-0-0", "llama-2-serve-0-1"} {
+				if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), name, metav1.DeleteOptions{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.settle()
+			if got := s.instances(); got != tt.byRoles {
+				t.Errorf("after the protected instance of two groups was lost:\n got %s\nwant %s", got, tt.byRoles)
+			}
+		})
+	}
 }
