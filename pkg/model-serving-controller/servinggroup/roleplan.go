@@ -132,6 +132,11 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 	}
 	spec.Mode = grouplevel.ModeServingGroup
 	spec.Target = group.Spec.TargetRevision
+	if createdAtTarget(group) {
+		// No instance of the group ran the baseline: a place below the
+		// partition is filled from the target as well.
+		spec.Baseline = spec.Target
+	}
 	scaled := func(name string, value *intstr.IntOrString, roundUp bool, into *int) error {
 		if value == nil {
 			return nil
@@ -156,6 +161,23 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 	// Role is then rolled by recreation, which can use its surge.
 	spec.InPlace = UpdatesInPlace(group) && (role.MaxUnavailable == nil || spec.MaxUnavailable > 0)
 	return spec, nil
+}
+
+// createdAtTarget reports whether the group was born in the rollout that is
+// under way: the ModelServing controller created it new from the revision its
+// Roles are rolled to. Such a group never ran the baseline. The partition of
+// a Role keeps the instances below it at the baseline in a group that ran it;
+// here they are created from the target like the others, in the round that
+// creates them and in any later one of the same rollout: after a crash
+// between the ledger and the Pods, and when such an instance is lost.
+//
+// The ModelServing controller takes the annotation away in the write that
+// tells the group another target, so the revision it names is the target of
+// the group. The two are compared all the same: an annotation that names
+// another revision says nothing about the rollout of now.
+func createdAtTarget(group *workloadv1alpha1.ServingGroup) bool {
+	created := group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey]
+	return created != "" && created == group.Spec.TargetRevision
 }
 
 type rolePlanner struct {

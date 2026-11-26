@@ -377,6 +377,63 @@ func TestPlanRolesOfAGroupThatIsRolledRoleByRole(t *testing.T) {
 	}
 }
 
+// A group that was born in the rollout that is under way says which revision
+// it was created from, and that revision is its target. The partition of a
+// Role holds the instances below it at the baseline in a group that ran the
+// baseline; this group never did, and creates every instance from the target.
+func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
+	tests := []struct {
+		name string
+		// created is the revision the group says it was created from, "" when
+		// it does not say; target is the one it is rolled to. The baseline is rev-a.
+		created, target string
+		noBaseline      bool
+		instances       []Instance
+		want            string
+	}{
+		{name: "nothing exists: every instance is created from the target, the one below the partition included",
+			created: "rev-b", target: "rev-b", want: "0@rev-b 1@rev-b 2@rev-b"},
+		{name: "a missing instance below the partition is created from the target",
+			created: "rev-b", target: "rev-b",
+			instances: []Instance{planInstance(1, "rev-b"), planInstance(2, "rev-b")}, want: "0@rev-b 1@rev-b 2@rev-b"},
+		{name: "an entry without Pods below the partition gets the target",
+			created: "rev-b", target: "rev-b",
+			instances: []Instance{planInstance(0, "rev-b", inPhase(creating), withoutPods), planInstance(1, "rev-b"), planInstance(2, "rev-b")},
+			want:      "0@rev-b 1@rev-b 2@rev-b"},
+		{name: "the baseline cannot be told: nothing of the group needs it",
+			created: "rev-b", target: "rev-b", noBaseline: true,
+			instances: []Instance{planInstance(1, "rev-b"), planInstance(2, "rev-b")}, want: "0@rev-b 1@rev-b 2@rev-b"},
+		{name: "the group was told another target and does not say where it comes from: the baseline",
+			target:    "rev-c",
+			instances: []Instance{planInstance(1, "rev-c"), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-c 2@rev-c"},
+		{name: "an annotation that names another revision than the target counts for nothing: the baseline",
+			created: "rev-b", target: "rev-c",
+			instances: []Instance{planInstance(1, "rev-c"), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-c 2@rev-c"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			group := planGroup(3, &workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), Partition: intOrString("1")})
+			if tt.created != "" {
+				group.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: tt.created}
+			}
+			group.Spec.TargetRevision = tt.target
+			if tt.noBaseline {
+				group.Spec.BaselineRevision = ""
+			}
+			plan, err := PlanRoles(group, tt.instances, fakeRevisions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := wantsOf(plan); got != tt.want {
+				t.Errorf("wants = %q, want %q", got, tt.want)
+			}
+			if len(plan.Waiting) > 0 {
+				t.Errorf("waiting = %v, want nothing to wait for", plan.Waiting)
+			}
+		})
+	}
+}
+
 func TestPlanRolesLayoutAndErrors(t *testing.T) {
 	// The layout of an instance is the one of the revision it was created from.
 	revisions := fakeRevisions{workers: map[string]int32{"rev-a": 1, "rev-b": 3}}

@@ -55,6 +55,15 @@ func rolledTogether(prefill, decode int32, maxSkew string, dependency bool, muta
 	return group
 }
 
+// createdAt makes a group say that it was created new from revision, with the
+// lowest instance of both Roles below the partition of its Role.
+func createdAt(revision string) func(*workloadv1alpha1.ServingGroup) {
+	return func(group *workloadv1alpha1.ServingGroup) {
+		group.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: revision}
+		group.Spec.Roles[0].Partition, group.Spec.Roles[1].Partition = intOrString("1"), intOrString("1")
+	}
+}
+
 // instancesOf returns the instances of a Role, one for each word of layout in
 // the order of their indices: "a" runs rev-a and "b" rev-b, "!" after it makes
 // its worker not ready, "~" makes the instance one that is being drained, with
@@ -224,6 +233,19 @@ func TestPlanRolesRolledTogether(t *testing.T) {
 		{name: "every instance runs the target",
 			group: rolledTogether(4, 2, "25%", false), prefill: "b b b b", decode: "b b",
 			condition: "False/RolloutComplete"},
+
+		// A group that was born in the rollout never ran the baseline: the
+		// places below the partitions are filled from the target, and wait for
+		// the Roles they depend on like every instance of the target.
+		{name: "a group created at the target: the Role that is depended on is created whole from the target, its caller waits",
+			group: rolledTogether(2, 2, "100%", true, createdAt("rev-b")), prefill: "- -", decode: "- -",
+			changes: "+decode-0@rev-b +decode-1@rev-b", condition: "True/DependencyNotReady", deferred: []string{"prefill"}},
+		{name: "a group created at the target: the caller follows, whole from the target",
+			group: rolledTogether(2, 2, "100%", true, createdAt("rev-b")), prefill: "- -", decode: "b b",
+			changes: "+prefill-0@rev-b +prefill-1@rev-b", condition: "False/ProgressAvailable"},
+		{name: "an annotation that names another revision than the target counts for nothing: the baseline below the partitions, which does not wait",
+			group: rolledTogether(2, 2, "100%", true, createdAt("rev-a")), prefill: "- -", decode: "- -",
+			changes: "+decode-0@rev-a +decode-1@rev-b +prefill-0@rev-a", condition: "True/DependencyNotReady", deferred: []string{"prefill"}},
 
 		{name: "the partition of a Role holds",
 			group: rolledTogether(4, 2, "100%", false, func(group *workloadv1alpha1.ServingGroup) {
