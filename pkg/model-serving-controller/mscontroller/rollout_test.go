@@ -153,52 +153,175 @@ func TestRollingUpdateKeepsTheBudget(t *testing.T) {
 	}
 }
 
-// The surge group leaves only when it is surplus. The last old group is
-// replaced first: the new object is created and the ServingGroup controller
-// creates its Pods. Until then the surge group is one of the three groups
-// that have Pods, whether it is ready or not. The ModelServing controller
-// runs twice in a row, so it also sees the new object before it has a Pod.
-func TestTheSurgeGroupLeavesAfterThePlaceOfTheLastOldGroupHasItsPods(t *testing.T) {
-	tests := []struct {
-		name  string
-		stuck bool
-	}{
-		{name: "a surge group that is ready"},
-		{name: "a surge group that never gets ready", stuck: true},
+// surgeVariants are the two kinds of surge group the rule of its reclaim must
+// treat alike: the floor of ready groups holds the one, nothing held the other.
+var surgeVariants = []struct {
+	name  string
+	stuck bool
+}{
+	{name: "a surge group that is ready"},
+	{name: "a surge group that never gets ready", stuck: true},
+}
+
+// surgeRollout starts a rollout of three groups with one surge group and one
+// group that may be unavailable.
+func surgeRollout(t *testing.T, stuck bool) *system {
+	t.Helper()
+	s := newSystem(t, modelServing(rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
+		config.MaxSurge = ptr.To(intstr.FromInt32(1))
+	})))
+	s.settle()
+	if stuck {
+		s.stuck = func(pod *corev1.Pod) bool { return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-3" }
 	}
-	for _, tt := range tests {
+	s.cluster.ResetWrites()
+	// The ModelServing controller runs twice in a row, so it also sees an
+	// object it created before the ServingGroup controller has seen it.
+	s.msRounds = 2
+	s.update(setImage("model:v2"))
+	return s
+}
+
+// leftInOrder checks that the place of the last old group was created, then
+// its first Pod, and that the surge group was deleted after that, once.
+func leftInOrder(t *testing.T, s *system) {
+	t.Helper()
+	if got, want := s.summary(), "groups[0=model:v2 1=model:v2 2=model:v2] replicas=3 updated=3 current=3 available=3 Available"; got != want {
+		t.Fatalf("after the rollout:\n got %s\nwant %s", got, want)
+	}
+	created, pods, reclaimed, deletions := -1, -1, -1, 0
+	writes := s.cluster.Writes()
+	for i, write := range writes {
+		switch {
+		case write.Verb == "create" && write.Resource == "servinggroups" && write.Name == "llama-0":
+			created, pods = i, -1
+		case write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-0-") && pods < 0:
+			pods = i
+		case write.Verb == "delete" && write.Resource == "servinggroups" && write.Name == "llama-3":
+			reclaimed = i
+			deletions++
+		}
+	}
+	if created < 0 || pods < created || reclaimed < pods || deletions != 1 {
+		t.Errorf("llama-0 created at write %d, its first Pod at %d, llama-3 deleted %d time(s), last at %d; want that order and one deletion:\n%v",
+			created, pods, deletions, reclaimed, writes)
+	}
+}
+
+// rest runs passes until one writes nothing, with the termination of Pods
+// held: a terminating Pod goes at once unless keep says that it takes its time.
+func rest(s *system, keep func(*corev1.Pod) bool) {
+	s.t.Helper()
+	s.cluster.HoldPodTermination(true)
+	for range 100 {
+		// The garbage collector first: it is what gives the Pods of a deleted group their deletionTimestamp.
+		s.cluster.Settle()
+		for _, pod := range s.pods() {
+			if pod.DeletionTimestamp != nil && !keep(pod) {
+				if err := s.cluster.FinishTermination(testNamespace, pod.Name); err != nil {
+					s.t.Fatal(err)
+				}
+			}
+		}
+		s.kubelet()
+		s.cluster.Settle()
+		if s.pass() == 0 {
+			return
+		}
+	}
+	s.t.Fatalf("the ModelServing did not come to rest: %s", s.summary())
+}
+
+func lastOldGroup(pod *corev1.Pod) bool {
+	return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-0" && pod.Spec.Containers[0].Image == "model:v1"
+}
+
+func noPod(*corev1.Pod) bool { return false }
+
+// The surge group stands in for a regular place until three other groups
+// have Pods. While the last old group terminates it stays, ready or not; it
+// leaves after the replacement has been created and has its first Pod.
+func TestTheSurgeGroupStaysWhileTheLastOldGroupTerminates(t *testing.T) {
+	for _, tt := range surgeVariants {
 		t.Run(tt.name, func(t *testing.T) {
-			s := newSystem(t, modelServing(rollout(func(config *workloadv1alpha1.RollingUpdateConfiguration) {
-				config.MaxSurge = ptr.To(intstr.FromInt32(1))
-			})))
-			s.settle()
-			if tt.stuck {
-				s.stuck = func(pod *corev1.Pod) bool { return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-3" }
+			s := surgeRollout(t, tt.stuck)
+			rest(s, lastOldGroup)
+			if got, want := s.images(), "0=model:v1! 1=model:v2 2=model:v2 3=model:v2+"; got != want {
+				t.Fatalf("at rest while the last old group terminates:\n got %s\nwant %s", got, want)
+			}
+
+			rest(s, noPod)
+			leftInOrder(t, s)
+		})
+	}
+}
+
+// Pods that are terminating are on their way out: a group that has no other
+// Pod is not one of the three. Here the Pods of a group of the target are
+// deleted from outside while the last old group terminates.
+func TestTheSurgeGroupStaysWhileThePodsOfAnotherGroupAreAllTerminating(t *testing.T) {
+	for _, tt := range surgeVariants {
+		t.Run(tt.name, func(t *testing.T) {
+			s := surgeRollout(t, tt.stuck)
+			rest(s, lastOldGroup)
+			lost := map[types.UID]bool{}
+			for _, pod := range s.pods() {
+				if pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-1" {
+					lost[pod.UID] = true
+					if err := s.cluster.Kube.CoreV1().Pods(testNamespace).Delete(context.Background(), pod.Name, metav1.DeleteOptions{}); err != nil {
+						t.Fatal(err)
+					}
+				}
 			}
 			s.cluster.ResetWrites()
-			s.msRounds = 2
-			s.update(setImage("model:v2"))
-			s.settle()
 
+			// The last old group goes and is replaced; the lost Pods are still terminating.
+			rest(s, func(pod *corev1.Pod) bool { return lost[pod.UID] })
+			if got, want := s.images(), "0=model:v2 1=model:v2 2=model:v2 3=model:v2+"; got != want {
+				t.Fatalf("at rest while the Pods of llama-1 terminate:\n got %s\nwant %s", got, want)
+			}
+			for _, pod := range s.pods() {
+				if pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-1" && pod.DeletionTimestamp == nil {
+					t.Fatalf("Pod %s of llama-1 is not terminating; the test wants a group whose Pods are all on their way out", pod.Name)
+				}
+			}
+
+			rest(s, noPod)
 			if got, want := s.summary(), "groups[0=model:v2 1=model:v2 2=model:v2] replicas=3 updated=3 current=3 available=3 Available"; got != want {
 				t.Fatalf("after the rollout:\n got %s\nwant %s", got, want)
 			}
-			// The last creation of llama-0 is its replacement; llama-3 is deleted once.
-			created, pods, reclaimed := -1, -1, -1
-			writes := s.cluster.Writes()
-			for i, write := range writes {
-				switch {
-				case write.Verb == "create" && write.Resource == "servinggroups" && write.Name == "llama-0":
-					created, pods = i, -1
-				case write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-0-") && pods < 0:
-					pods = i
-				case write.Verb == "delete" && write.Resource == "servinggroups" && write.Name == "llama-3":
-					reclaimed = i
+		})
+	}
+}
+
+// What the status of a group says about Pods that are being created is not a
+// Pod. The replacement of the last old group exists and has committed itself
+// to its Pods, and their creation is refused: the surge group stays. It
+// leaves when the first of them is there.
+func TestTheSurgeGroupStaysWhileThePodsOfTheReplacementCannotBeCreated(t *testing.T) {
+	for _, tt := range surgeVariants {
+		t.Run(tt.name, func(t *testing.T) {
+			s := surgeRollout(t, tt.stuck)
+			// Every Pod of llama-0 created from here on belongs to its replacement.
+			s.refused = errors.New("exceeded quota")
+			s.cluster.BeforeWrite = func(write apitestWrite) error {
+				if write.Verb == "create" && write.Resource == "pods" && strings.HasPrefix(write.Name, "llama-0-") {
+					return s.refused
 				}
+				return nil
 			}
-			if created < 0 || pods < created || reclaimed < pods {
-				t.Errorf("llama-0 created at write %d, its first Pod at %d, llama-3 deleted at %d; want that order:\n%v", created, pods, reclaimed, writes)
+			s.settle()
+
+			if got, want := s.images(), "0=none 1=model:v2 2=model:v2 3=model:v2+"; got != want {
+				t.Fatalf("at rest while the Pods of the replacement are refused:\n got %s\nwant %s", got, want)
 			}
+			if replacement := s.groups()[0]; replacement.Status.Pods == 0 {
+				t.Fatalf("status.pods of %s is 0; the test wants a group that has committed itself to its Pods", replacement.Name)
+			}
+
+			s.cluster.BeforeWrite = nil
+			s.settle()
+			leftInOrder(t, s)
 		})
 	}
 }

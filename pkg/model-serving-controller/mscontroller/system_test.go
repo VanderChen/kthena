@@ -116,6 +116,9 @@ type system struct {
 	// runs in a pass before the ServingGroup controller runs: it then sees
 	// the objects it wrote as the ServingGroup controller has not yet seen them.
 	msRounds int
+	// refused, when set, is an error a round of a ServingGroup may end with:
+	// the test refuses some of its writes.
+	refused error
 	// stuck, when set, names the Pods the kubelet never gets ready.
 	stuck func(*corev1.Pod) bool
 	// rollback is the rollback switch.
@@ -176,7 +179,7 @@ func (s *system) pass() int {
 	for _, group := range s.groups() {
 		caches, snapshot := s.caches()
 		s.sg.SetCaches(caches, snapshot.Listers().Services)
-		if _, err := s.sg.Reconcile(context.Background(), testNamespace, group.Name); err != nil {
+		if _, err := s.sg.Reconcile(context.Background(), testNamespace, group.Name); err != nil && (s.refused == nil || !errors.Is(err, s.refused)) {
 			s.t.Fatalf("round of ServingGroup %s: %v", group.Name, err)
 		}
 	}
