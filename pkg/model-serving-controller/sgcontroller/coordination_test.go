@@ -424,6 +424,59 @@ func TestCoordinatedGroupRecreatesALostInstanceBelowThePartition(t *testing.T) {
 	}
 }
 
+// A group can say that it was created from the target and have Pods of
+// another revision: it was told the target while its first Pods were being
+// created from the one before. The controller sees its own Pods, and does not
+// take such a group at its word. It plans it like any group: what the group
+// lacks below a partition is of the baseline.
+//
+// Here every instance is below the partition of its Role. decode was created
+// from rev-b and stays there. prefill does not exist. As a Role of a group
+// that was created from rev-c it would be of rev-c and wait for decode to
+// offer capacity of rev-c, which decode never does. As a Role of any group it
+// is of the baseline, which waits for nothing.
+func TestCoordinatedGroupThatSaysTheTargetAndHasPodsOfAnotherRevisionIsNotTakenAtItsWord(t *testing.T) {
+	first := testModelServing(coordinated(2, 2, 1, "100%", true), func(ms *workloadv1alpha1.ModelServing) {
+		for i := range ms.Spec.Template.Roles {
+			ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString("100%"))
+		}
+	})
+	second, third := withImages(first, "model:v2"), withImages(first, "model:v3")
+	group := groupOf(second, "rev-b")
+	group.Spec.BaselineRevision = "rev-a"
+	for i := range group.Spec.Roles {
+		group.Spec.Roles[i].BaselineReplicas = ptr.To(group.Spec.Roles[i].Replicas)
+	}
+	group.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: "rev-b"}
+	h := newHarness(t, third, group, revisionOf(t, first, "rev-a"), revisionOf(t, second, "rev-b"), revisionOf(t, third, "rev-c"))
+
+	// The group is new at rev-b: decode first, and prefill when it is ready.
+	const decode = "decode-0-0=model:v2/rev-b decode-0-1=model:v2/rev-b decode-1-0=model:v2/rev-b decode-1-1=model:v2/rev-b"
+	h.quiesce()
+	if got := h.podRevisions(); got != decode {
+		t.Fatalf("the new group has %s, want %s", got, decode)
+	}
+
+	// It is told rev-c, and that it was created from it.
+	h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+		group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey] = "rev-c"
+		group.Spec.TargetRevision = "rev-c"
+	})
+	const prefill = " prefill-0-0=model:v1/rev-a prefill-0-1=model:v1/rev-a prefill-1-0=model:v1/rev-a prefill-1-1=model:v1/rev-a"
+	h.quiesce()
+	if got := h.podRevisions(); got != decode+prefill {
+		t.Errorf("while decode is not ready the group has\n got %s\nwant %s", got, decode+prefill)
+	}
+	h.readyAll()
+	h.quiesce()
+	if got := h.podRevisions(); got != decode+prefill {
+		t.Errorf("at rest the group has\n got %s\nwant %s", got, decode+prefill)
+	}
+	if got, want := h.ledger(), "decode-0:Established/0 decode-1:Established/0 prefill-0:Established/0 prefill-1:Established/0"; got != want {
+		t.Errorf("ledger = %q, want %q", got, want)
+	}
+}
+
 // With a surge and no unavailable budget, a coordinated Role creates its
 // temporary instance only when it may start the target, and the instance
 // goes when the rollout is over.
