@@ -310,13 +310,30 @@ func TestTheSurgeGroupStaysWhileThePodsOfTheReplacementCannotBeCreated(t *testin
 				}
 				return nil
 			}
+			// Time passes, so that the surge group is older than the replacement.
+			s.invariant = func() { s.cluster.Advance(time.Second) }
 			s.settle()
+			s.invariant = nil
 
 			if got, want := s.images(), "0=none 1=model:v2 2=model:v2 3=model:v2+"; got != want {
 				t.Fatalf("at rest while the Pods of the replacement are refused:\n got %s\nwant %s", got, want)
 			}
 			if replacement := s.groups()[0]; replacement.Status.Pods == 0 {
 				t.Fatalf("status.pods of %s is 0; the test wants a group that has committed itself to its Pods", replacement.Name)
+			}
+
+			// Nothing moves. After the deadline the ModelServing says what it
+			// waits for: the place without Pods, not the surge group, although
+			// a surge group that never gets ready has been not ready for longer.
+			s.cluster.Advance(6 * time.Minute)
+			s.pass()
+			blocked := meta.FindStatusCondition(s.modelServing().Status.Conditions, string(workloadv1alpha1.ModelServingRolloutBlocked))
+			if blocked == nil || blocked.Status != metav1.ConditionTrue || blocked.Reason != workloadv1alpha1.RolloutBlockedTargetNotReady ||
+				!strings.Contains(blocked.Message, "ServingGroup llama-0 ") || !strings.Contains(blocked.Message, s.refused.Error()) {
+				t.Errorf("RolloutBlocked = %+v; want TargetNotReady that names llama-0 and says why it has no Pods", blocked)
+			}
+			if got, want := s.images(), "0=none 1=model:v2 2=model:v2 3=model:v2+"; got != want {
+				t.Errorf("after the deadline:\n got %s\nwant %s", got, want)
 			}
 
 			s.cluster.BeforeWrite = nil

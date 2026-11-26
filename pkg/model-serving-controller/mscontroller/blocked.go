@@ -141,15 +141,27 @@ func (c *Controller) blockedOn(r *round, status workloadv1alpha1.ModelServingSta
 	if found != nil {
 		return found
 	}
-	for i := range r.view.groups {
-		g := &r.view.groups[i]
-		if g.unit.Revision == r.view.spec.Target && !g.unit.Ready && !g.unit.Empty {
-			earliest(workloadv1alpha1.RolloutBlockedTargetNotReady, conditionSince(g, workloadv1alpha1.ServingGroupConditionReady),
-				"ServingGroup %s of the target revision is not ready", g.object.Name)
+	// A regular group first. A surge group that is not ready may have waited
+	// longer, but when a regular place is not ready either, that place is
+	// what the surge group stands in for and what the rollout waits for.
+	for _, surge := range []bool{false, true} {
+		for i := range r.view.groups {
+			g := &r.view.groups[i]
+			if g.unit.Surge == surge && g.unit.Revision == r.view.spec.Target && !g.unit.Ready && !g.unit.Empty {
+				// When the group says why its rounds fail, that is the reason
+				// to pass on: Pods that cannot be created are not found by
+				// looking at the Pods.
+				why := ""
+				if g.condition(workloadv1alpha1.ServingGroupConditionReconcileFailed) {
+					why = ": " + meta.FindStatusCondition(g.object.Status.Conditions, string(workloadv1alpha1.ServingGroupConditionReconcileFailed)).Message
+				}
+				earliest(workloadv1alpha1.RolloutBlockedTargetNotReady, conditionSince(g, workloadv1alpha1.ServingGroupConditionReady),
+					"ServingGroup %s of the target revision is not ready%s", g.object.Name, why)
+			}
 		}
-	}
-	if found != nil {
-		return found
+		if found != nil {
+			return found
+		}
 	}
 	for i := range r.view.groups {
 		g := &r.view.groups[i]
