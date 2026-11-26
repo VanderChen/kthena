@@ -282,7 +282,8 @@ type ServingGroupSpec struct {
 	TargetRevision string `json:"targetRevision,omitempty"`
 	// BaselineRevision is a copy of ModelServing.status.currentRevision. Role instances
 	// protected by a Role partition are created from it, except in a new group: one
-	// whose annotation modelserving.volcano.sh/created-revision names the target.
+	// whose annotation modelserving.volcano.sh/created-revision names the target,
+	// while every Pod it has is of the target.
 	BaselineRevision string `json:"baselineRevision,omitempty"`
 	// SourceGeneration is the generation of the ModelServing this spec was derived from.
 	SourceGeneration int64 `json:"sourceGeneration,omitempty"`
@@ -356,7 +357,7 @@ Other additions:
 | --- | --- | --- |
 | ServingGroup | label `modelserving.volcano.sh/name` | The owning ModelServing |
 | ServingGroup | annotation `modelserving.volcano.sh/surge: serving-group` | Temporary surge group. Set at creation, removed on promotion, never added later |
-| ServingGroup | annotation `modelserving.volcano.sh/created-revision` | The revision the group was created from; the group was born in the rollout to it. Set when a new group is created under `RoleRollingUpdate`, removed in the write that tells the group another target (a group that has built nothing, no instance established and no Pod, keeps it, rewritten to that target) and in the write that tells it `ServingGroupRollingUpdate`, never added later. Not set on an object that is created for Pods that exist. A group that carries it creates every Role instance from that revision, the instances below a Role `partition` included |
+| ServingGroup | annotation `modelserving.volcano.sh/created-revision` | The revision the group was created from; the group was born in the rollout to it. Set when a new group is created under `RoleRollingUpdate`, removed in the write that tells the group another target (a group that has built nothing, no instance established and no Pod, keeps it, rewritten to that target) and in the write that tells it `ServingGroupRollingUpdate`, never added later. Not set on an object that is created for Pods that exist. A group that carries it creates every Role instance from that revision, the instances below a Role `partition` included, while every Pod it has is of that revision; with a Pod of another revision it creates them from the baseline like any other group |
 | Pod | controller owner is the ServingGroup; `blockOwnerDeletion: true` | Also for the PodGroup and the Services |
 | Pod | label `modelserving.volcano.sh/instance-generation` | Generation of the Role instance the Pod was created for |
 | Pod | annotation `modelserving.volcano.sh/surge: serving-group` | A copy of the group's mark, kept for tools that read it from Pods. Not an input. Removed from the Pods in the group's next round after the group lost the mark |
