@@ -423,9 +423,11 @@ func observeReplica(inst Instance, role, target string, spec grouplevel.Spec, te
 	switch {
 	case !compared && !replica.deleting:
 		// An instance without a Pod yet is created from the revision of its
-		// place: the baseline below the partition, else the target.
+		// place: the baseline below the partition, else the target. In a
+		// group that was created at the target every place is one of the
+		// target; the plan is told so by a baseline that is the target.
 		replica.comparison = workload.Equivalent
-		if templateChanged && inst.Index < spec.Partition {
+		if templateChanged && inst.Index < spec.Partition && spec.Baseline != spec.Target {
 			replica.comparison = workload.Different
 		}
 	case compared:

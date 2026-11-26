@@ -310,6 +310,45 @@ func TestCoordinatedRolloutStopsAtThePartition(t *testing.T) {
 	}
 }
 
+// In a group that was created at the target every instance is one of the
+// target, the ones below the partition of a Role included. One that has lost
+// its Pods is a started instance like the others, and its Pods are created
+// again at once. Taken for an instance of the baseline, which is what the
+// place below a partition is in a group that ran the baseline, it would make
+// its Role look as if it had not started the target: a Role that depends on
+// another would give the instance up and wait for that Role once more.
+func TestCoordinatedGroupCreatedAtTheTargetCreatesALostInstanceAgainAtOnce(t *testing.T) {
+	h := coordinatedHarness(t, coordinated(1, 1, 1, "100%", true), func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles[0].Partition = ptr.To(intstr.FromInt32(1))
+		ms.Spec.Template.Roles[1].Partition = ptr.To(intstr.FromInt32(1))
+	})
+	h.updateGroup(func(group *workloadv1alpha1.ServingGroup) {
+		group.Annotations = map[string]string{workloadv1alpha1.CreatedRevisionAnnotationKey: "rev-b"}
+		group.Spec.TargetRevision = "rev-b"
+	})
+	h.settleContainers()
+	if got := h.progress("model:v2"); got != "prefill:1/1 decode:1/1" {
+		t.Fatalf("created: progress = %s", got)
+	}
+
+	// The Role prefill depends on stops being ready, and prefill loses its Pods.
+	h.crash("llama-0-decode-0-0")
+	h.lose("llama-0-prefill-0-0")
+	h.lose("llama-0-prefill-0-1")
+	writes := h.mustRound()
+	for _, name := range []string{"llama-0-prefill-0-0", "llama-0-prefill-0-1"} {
+		if !hasWrite(writes, "create pods "+name) {
+			t.Errorf("writes = %v; want Pod %s created again", writes, name)
+		}
+	}
+	if got, blocked := h.ledger(), h.blocked(); got != "decode-0:Established/0 prefill-0:Established/0" || blocked != "(RolloutComplete)" {
+		t.Errorf("ledger = %q, blocked = %q; want the instance kept and nothing to wait for", got, blocked)
+	}
+	if got := h.progress("model:v2"); got != "prefill:1/0 decode:1/0" {
+		t.Errorf("progress = %s, want both instances at the target", got)
+	}
+}
+
 // With a surge and no unavailable budget, a coordinated Role creates its
 // temporary instance only when it may start the target, and the instance
 // goes when the rollout is over.
