@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
@@ -115,5 +116,93 @@ func TestARoleSurgeInstanceThatTakesARegularPlaceLosesTheMark(t *testing.T) {
 	}
 	if !reflect.DeepEqual(after, temporary) {
 		t.Errorf("the Pods of the instance that took a regular place were replaced: %v, were %v", after, temporary)
+	}
+}
+
+// The temporary instance of a Role stands in for a regular place until as
+// many other instances as the Role has replicas have a Pod. While the last
+// old instance is being drained it stays, although the budget would let a
+// ready one go; it is drained after the first Pod of the replacement is
+// created.
+func TestARoleSurgeInstanceStaysUntilTheLastPlaceHasAPod(t *testing.T) {
+	rolled := func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.RolloutStrategy = &workloadv1alpha1.RolloutStrategy{Type: workloadv1alpha1.RoleRollingUpdate}
+		role := &ms.Spec.Template.Roles[0]
+		role.Replicas = ptr.To[int32](2)
+		role.MaxUnavailable, role.MaxSurge = ptr.To(intstr.FromInt32(1)), ptr.To(intstr.FromInt32(1))
+	}
+	earlier := testModelServing(rolled)
+	ms := testModelServing(rolled, func(ms *workloadv1alpha1.ModelServing) {
+		ms.Spec.Template.Roles[0].EntryTemplate = podTemplate("model:v2")
+		ms.Spec.Template.Roles[0].WorkerTemplate = ptr.To(podTemplate("model:v2"))
+	})
+	h := newHarness(t, ms, revisionOf(t, earlier, "rev-a"), revisionOf(t, ms, "rev-b"), groupOf(ms, "rev-a"))
+	h.settle()
+	h.cluster.ResetWrites()
+
+	// The Pods of the last old instance take their time to go; every other Pod goes at once.
+	h.cluster.HoldPodTermination(true)
+	lastOld := func(pod *corev1.Pod) bool {
+		return pod.Labels[workloadv1alpha1.RoleIDKey] == "prefill-0" && pod.Spec.Containers[0].Image == "model:v1"
+	}
+	rest := func(keep func(*corev1.Pod) bool) {
+		t.Helper()
+		for range 40 {
+			for _, pod := range h.pods() {
+				if pod.DeletionTimestamp != nil && !keep(pod) {
+					if err := h.cluster.FinishTermination(testNamespace, pod.Name); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			h.readyAll()
+			h.cluster.Settle()
+			if len(h.mustRound()) == 0 {
+				return
+			}
+		}
+		t.Fatalf("the group did not come to rest: %s", h.podSummary())
+	}
+	// instances lists the Role instances by the image of their Pods; "!" marks one whose Pods are terminating.
+	instances := func() string {
+		byInstance := map[string]string{}
+		for _, pod := range h.pods() {
+			state := pod.Spec.Containers[0].Image
+			if pod.DeletionTimestamp != nil {
+				state += "!"
+			}
+			byInstance[pod.Labels[workloadv1alpha1.RoleIDKey]] = state
+		}
+		var out []string
+		for id, state := range byInstance {
+			out = append(out, id+"="+state)
+		}
+		sort.Strings(out)
+		return strings.Join(out, " ")
+	}
+
+	h.updateGroup(func(group *workloadv1alpha1.ServingGroup) { group.Spec.TargetRevision = "rev-b" })
+	rest(lastOld)
+	if got, want := instances(), "prefill-0=model:v1! prefill-1=model:v2 prefill-2=model:v2"; got != want {
+		t.Fatalf("at rest while the last old instance is drained:\n got %s\nwant %s", got, want)
+	}
+
+	rest(func(*corev1.Pod) bool { return false })
+	if got, want := instances(), "prefill-0=model:v2 prefill-1=model:v2"; got != want {
+		t.Fatalf("after the rollout:\n got %s\nwant %s", got, want)
+	}
+	created, drained := -1, -1
+	writes := writesOf(h.cluster.Writes())
+	for i, write := range writes {
+		switch {
+		case strings.HasPrefix(write, "create pods "+testGroup+"-prefill-0-") && created < 0:
+			created = i
+		case strings.HasPrefix(write, "delete pods "+testGroup+"-prefill-2-") && drained < 0:
+			drained = i
+		}
+	}
+	if created < 0 || drained < created {
+		t.Errorf("the first Pod of the replacement was created at write %d, the first Pod of the temporary instance deleted at %d; want that order:\n%v",
+			created, drained, writes)
 	}
 }

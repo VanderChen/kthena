@@ -129,6 +129,16 @@ func withoutPods(inst *Instance) { inst.Members = nil }
 
 func memberNotReady(inst *Instance) { inst.Members[1].State = MemberNotReady }
 
+// membersTerminating: every Pod of the instance is being deleted, and the
+// ledger does not say that the instance is being drained.
+func membersTerminating(inst *Instance) {
+	now := metav1.Now()
+	for i := range inst.Members {
+		inst.Members[i].State = MemberTerminating
+		inst.Members[i].Pod.DeletionTimestamp = &now
+	}
+}
+
 func roleSurge(inst *Instance) {
 	inst.Members[0].Pod.Annotations = map[string]string{workloadv1alpha1.SurgeAnnotationKey: workloadv1alpha1.SurgeScopeRole}
 }
@@ -302,6 +312,37 @@ func TestPlanRolesOfAGroupThatIsRolledRoleByRole(t *testing.T) {
 			role:      workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("0"), MaxSurge: intOrString("1")},
 			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-b"), planInstance(3, "rev-b", roleSurge)},
 			want:      "0@rev-b 1@rev-b 2@rev-b"},
+		// The temporary instance stands in for a place until three other
+		// instances have a Pod, whether it is ready or not.
+		{name: "surge: the temporary instance stays while the last old instance is being drained",
+			role: workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("1")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-a", inPhase(draining)),
+				planInstance(3, "rev-b", roleSurge, memberNotReady)},
+			want: "0@rev-b 1@rev-b 2@rev-b 3@rev-b+"},
+		{name: "surge: a ready one stays as well",
+			role: workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("1")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-a", inPhase(draining)),
+				planInstance(3, "rev-b", roleSurge)},
+			want: "0@rev-b 1@rev-b 2@rev-b 3@rev-b+"},
+		{name: "surge: it stays while the replacement is in the ledger and has no Pod",
+			role: workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("1")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-b", inPhase(creating), withoutPods),
+				planInstance(3, "rev-b", roleSurge, memberNotReady)},
+			want: "0@rev-b 1@rev-b 2@rev-b 3@rev-b+"},
+		{name: "surge: it stays while every Pod of the replacement is terminating",
+			role: workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("1")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-b", membersTerminating),
+				planInstance(3, "rev-b", roleSurge, memberNotReady)},
+			want: "0@rev-b 1@rev-b 2@rev-b 3@rev-b+"},
+		{name: "surge: it goes once the replacement has a Pod, ready or not",
+			role: workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("1")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(2, "rev-b", memberNotReady),
+				planInstance(3, "rev-b", roleSurge, memberNotReady)},
+			want: "0@rev-b 1@rev-b 2@rev-b"},
+		{name: "surge: with maxSurge lowered to 0 there is no room for the missing place until the temporary instance has gone",
+			role:      workloadv1alpha1.ServingGroupRole{MaxUnavailable: intOrString("1"), MaxSurge: intOrString("0")},
+			instances: []Instance{planInstance(0, "rev-b"), planInstance(1, "rev-b"), planInstance(3, "rev-b", roleSurge)},
+			want:      "0@rev-b 1@rev-b"},
 		{name: "a revision that renders the same Pods as the target is not replaced",
 			instances: old3(), revisions: fakeRevisions{class: map[string]string{"rev-a": "same", "rev-b": "same"}}, want: "0@rev-a 1@rev-a 2@rev-a"},
 		{name: "a revision that cannot be resolved is not replaced",
