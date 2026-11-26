@@ -778,6 +778,31 @@ func TestAGroupThatRanTheBaselineCreatesItsProtectedInstanceFromTheBaseline(t *t
 		stands(t, s, "after the protected instance of group 2 was lost", held)
 	})
 
+	// The third group is born at v2 during a canary. The canary is given up
+	// and the partition is kept. An instance below a partition is never
+	// replaced, so the one of the third group stays at v2, and the rollout
+	// back to v1 is not reported as complete. Removing the partition ends it.
+	t.Run("a canary is given up with the partition kept", func(t *testing.T) {
+		s := newSystem(t, modelServing(roleRolling(), changed("model:v1", one, 0)))
+		s.settle()
+		s.update(changed("model:v2", one, 3))
+		s.settle()
+		s.update(changed("model:v1", one, 0))
+		s.settle()
+		stands(t, s, "the canary given up, the partition kept",
+			"0[0=model:v1 1=model:v1 2=model:v1] 1[0=model:v1 1=model:v1 2=model:v1] 2[0=model:v2 1=model:v1 2=model:v1]")
+		if got, want := s.counts()+" "+s.condition(), "replicas=3 updated=2 current=2 available=3 UpdateInProgress"; got != want {
+			t.Errorf("status with the partition kept = %s, want %s", got, want)
+		}
+		s.update(changed("model:v1", nil, 0))
+		s.settle()
+		stands(t, s, "the partition removed",
+			"0[0=model:v1 1=model:v1 2=model:v1] 1[0=model:v1 1=model:v1 2=model:v1] 2[0=model:v1 1=model:v1 2=model:v1]")
+		if got, want := s.counts()+" "+s.condition(), "replicas=3 updated=3 current=3 available=3 Available"; got != want {
+			t.Errorf("status with the partition removed = %s, want %s", got, want)
+		}
+	})
+
 	// The third group is born at v2 during a canary. The canary moves on to
 	// v3: the group is one of an earlier revision like the others, and stays
 	// one when the canary returns to v2.
