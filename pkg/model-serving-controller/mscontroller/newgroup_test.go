@@ -28,7 +28,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -921,8 +920,9 @@ func TestAGroupWithoutAMemberIsCreatedFromTheTargetItIsTold(t *testing.T) {
 // an instance became established in between meets the conflict.
 //
 // The Pods themselves are not part of the exclusion: creating one is not a
-// write of the group. The last case is a Pod that the ModelServing controller
-// does not see yet.
+// write of the group. The round of the group that committed goes on to create
+// its Pods, whatever is written to the group meanwhile. The fourth case is a
+// group that is told another target between its commitment and its Pods.
 func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
 	const others = "0[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] 1[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] "
@@ -1070,9 +1070,11 @@ func TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth(t *testing.T) {
 	// creates the Pods without another write of the group. The ModelServing
 	// controller looked before they were there: it sees a group that has
 	// built nothing, and its write is accepted. The group now says that it
-	// was created from v3 and has Pods of v2. Below the partition they stay,
-	// like any Pods there; and one that is lost comes back from v3.
-	t.Run("the Pods of the group are created and the ModelServing controller does not see them yet", func(t *testing.T) {
+	// was created from v3 and has Pods of v2. Its controller does not take it
+	// at its word while it has them, and rolls it like any group: the Pods
+	// below the partition stay. When they are lost the group has Pods of v3
+	// alone, is what it says, and the instance comes back from v3.
+	t.Run("the group is told between its commitment and its Pods", func(t *testing.T) {
 		s, second := aGroupBeingBorn(t)
 		commitsAndDies(t, s)
 		s.update(setImage("model:v3"))
@@ -1559,26 +1561,23 @@ func TestALostInstanceOfANewGroupOfCoordinatedRolesWaitsOnlyWhenItsRoleStartsAne
 	}
 }
 
-// An open point, written down as it is today. It is not what should happen.
-//
-// Nothing excludes a Pod that is created after the ModelServing controller
-// looked: creating a Pod is not a write of the group. A group that has
-// committed, and whose controller creates its Pods at that moment, can be
-// told that it was created from the new target and have Pods of the one
-// before (the last case of
-// TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth). Those Pods are
-// held below the partition of their Role like any others.
+// A group that has committed can be told that it was created from the new
+// target and have Pods of the one before. The round of the group that
+// committed goes on to create its Pods from the plan it made, and creating a
+// Pod is not a write of the group, so nothing excludes it (the last case of
+// TestAGroupIsToldAnotherTargetOrCommitsToItsFirstPodNotBoth). The
+// ServingGroup controller sees those Pods and does not take the group at its
+// word: its Roles are planned like those of any group.
 //
 // Roles that are rolled together begin a staged rollout with every instance
-// below the partition. Then decode stays at the target of before in such a
-// group, and prefill, which does not exist yet, is of the new target and
-// waits for capacity of the new target: it is not created. The group is not
-// complete until the partitions are lowered, the template returns, or an
-// instance of decode is lost and comes back from the new target.
-//
-// The window is the time between the creation of the Pods and the moment the
-// ModelServing controller sees them.
-func TestANewGroupThatWasToldTheTargetWhileItsPodsWereCreatedWaits(t *testing.T) {
+// below the partition. decode stays at the target of before. prefill does not
+// exist yet. Below the partition it is of the baseline, which waits for
+// nothing: it is created at once, and the group is complete. That is the
+// known limit of a group that was told another target while it was built.
+// Taken at its word, the group would count prefill as instances of the new
+// target and wait with them for capacity that decode, held at the target of
+// before, never gives.
+func TestAGroupThatSaysTheTargetAndHasPodsOfAnotherRevisionIsNotTakenAtItsWord(t *testing.T) {
 	const created = workloadv1alpha1.CreatedRevisionAnnotationKey
 	s := newSystem(t, modelServing(coordinated, func(ms *workloadv1alpha1.ModelServing) {
 		for i := range ms.Spec.Template.Roles {
@@ -1620,7 +1619,8 @@ func TestANewGroupThatWasToldTheTargetWhileItsPodsWereCreatedWaits(t *testing.T)
 	s.cluster.BeforeWrite = nil
 
 	// The template changes. The ModelServing controller looks; then the
-	// Pods of decode are created, from v2; then it writes.
+	// round of the group creates the Pods of decode, from v2; then the
+	// ModelServing controller writes.
 	s.update(setImages("model:v3"))
 	caches, snapshot := s.caches()
 	if err := roundOfTheGroup(); err != nil {
@@ -1636,21 +1636,31 @@ func TestANewGroupThatWasToldTheTargetWhileItsPodsWereCreatedWaits(t *testing.T)
 		t.Fatalf("the group has the target %s and says %q; want %s for both", group.Spec.TargetRevision, group.Annotations[created], third)
 	}
 
+	// The group still says v3. Its Pods say otherwise.
 	s.settle()
-	runs("at rest", "2[decode-0=model:v2 decode-1=model:v2]")
-	condition := meta.FindStatusCondition(s.groups()[2].Status.Conditions, string(workloadv1alpha1.ServingGroupConditionCoordinatedRoleRolloutBlocked))
-	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "DependencyNotReady" {
-		t.Errorf("the new group reports %+v, want it blocked by DependencyNotReady", condition)
+	runs("at rest", "2[decode-0=model:v2 decode-1=model:v2 prefill-0=model:v1 prefill-1=model:v1]")
+	if got := s.groups()[2].Annotations[created]; got != third {
+		t.Errorf("the group says %q, want %s", got, third)
 	}
-	if got, want := s.counts(), "available=2"; !strings.HasSuffix(got, want) {
+	if got, want := s.counts(), "available=3"; !strings.HasSuffix(got, want) {
 		t.Errorf("the ModelServing reports %s, want %s", got, want)
 	}
 
+	// It is rolled like the groups beside it.
 	s.update(func(ms *workloadv1alpha1.ModelServing) {
 		for i := range ms.Spec.Template.Roles {
 			ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString("50%"))
 		}
 	})
 	s.settle()
-	runs("the partitions are lowered", "2[decode-0=model:v2 decode-1=model:v3 prefill-0=model:v3 prefill-1=model:v3]")
+	runs("the partitions are lowered", "2[decode-0=model:v2 decode-1=model:v3 prefill-0=model:v1 prefill-1=model:v3]")
+
+	// Deleted, it comes back whole from v3, like any group that is deleted.
+	err := s.cluster.Kthena.WorkloadV1alpha1().ServingGroups(testNamespace).Delete(context.Background(), "llama-2",
+		metav1.DeleteOptions{PropagationPolicy: ptr.To(metav1.DeletePropagationForeground)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.settle()
+	runs("the group was deleted", "2[decode-0=model:v3 decode-1=model:v3 prefill-0=model:v3 prefill-1=model:v3]")
 }

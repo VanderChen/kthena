@@ -127,6 +127,13 @@ func inPhase(phase workloadv1alpha1.RoleInstancePhase) func(*Instance) {
 
 func withoutPods(inst *Instance) { inst.Members = nil }
 
+// workerOf makes the worker Pod of the instance one that was created from revision.
+func workerOf(revision string) func(*Instance) {
+	return func(inst *Instance) {
+		inst.Members[1].Pod.Labels[workloadv1alpha1.RevisionLabelKey] = revision
+	}
+}
+
 func memberNotReady(inst *Instance) { inst.Members[1].State = MemberNotReady }
 
 // membersTerminating: every Pod of the instance is being deleted, and the
@@ -381,6 +388,10 @@ func TestPlanRolesOfAGroupThatIsRolledRoleByRole(t *testing.T) {
 // it was created from, and that revision is its target. The partition of a
 // Role holds the instances below it at the baseline in a group that ran the
 // baseline; this group never did, and creates every instance from the target.
+//
+// It is taken at its word only while every Pod it has is of the target. A
+// group that says the target and has a Pod of another revision was not
+// created from the target, whatever it says: it is planned like any group.
 func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
 	tests := []struct {
 		name string
@@ -388,6 +399,7 @@ func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
 		// it does not say; target is the one it is rolled to. The baseline is rev-a.
 		created, target string
 		noBaseline      bool
+		revisions       fakeRevisions
 		instances       []Instance
 		want            string
 	}{
@@ -409,6 +421,26 @@ func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
 		{name: "an annotation that names another revision than the target counts for nothing: the baseline",
 			created: "rev-b", target: "rev-c",
 			instances: []Instance{planInstance(1, "rev-c"), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-c 2@rev-c"},
+
+		// The group says rev-c, and an instance of it was created from rev-b.
+		{name: "the group has an instance of another revision: the missing instance below the partition is of the baseline",
+			created: "rev-c", target: "rev-c",
+			instances: []Instance{planInstance(1, "rev-b"), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-b 2@rev-c"},
+		{name: "one Pod of another revision is enough",
+			created: "rev-c", target: "rev-c",
+			instances: []Instance{planInstance(1, "rev-c", workerOf("rev-b")), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-c 2@rev-c"},
+		{name: "the other revision renders the same Pods for the Role: the group is taken at its word",
+			created: "rev-c", target: "rev-c", revisions: fakeRevisions{class: map[string]string{"rev-b": "same", "rev-c": "same"}},
+			instances: []Instance{planInstance(1, "rev-b"), planInstance(2, "rev-c")}, want: "0@rev-c 1@rev-b 2@rev-c"},
+		{name: "the other revision cannot be read: the Pod is not known to be of the target, the baseline",
+			created: "rev-c", target: "rev-c", revisions: fakeRevisions{missing: map[string]bool{"rev-b": true}},
+			instances: []Instance{planInstance(1, "rev-b"), planInstance(2, "rev-c")}, want: "0@rev-a 1@rev-b? 2@rev-c"},
+		{name: "the target cannot be read: the Pods of the group carry the target itself, which needs no comparison",
+			created: "rev-c", target: "rev-c", revisions: fakeRevisions{missing: map[string]bool{"rev-c": true}},
+			instances: []Instance{planInstance(1, "rev-c"), planInstance(2, "rev-c")}, want: "0@rev-c? 1@rev-c? 2@rev-c?"},
+		{name: "the Pods of the other revision are terminating: the group does not hold them, and is taken at its word",
+			created: "rev-c", target: "rev-c",
+			instances: []Instance{planInstance(1, "rev-b", membersTerminating), planInstance(2, "rev-c")}, want: "0@rev-c 1@rev-b 2@rev-c"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -420,15 +452,12 @@ func TestPlanRolesOfAGroupThatWasCreatedAtTheTarget(t *testing.T) {
 			if tt.noBaseline {
 				group.Spec.BaselineRevision = ""
 			}
-			plan, err := PlanRoles(group, tt.instances, fakeRevisions{})
+			plan, err := PlanRoles(group, tt.instances, tt.revisions)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if got := wantsOf(plan); got != tt.want {
 				t.Errorf("wants = %q, want %q", got, tt.want)
-			}
-			if len(plan.Waiting) > 0 {
-				t.Errorf("waiting = %v, want nothing to wait for", plan.Waiting)
 			}
 		})
 	}

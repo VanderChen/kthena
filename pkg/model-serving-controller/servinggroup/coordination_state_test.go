@@ -410,7 +410,7 @@ func TestRoleRolloutAvailabilityAndOrderedCandidates(t *testing.T) {
 				group.Spec.RolloutStrategy.RoleCoordination = nil
 			}
 			run := func(instances []Instance) RolePlan {
-				spec, err := roleSpec(group, group.Spec.Roles[0], true)
+				spec, err := roleSpec(group, group.Spec.Roles[0], true, false)
 				require.NoError(t, err)
 				plan := RolePlan{Wants: map[InstanceKey]*Want{}, InPlace: map[InstanceKey]string{}, Fallback: map[InstanceKey]string{}}
 				p := rolePlanner{role: "serve", spec: spec, revisions: revisions, plan: &plan, updating: map[int]string{}, fallback: map[int]string{}, coordinated: coordinated}

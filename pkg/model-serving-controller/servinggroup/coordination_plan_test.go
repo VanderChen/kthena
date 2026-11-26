@@ -64,6 +64,11 @@ func createdAt(revision string) func(*workloadv1alpha1.ServingGroup) {
 	}
 }
 
+// everyInstanceHeld puts both instances of both Roles below the partition.
+func everyInstanceHeld(group *workloadv1alpha1.ServingGroup) {
+	group.Spec.Roles[0].Partition, group.Spec.Roles[1].Partition = intOrString("2"), intOrString("2")
+}
+
 // instancesOf returns the instances of a Role, one for each word of layout in
 // the order of their indices: "a" runs rev-a and "b" rev-b, "!" after it makes
 // its worker not ready, "~" makes the instance one that is being drained, with
@@ -246,6 +251,13 @@ func TestPlanRolesRolledTogether(t *testing.T) {
 		{name: "a group created at the target: an instance without a Pod below the partition will run the target, it is a started one and does not wait again",
 			group: rolledTogether(1, 1, "100%", true, createdAt("rev-b")), prefill: ".", decode: "b!",
 			condition: "False/RolloutComplete"},
+		// The open point of a group that was told another target while its Pods
+		// were created: it says rev-b, and decode is of rev-c. Taken at its
+		// word, prefill would be of the target and wait for decode, which the
+		// partition holds at rev-c for good.
+		{name: "a group that says the target and has decode of another revision is not taken at its word: prefill is of the baseline and does not wait",
+			group: rolledTogether(2, 2, "100%", true, createdAt("rev-b"), everyInstanceHeld), prefill: "- -", decode: "c c",
+			changes: "+prefill-0@rev-a +prefill-1@rev-a", condition: "True/DependencyNotReady", deferred: []string{"prefill"}},
 		{name: "an annotation that names another revision than the target counts for nothing: the baseline below the partitions, which does not wait",
 			group: rolledTogether(2, 2, "100%", true, createdAt("rev-a")), prefill: "- -", decode: "- -",
 			changes: "+decode-0@rev-a +decode-1@rev-b +prefill-0@rev-a", condition: "True/DependencyNotReady", deferred: []string{"prefill"}},

@@ -90,9 +90,12 @@ func PlanRoles(group *workloadv1alpha1.ServingGroup, instances []Instance, revis
 	strategy := group.Spec.RolloutStrategy
 	roleMode := strategy != nil && strategy.Type == workloadv1alpha1.RoleRollingUpdate
 
+	// A group that says it was created from the target is taken at its word
+	// only while every Pod it has is of the target.
+	born := roleMode && createdAtTarget(group) && !holdsAnotherRevision(group, instances, revisions)
 	specs := map[string]grouplevel.Spec{}
 	for _, role := range group.Spec.Roles {
-		spec, err := roleSpec(group, role, roleMode)
+		spec, err := roleSpec(group, role, roleMode, born)
 		if err != nil {
 			return RolePlan{}, err
 		}
@@ -116,8 +119,10 @@ func PlanRoles(group *workloadv1alpha1.ServingGroup, instances []Instance, revis
 	return plan, nil
 }
 
-// roleSpec resolves the settings of one Role of a group into the input of the plan.
-func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.ServingGroupRole, roleMode bool) (grouplevel.Spec, error) {
+// roleSpec resolves the settings of one Role of a group into the input of the
+// plan. born reports that the group was created new from its target and has
+// nothing of another revision.
+func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.ServingGroupRole, roleMode, born bool) (grouplevel.Spec, error) {
 	replicas := int(role.Replicas)
 	spec := grouplevel.Spec{
 		Replicas: replicas,
@@ -132,7 +137,7 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 	}
 	spec.Mode = grouplevel.ModeServingGroup
 	spec.Target = group.Spec.TargetRevision
-	if createdAtTarget(group) {
+	if born {
 		// No instance of the group ran the baseline: a place below the
 		// partition is filled from the target as well.
 		spec.Baseline = spec.Target
@@ -163,13 +168,14 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 	return spec, nil
 }
 
-// createdAtTarget reports whether the group was born in the rollout that is
-// under way: the ModelServing controller created it new from the revision its
-// Roles are rolled to. Such a group never ran the baseline. The partition of
-// a Role keeps the instances below it at the baseline in a group that ran it;
-// here they are created from the target like the others, in the round that
-// creates them and in any later one of the same rollout: after a crash
-// between the ledger and the Pods, and when such an instance is lost.
+// createdAtTarget reports whether the group says that it was born in the
+// rollout that is under way: the ModelServing controller created it new from
+// the revision its Roles are rolled to. Such a group never ran the baseline.
+// The partition of a Role keeps the instances below it at the baseline in a
+// group that ran it; here they are created from the target like the others,
+// in the round that creates them and in any later one of the same rollout:
+// after a crash between the ledger and the Pods, and when such an instance is
+// lost.
 //
 // The ModelServing controller keeps the annotation in line with the target:
 // in the write that tells the group another target it takes it away, or,
@@ -180,6 +186,49 @@ func roleSpec(group *workloadv1alpha1.ServingGroup, role workloadv1alpha1.Servin
 func createdAtTarget(group *workloadv1alpha1.ServingGroup) bool {
 	created := group.Annotations[workloadv1alpha1.CreatedRevisionAnnotationKey]
 	return created != "" && created == group.Spec.TargetRevision
+}
+
+// holdsAnotherRevision reports whether the group has a Pod that is not of its
+// target. A group that says it was created from the target and has such a
+// Pod was not: it is not taken at its word, and its Roles are planned like
+// those of any group, with the baseline below the partition.
+//
+// The ModelServing controller makes a group say the new target only while the
+// group has built nothing, and it can be wrong about that: the round of the
+// group that committed to its Pods goes on to create them from the target of
+// before, whatever is written to the group meanwhile. Taken at its word, such
+// a group would hold those Pods below the partition of their Role and create
+// everything else from the new target. Where Roles are rolled together and
+// every instance is below the partition, the Role that others depend on would
+// then stay at the target of before, and the instances that wait for it would
+// wait for capacity of the new target, which never comes.
+//
+// A Pod is of the target when it carries the target revision, or a revision
+// whose template of its Role renders the same Pods: a Role that did not
+// change between the two. A Pod of a revision that cannot be compared is not
+// known to be of the target, and counts against the group as well. That
+// cannot happen to a group that was created from the target, whose Pods
+// carry the target itself and need no comparison. Were it the other way
+// round, the group would be taken at its word again on the day the revision
+// of its Pods leaves the history.
+//
+// A Pod that is terminating does not count: the group does not hold what is
+// on its way out. When the last Pod of another revision goes, the group has
+// only Pods of the target, and is what it says.
+func holdsAnotherRevision(group *workloadv1alpha1.ServingGroup, instances []Instance, revisions Revisions) bool {
+	target := group.Spec.TargetRevision
+	for _, inst := range instances {
+		for _, member := range inst.Members {
+			if member.Pod.DeletionTimestamp != nil {
+				continue
+			}
+			revision := utils.ObjectRevision(member.Pod)
+			if revision != target && revisions.CompareRole(revision, target, inst.Role) != workload.Equivalent {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type rolePlanner struct {

@@ -472,10 +472,17 @@ func (c *Controller) retargetGroup(ctx context.Context, r *round, action grouple
 // decided again. Whether the group has a Pod is read from the cache. The
 // ledger alone would not do: an instance is established in the round after
 // its last Pod was created, and one of which a Pod is refused not at all, so
-// a group can have Pods of the target of before and nothing established. A
-// Pod that the cache does not show yet is not excluded by anything. The
-// group is then told that it was created from the new target and has a Pod
-// of the one before, which the partition of its Role holds like any other.
+// a group can have Pods of the target of before and nothing established.
+//
+// The Pods are not part of the exclusion: creating one is not a write of the
+// group. The round of the group that commits to its Pods goes on to create
+// them from the plan it made, whatever is written to the group meanwhile. So
+// from the commitment until this controller sees a Pod of the group, or a
+// status write of the group lands, a group can be told that it was created
+// from the new target and get Pods of the one before. The ServingGroup
+// controller sees its Pods, and does not take such a group at its word
+// (servinggroup.PlanRoles): it plans it like a group that has built
+// something, and what the group lacks below a partition is of the baseline.
 //
 // The annotation changes in the same write as the target, so no reader ever
 // finds the new target beside the old annotation. And it is never added to a
