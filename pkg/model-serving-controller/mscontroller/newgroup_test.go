@@ -26,6 +26,7 @@ import (
 	"strings"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -820,6 +821,26 @@ func (s *system) lose(prefix string) {
 	}
 }
 
+// refuse makes the cluster refuse every Pod whose name starts with one of the
+// prefixes, as a quota does, until accept. A round of a ServingGroup may end
+// with that.
+func (s *system) refuse(prefixes ...string) {
+	s.refused = errors.New("exceeded quota")
+	s.cluster.BeforeWrite = func(write apitestWrite) error {
+		if write.Verb != "create" || write.Resource != "pods" {
+			return nil
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(write.Name, prefix) {
+				return s.refused
+			}
+		}
+		return nil
+	}
+}
+
+func (s *system) accept() { s.refused, s.cluster.BeforeWrite = nil, nil }
+
 // ledgerOf renders the ledger of a group: "route-0=Established/0 ...".
 func (s *system) ledgerOf(group string) string {
 	s.t.Helper()
@@ -1222,6 +1243,245 @@ func TestTheStrategyIsChangedWithAGroupThatSaysWhereItComesFrom(t *testing.T) {
 			s.settle()
 			if got := s.instances(); got != tt.byRoles {
 				t.Errorf("after the protected instance of two groups was lost:\n got %s\nwant %s", got, tt.byRoles)
+			}
+		})
+	}
+}
+
+// A group is added while the rollout stands at the partition of a Role, and
+// the template changes again while the group is being built: some of its
+// Pods cannot be created for a while, as under a quota.
+//
+// A group that has built nothing is still being born. It is told the new
+// target, goes on saying that it is new, and is created whole from the
+// template of now, as upstream does.
+//
+// A group that has built something ran the target it was created from, and
+// stops saying that it is new. What it lacks is then a place of an ordinary
+// group: below the partition it is created from the baseline, a revision this
+// group never ran. That is the defect this annotation is for, left in this
+// one window; upstream has such an instance at the revision the group was
+// created from. An instance that was begun is completed at its own revision.
+func TestANewGroupIsToldAnotherTargetWhileItIsBuilt(t *testing.T) {
+	const others = "0[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] 1[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3] "
+	tests := []struct {
+		name string
+		// refused are the Pods that cannot be created, by the start of their name.
+		refused []string
+		// built is what the group has when the template changes.
+		built string
+		// says is what the group says about where it comes from afterwards.
+		says string
+		// runs is what the group runs once every Pod can be created.
+		runs string
+	}{
+		{name: "no Pod can be created: the group is created whole from the new target",
+			refused: []string{"llama-2-"}, built: "2[]",
+			says: "third", runs: "2[route-0=route:v1 0=model:v3 1=model:v3 2=model:v3]"},
+		{name: "the instance below the partition cannot be created, another instance is established: it comes from the baseline",
+			refused: []string{"llama-2-serve-0-"}, built: "2[route-0=route:v1]",
+			says: "-", runs: "2[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3]"},
+		{name: "one Pod of the instance below the partition cannot be created: the instance is completed as it was begun",
+			refused: []string{"llama-2-serve-0-1"}, built: "2[route-0=route:v1 0=model:v2]",
+			says: "-", runs: "2[route-0=route:v1 0=model:v2 1=model:v3 2=model:v3]"},
+		{name: "the last instance cannot be created: the instances that are established are those of any group",
+			refused: []string{"llama-2-serve-2-"}, built: "2[route-0=route:v1 0=model:v2 1=model:v2]",
+			says: "-", runs: "2[route-0=route:v1 0=model:v2 1=model:v3 2=model:v3]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(heldByARolePartition))
+			s.settle()
+			s.update(setImage("model:v2"))
+			s.settle()
+			names := map[string]string{s.modelServing().Status.UpdateRevision: "second"}
+			kept := s.protected("serve")
+			// stands compares what the new group says and runs.
+			stands := func(step, says, runs string) {
+				t.Helper()
+				if got, want := s.created(names), "0=- 1=- 2="+says; got != want {
+					t.Fatalf("%s: the groups say %s, want %s", step, got, want)
+				}
+				got := s.instances()
+				if got = got[strings.Index(got, "2["):]; got != runs {
+					t.Fatalf("%s: the new group runs\n got %s\nwant %s", step, got, runs)
+				}
+			}
+
+			s.refuse(tt.refused...)
+			s.update(threeGroups)
+			s.settle()
+			stands("the group is added", "second", tt.built)
+			if pods := s.groups()[2].Status.Pods; pods == 0 {
+				t.Fatal("the group has not committed to its Pods")
+			}
+
+			s.update(setImage("model:v3"))
+			s.settle()
+			names[s.modelServing().Status.UpdateRevision] = "third"
+			stands("the template changed", tt.says, tt.built)
+
+			s.accept()
+			s.settle()
+			stands("every Pod can be created", tt.says, tt.runs)
+			if got := s.instances(); !strings.HasPrefix(got, others) {
+				t.Errorf("the other groups run %s, want %s", got, others)
+			}
+			if after := s.protected("serve"); !reflect.DeepEqual(after, kept) {
+				t.Errorf("Pods of the protected instances were replaced: %v, before %v", after, kept)
+			}
+		})
+	}
+}
+
+// A group that was whole and has lost every Pod has none, like a group that
+// is being born. Its ledger tells the two apart: its instances were
+// established. Told another target while its Pods cannot be created again,
+// it stops saying that it is new, and the instance below the partition comes
+// back from the baseline.
+func TestAGroupThatWasWholeAndLostEveryPodIsNotBeingBorn(t *testing.T) {
+	s := newSystem(t, modelServing(heldByARolePartition))
+	s.settle()
+	s.update(setImage("model:v2"))
+	s.settle()
+	names := map[string]string{s.modelServing().Status.UpdateRevision: "second"}
+	s.update(threeGroups)
+	s.settle()
+	runs := func(step, want string) {
+		t.Helper()
+		got := s.instances()
+		if got = got[strings.Index(got, "2["):]; got != want {
+			t.Fatalf("%s: the new group runs\n got %s\nwant %s", step, got, want)
+		}
+	}
+	runs("the group is whole", "2[route-0=route:v1 0=model:v2 1=model:v2 2=model:v2]")
+
+	s.refuse("llama-2-")
+	s.lose("llama-2-")
+	s.settle()
+	runs("every Pod was lost", "2[]")
+	if got, want := s.ledgerOf("llama-2"), "route-0=Creating/1 serve-0=Creating/1 serve-1=Creating/1 serve-2=Creating/1"; got != want {
+		t.Fatalf("the ledger of the group is %s, want %s", got, want)
+	}
+	if got, want := s.created(names), "0=- 1=- 2=second"; got != want {
+		t.Fatalf("the groups say %s, want %s", got, want)
+	}
+
+	s.update(setImage("model:v3"))
+	s.settle()
+	if got, want := s.created(names), "0=- 1=- 2=-"; got != want {
+		t.Fatalf("after the template changed the groups say %s, want %s", got, want)
+	}
+	s.accept()
+	s.settle()
+	runs("the Pods can be created again", "2[route-0=route:v1 0=model:v1 1=model:v3 2=model:v3]")
+}
+
+// The same for Roles that are rolled together. prefill depends on decode, so
+// a new group has decode first and prefill only when decode is ready, which
+// for a model server is minutes: a group of coordinated Roles is built in
+// two steps even when nothing fails. When the template changes in between,
+// the group has built decode: it stops saying that it is new, and the
+// instances of prefill are places of an ordinary group. Below the partition
+// they are created from the baseline, and at once, since an instance of the
+// baseline waits for nothing; above it they are instances of the new target
+// and wait for decode. The group is complete in every case, also when every
+// instance is below the partition, which is how a staged rollout begins.
+//
+// Upstream creates the whole group at once, so prefill exists at the revision
+// the group was created from before the template changes.
+func TestANewGroupOfCoordinatedRolesIsToldAnotherTargetWhileItIsBuilt(t *testing.T) {
+	decodeOfTheNewGroup := func(pod *corev1.Pod) bool {
+		return pod.Labels[workloadv1alpha1.GroupNameLabelKey] == "llama-2" && pod.Labels[workloadv1alpha1.RoleLabelKey] == "decode"
+	}
+	tests := []struct {
+		name      string
+		replicas  int32
+		partition string
+		// before runs before the group is added and after runs once it has
+		// come to rest; built is what the group has when the template changes.
+		before, after func(*system)
+		built         string
+		// changed is what the group runs after the template changed, while
+		// decode is not ready, and runs what it runs at the end.
+		changed, runs string
+	}{
+		{name: "decode is not ready, an instance is above the partition",
+			replicas: 2, partition: "50%", before: func(s *system) { s.stuck = decodeOfTheNewGroup },
+			built:   "2[decode-0=model:v2 decode-1=model:v2]",
+			changed: "2[decode-0=model:v2 decode-1=model:v3 prefill-0=model:v1]",
+			runs:    "2[decode-0=model:v2 decode-1=model:v3 prefill-0=model:v1 prefill-1=model:v3]"},
+		{name: "decode is not ready, every instance is below the partition",
+			replicas: 2, partition: "100%", before: func(s *system) { s.stuck = decodeOfTheNewGroup },
+			built:   "2[decode-0=model:v2 decode-1=model:v2]",
+			changed: "2[decode-0=model:v2 decode-1=model:v2 prefill-0=model:v1 prefill-1=model:v1]",
+			runs:    "2[decode-0=model:v2 decode-1=model:v2 prefill-0=model:v1 prefill-1=model:v1]"},
+		// The group has one Pod and no instance that is established.
+		{name: "a Pod of decode cannot be created, every instance is below the partition",
+			replicas: 1, partition: "100%", before: func(s *system) { s.refuse("llama-2-decode-0-1") },
+			built:   "2[decode-0=model:v2]",
+			changed: "2[decode-0=model:v2]",
+			runs:    "2[decode-0=model:v2 prefill-0=model:v1]"},
+		// The group was whole. It loses every Pod while decode cannot get
+		// ready: decode comes back, prefill waits for it, and the entry of
+		// its instance is gone from the ledger. The entry of decode is there.
+		{name: "a group that was whole lost its Pods and waits to start prefill again",
+			replicas: 1, partition: "100%", after: func(s *system) {
+				s.stuck = decodeOfTheNewGroup
+				s.lose("llama-2-decode-")
+				s.lose("llama-2-prefill-")
+				s.settle()
+				if got, want := s.ledgerOf("llama-2"), "decode-0=Established/1"; got != want {
+					s.t.Fatalf("the ledger of the group is %s, want %s", got, want)
+				}
+			},
+			built:   "2[decode-0=model:v2]",
+			changed: "2[decode-0=model:v2 prefill-0=model:v1]",
+			runs:    "2[decode-0=model:v2 prefill-0=model:v1]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newSystem(t, modelServing(coordinated, func(ms *workloadv1alpha1.ModelServing) {
+				for i := range ms.Spec.Template.Roles {
+					ms.Spec.Template.Roles[i].Replicas = ptr.To(tt.replicas)
+					ms.Spec.Template.Roles[i].Partition = ptr.To(intstr.FromString(tt.partition))
+				}
+			}))
+			s.settle()
+			s.update(setImages("model:v2"))
+			s.settle()
+			names := map[string]string{s.modelServing().Status.UpdateRevision: "second"}
+			stands := func(step, says, runs string) {
+				t.Helper()
+				if got, want := s.created(names), "0=- 1=- 2="+says; got != want {
+					t.Fatalf("%s: the groups say %s, want %s", step, got, want)
+				}
+				got := s.instances()
+				if got = got[strings.Index(got, "2["):]; got != runs {
+					t.Fatalf("%s: the new group runs\n got %s\nwant %s", step, got, runs)
+				}
+			}
+
+			if tt.before != nil {
+				tt.before(s)
+			}
+			s.update(threeGroups)
+			s.settle()
+			if tt.after != nil {
+				tt.after(s)
+			}
+			stands("the group is added", "second", tt.built)
+
+			s.update(setImages("model:v3"))
+			s.settle()
+			stands("the template changed", "-", tt.changed)
+
+			s.stuck = nil
+			s.accept()
+			s.settle()
+			stands("decode is ready", "-", tt.runs)
+			if got, want := s.counts(), "available=3"; !strings.HasSuffix(got, want) {
+				t.Errorf("the ModelServing reports %s, want %s", got, want)
 			}
 		})
 	}
