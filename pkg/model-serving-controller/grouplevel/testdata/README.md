@@ -14,12 +14,12 @@ holds it:
 
 - script: `issues/features/010-modelserving-servinggroup-cr-impl-*/evidence/model-vectors/export_vectors.py`
 - model: `issues/features/010-modelserving-servinggroup-cr-impl-*/evidence/model-vectors/model-010/`
-  (`grouplevel.py`, sha256 `2025c51542a5c054959381c1cfa7819b3427706b9239b117c94fb4e3eb1b2179`). It is the
+  (`grouplevel.py`, sha256 `d1d1018bfd3745bbd5d1f2bafc8ce300876fd14974b006d9b7e064edf4652178`). It is the
   reviewed model of the design, `issues/features/008-modelserving-servinggroup-cr-design-IP/model/`
   (`grouplevel.py`, sha256 `04e9fc1436f151182ea8a49a8f13858737eebe1738fa4f70d6583261fe4e0d27`), with
-  one rule changed after the conformance run: G3b reclaims a surge group that has its members only
-  when it is surplus (N other live groups have a Pod that is not terminating, or expect none) or
-  when there is no room. `model-010.diff` next to it is the whole difference; `results-vs-008.md`
+  one rule changed after the conformance run: G3b reclaims a surge group only when it is surplus
+  (N other live groups have a Pod that is not terminating, or expect none) or when there is no
+  room. `model-010.diff` next to it is the whole difference; `results-vs-008.md`
   is what the change does to the results of the model's drivers
 
 ```bash
@@ -44,8 +44,8 @@ script.
 | total | | 321 056 | 17 504 |
 
 The file keeps every vector of `scenarios` and a sample with a fixed seed of the other sources,
-so that it stays below 600 KB: 17 504 lines, 594 177 bytes, sha256 of the uncompressed lines
-`2969cd8dee2ebd67f115572349f79de368cb74a2e6e3f3a00a9118b274fb0d57` (Python 3.12.16).
+so that it stays below 600 KB: 17 504 lines, 593 919 bytes, sha256 of the uncompressed lines
+`3ad7eeb7cade66b8767789fbda8b1bdf958f5708974c1821f6d5c7907af69aa4` (Python 3.12.16).
 
 The Go tests were also run once on the whole corpus of 321 056 inputs (`export_vectors.py --all`).
 The test reads every `testdata/plan_vectors*.jsonl.gz`, so a larger file can be dropped in next

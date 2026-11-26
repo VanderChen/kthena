@@ -548,12 +548,15 @@ func (p *planner) createSurge(scaling bool) {
 // capacity. No work: every live marked group that does not await adoption.
 // Work and live > N + S: down to live = N + S.
 //
-// A surge group that has its members stands in for a regular place until N
-// other groups have theirs, and is reclaimed only then. At the end of a
-// rollout the last old group is still terminating, or its replacement exists
-// and has no Pod yet; a surge group that left then would leave fewer than N
-// groups with Pods, although no place is spare. A surge group without a
-// member of its own stands in for nothing.
+// A surge group stands in for a regular place until N other groups have
+// their members, and is reclaimed only then. At the end of a rollout the last
+// old group is still terminating, or its replacement exists and has no Pod
+// yet; a surge group that left then would leave fewer than N groups with
+// Pods, although no place is spare. Whether the surge group has members
+// itself is not asked: one that is new has none yet, and neither has one
+// whose Pods the cache does not show yet. With maxUnavailable at replicas
+// every old group goes in the round that creates the surge group, and the
+// next round would take a surge group without a Pod away before it had one.
 //
 // The one exception is that there is no room: a regular place is missing
 // while the live groups fill N + S (more surge groups than maxSurge allows,
@@ -591,8 +594,13 @@ func (p *planner) reclaimSurge() {
 		if going && live <= bound {
 			return
 		}
-		standsIn := p.hasMembers(g)
-		if standsIn && filled-1 < p.spec.Replicas && !(missing && live >= bound) {
+		// others: the groups that have their members, without g itself.
+		has := p.hasMembers(g)
+		others := filled
+		if has {
+			others--
+		}
+		if others < p.spec.Replicas && !(missing && live >= bound) {
 			continue
 		}
 		if !g.confirmedNotReady() {
@@ -609,7 +617,7 @@ func (p *planner) reclaimSurge() {
 		}
 		p.delete(g, ReasonReclaimSurge)
 		live--
-		if standsIn {
+		if has {
 			filled--
 		}
 	}

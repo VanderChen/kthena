@@ -632,20 +632,37 @@ func TestPlanReclaimSurge(t *testing.T) {
 			want: []Action{del(4, ReasonReclaimSurge)},
 		},
 		{
-			name: "a surge group without a member of its own stands in for nothing: reclaimed while a place is open",
+			// Whether the surge group has a member itself is not asked: it
+			// may be new, and would leave before the place it is for has a Pod.
+			name: "a surge group without a member of its own stays as well while a place is open",
 			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
 				group(3, "v2", surge, memberless)}},
-			want: []Action{del(3, ReasonReclaimSurge)},
 		},
 		{
-			name: "so is one whose status only says that its Pods are being created",
+			name: "so does one whose status only says that its Pods are being created",
 			in: Input{Spec: rollout(3, 1, 1, 0), Groups: []Group{group(0, "v1", terminating), group(1, "v2"), group(2, "v2"),
 				group(3, "v2", surge, noPods)}},
-			want: []Action{del(3, ReasonReclaimSurge)},
 		},
 		{
-			// Group 3 comes first in the order and is kept; group 2 behind it
-			// has no member and goes. It takes nothing off the count of the others.
+			// maxUnavailable at replicas: the old group went in the round that
+			// created the surge group. Its object is new, no controller has
+			// looked at it yet.
+			name: "a surge group that was created a round ago stays while the only old group terminates",
+			in: Input{Spec: rollout(1, 1, 1, 0), Groups: []Group{group(0, "v1", terminating),
+				{Ordinal: 1, UID: uidOf(1), Revision: "v2", Surge: true, Fresh: true, Memberless: true}}},
+		},
+		{
+			name: "and while the replacement of that group has no Pod, with or without a Pod of its own",
+			in:   Input{Spec: rollout(1, 1, 1, 0), Groups: []Group{group(0, "v2", noPods), group(1, "v2", surge, noPods)}},
+		},
+		{
+			name: "one that never had a Pod is reclaimed once N other groups have one",
+			in:   Input{Spec: rollout(1, 1, 1, 0), Groups: []Group{group(0, "v2", notReady), group(1, "v2", surge, memberless)}},
+			want: []Action{del(1, ReasonReclaimSurge)},
+		},
+		{
+			// Group 3 comes first in the order and is kept: only group 0 has
+			// members beside it. Group 2 behind it goes: groups 0 and 3 have.
 			name: "a surge group that stands in is passed over, the one behind it is looked at",
 			in: Input{Spec: steady(2, 1, 2), Groups: []Group{group(0, "v1"), group(1, "v1", memberless),
 				group(2, "v1", surge, memberless), group(3, "v1", surge, notReady)}},
