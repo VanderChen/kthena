@@ -393,7 +393,7 @@ rules:
 | Scale in | Delete regular groups above `replicas`: not ready first, then lowest deletion cost, then highest ordinal |
 | Fill | Create regular groups at the lowest free ordinals below `replicas`; baseline revision below `partition`, target revision otherwise |
 | Surge | While groups remain to be replaced, create surge groups at the lowest free ordinals at or above `replicas`, up to `replicas + maxSurge` objects |
-| Reclaim | Delete surge groups when nothing remains to be replaced, without going below `replicas - maxUnavailable` ready groups. A surge group is deleted only when it is surplus: `replicas` other groups exist and have their Pods. So the place of the last replaced group is filled first |
+| Reclaim | Delete surge groups when nothing remains to be replaced, without going below `replicas - maxUnavailable` ready groups. A surge group that has Pods stands in for a regular place: it is deleted only when `replicas` other groups have a Pod that is not terminating (or expect none), so the place of the last replaced group gets its first Pod before the surge group leaves. Exception: after `maxSurge` was lowered, a surge group above the allowance leaves first when a missing place could not be created otherwise |
 | Replace | Delete replaceable groups within the two budgets, not ready first, then highest ordinal. With in-place update, change `spec.revision` instead |
 | Issue | Write the desired `spec` to every group whose spec differs |
 | Advance | Set `status.currentRevision` to the target when all groups are at the target and ready and `partition` is 0 |

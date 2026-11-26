@@ -58,7 +58,7 @@ gang-1   79bdf4ffdf   True    3      3          6m
 
 The same revision values appear in `status.currentRevision` and `status.updateRevision` of the ModelServing and in the `modelserving.volcano.sh/revision` label of the Pods.
 
-A ServingGroup with the annotation `modelserving.volcano.sh/surge: serving-group` is temporary capacity of a rolling update with `maxSurge`. It is removed when the rollout ends. The annotation is managed by the controller; do not set or remove it.
+A ServingGroup with the annotation `modelserving.volcano.sh/surge: serving-group` is temporary capacity of a rolling update with `maxSurge`. It is removed when the rollout ends: every group runs the new revision and `replicas` other groups have a Pod. Until then it stays, and serves if it is ready. A surge group that stays after every other group is updated means that a regular group has no Pod: look for the group with 0 Pods in `kubectl get servinggroups` and read its `ReconcileFailed` condition (see [A quota that is too small](#a-quota-that-is-too-small)). The annotation is managed by the controller; do not set or remove it.
 
 ### Read the Status of a Group
 
@@ -232,10 +232,18 @@ When a ModelServing has groups to create, delete or replace and can do none of i
 |---|---|---|
 | `WaitingForDeletion` | A ServingGroup is being deleted and keeps its ordinal until its Pods are gone, or a failed group still has Pods that do not terminate. | Find the Pod of that group that does not terminate. |
 | `GroupNotObserved` | The status of a ServingGroup does not reflect its `spec` or its Pods yet. | Check the `ReconcileFailed` condition of the group and the log of the controller manager. |
-| `TargetNotReady` | A ServingGroup of the new revision does not become ready. | Look at the Pods of that group: image, probes, scheduling. |
+| `TargetNotReady` | A ServingGroup of the new revision does not become ready. | Look at the Pods of that group: image, probes, scheduling. If the group has no Pods, they could not be created: the message of the condition ends with the error, which is also in the `ReconcileFailed` condition of the group. |
 | `BudgetExhausted` | A ServingGroup is not ready, and replacing another one would exceed `maxUnavailable`. | Fix the group that is not ready, or raise `maxUnavailable`. |
 | `OrdinalOccupied` | The name of a group to create is held by an object that the ModelServing does not control. Reported at once. | Remove that object. |
 | `BaselineUnknown` | A group below `partition` has to be created from the current revision, and that revision cannot be determined. Reported at once. | With `partition` set to 0, the group is created from the update revision. |
+
+### A Quota That Is Too Small
+
+A rolling update with `maxSurge` needs room for `replicas + maxSurge` groups (under `RoleRollingUpdate`: `replicas + maxSurge` instances of the Role in every group) in every limit that is checked when Pods or PodGroups are created: a ResourceQuota on `pods`, on resource requests such as GPUs, or on `count/podgroups.scheduling.volcano.sh`.
+
+If the limit is smaller, the last group to be replaced can be left without Pods while the surge group holds what it needs. The surge group is not removed, because it is the group that stands in for that place. The ModelServing then reports `RolloutBlocked` with reason `TargetNotReady`, and the ServingGroup it names reports `ReconcileFailed` with the error of the API server.
+
+Raise the limit, or delete the surge ServingGroup (the one with the annotation `modelserving.volcano.sh/surge`); it is not created again. Lowering `maxSurge` does not remove it.
 
 ## Finding the Objects of a Group
 
