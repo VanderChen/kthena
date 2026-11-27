@@ -1,7 +1,7 @@
 ---
 title: ModelServing 状态机优化：逻辑 ServingGroup 加 status 区间账本
 authors:
-- TBD
+- "@VanderChen"
 reviewers:
 - TBD
 approvers:
