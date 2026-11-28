@@ -131,6 +131,29 @@ func TestNewAutoscaleControllerSyncPeriodFallback(t *testing.T) {
 	}
 }
 
+func TestHasSyncedFollowsTheInformers(t *testing.T) {
+	ac := NewAutoscaleController(k8sfake.NewSimpleClientset(), clientfake.NewSimpleClientset(), 0)
+	if ac.HasSynced() {
+		t.Fatal("expected HasSynced to be false before Run has started the informers")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ac.Run(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(10 * time.Second)
+	for !ac.HasSynced() {
+		if time.Now().After(deadline) {
+			t.Fatal("expected HasSynced to become true once Run has synced the informers")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+}
+
 func TestToleranceHigh_then_DoScale_expect_NoUpdateActions(t *testing.T) {
 	ns := "ns"
 	ms := &workload.ModelServing{ObjectMeta: metav1.ObjectMeta{Name: "ms-a", Namespace: ns}, Spec: workload.ModelServingSpec{Replicas: ptrInt32(3)}}

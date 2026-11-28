@@ -93,6 +93,17 @@ jobs:
             dockerfile: ./docker/Dockerfile.kthena-controller-manager
             os: ubuntu-24.04-arm
             platform: linux/arm64
+          # kthena-autoscaler
+          - service: kthena-autoscaler
+            context: .
+            dockerfile: ./docker/Dockerfile.kthena-autoscaler
+            os: ubuntu-latest
+            platform: linux/amd64
+          - service: kthena-autoscaler
+            context: .
+            dockerfile: ./docker/Dockerfile.kthena-autoscaler
+            os: ubuntu-24.04-arm
+            platform: linux/arm64
           # downloader
           - service: downloader
             context: ./python
@@ -180,6 +191,7 @@ jobs:
         include:
           - service: kthena-router
           - service: kthena-controller-manager
+          - service: kthena-autoscaler
           - service: downloader
           - service: runtime
     steps:

@@ -164,9 +164,11 @@ vet: ## Run go vet against code.
 build: generate fmt vet
 	go build -o bin/kthena-router cmd/kthena-router/main.go
 	go build -o bin/kthena-controller-manager cmd/kthena-controller-manager/main.go
+	go build -o bin/kthena-autoscaler cmd/kthena-autoscaler/main.go
 	go build -o bin/kthena cli/kthena/main.go
 
 IMG_CONTROLLER ?= ${HUB}/kthena-controller-manager:${TAG}
+IMG_AUTOSCALER ?= ${HUB}/kthena-autoscaler:${TAG}
 IMG_ROUTER ?= ${HUB}/kthena-router:${TAG}
 IMG_DOWNLOADER ?= ${HUB}/downloader:${TAG}
 IMG_RUNTIME ?= ${HUB}/runtime:${TAG}
@@ -180,6 +182,10 @@ docker-build-router: generate
 .PHONY: docker-build-controller
 docker-build-controller: generate
 	$(CONTAINER_TOOL) build -t ${IMG_CONTROLLER} -f docker/Dockerfile.kthena-controller-manager .
+
+.PHONY: docker-build-autoscaler
+docker-build-autoscaler: generate
+	$(CONTAINER_TOOL) build -t ${IMG_AUTOSCALER} -f docker/Dockerfile.kthena-autoscaler .
 
 .PHONY: docker-build-downloader
 docker-build-downloader: generate
@@ -198,13 +204,14 @@ docker-build-e2e-external-provider-mock:
 	$(CONTAINER_TOOL) build -t ${IMG_E2E_EXTERNAL_PROVIDER_MOCK} -f test/e2e/external-provider-mock/Dockerfile .
 
 .PHONY: docker-build-all
-docker-build-all: docker-build-router docker-build-controller docker-build-downloader docker-build-runtime## Build all images.
+docker-build-all: docker-build-router docker-build-controller docker-build-autoscaler docker-build-downloader docker-build-runtime## Build all images.
 	@echo "All images built."
 
 .PHONY: docker-push
-docker-push: docker-build-router docker-build-controller ## Push all images to the registry.
+docker-push: docker-build-router docker-build-controller docker-build-autoscaler ## Push all images to the registry.
 	$(CONTAINER_TOOL) push ${IMG_ROUTER}
 	$(CONTAINER_TOOL) push ${IMG_CONTROLLER}
+	$(CONTAINER_TOOL) push ${IMG_AUTOSCALER}
 
 # PLATFORMS defines the target platforms for the images be built to provide support to multiple
 # architectures.
@@ -225,6 +232,11 @@ docker-buildx: ## Build and push docker image for cross-platform support
 		--platform ${PLATFORMS} \
 		-t ${IMG_CONTROLLER} \
 		-f docker/Dockerfile.kthena-controller-manager \
+		--push .
+	$(CONTAINER_TOOL) buildx build \
+		--platform ${PLATFORMS} \
+		-t ${IMG_AUTOSCALER} \
+		-f docker/Dockerfile.kthena-autoscaler \
 		--push .
 
 .PHONY: generate-charts

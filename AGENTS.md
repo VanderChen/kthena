@@ -9,7 +9,7 @@ This file gives coding agents the minimum context to work safely in the whole re
 | Path | Role |
 |------|------|
 | `pkg/` | Core business logic (controllers, router, APIs, webhooks) |
-| `cmd/` | Binary entrypoints (`kthena-controller-manager`, `kthena-router`) |
+| `cmd/` | Binary entrypoints (`kthena-controller-manager`, `kthena-autoscaler`, `kthena-router`) |
 | `cli/` | `kthena` CLI and kubectl plugin |
 | `client-go/` | Generated Kubernetes clients (do not hand-edit) |
 | `charts/` | Helm charts and embedded CRDs |
@@ -36,7 +36,7 @@ Run from the repository root:
 |---------|---------|
 | `make lint` | `golangci-lint` on Go code |
 | `make test` | Unit tests (excludes `test/e2e` and `client-go`; runs `generate` first) |
-| `make build` | Build `bin/kthena-router`, `bin/kthena-controller-manager`, `bin/kthena` |
+| `make build` | Build `bin/kthena-router`, `bin/kthena-controller-manager`, `bin/kthena-autoscaler`, `bin/kthena` |
 | `make generate` | Regenerate CRDs, deepcopy, client-go, and docs artifacts |
 | `make gen-check` | Fail if `make generate` would dirty the tree |
 | `make fmt` | `go fmt ./...` |

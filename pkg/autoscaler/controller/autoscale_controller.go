@@ -100,6 +100,14 @@ func NewAutoscaleController(kubeClient kubernetes.Interface, client clientset.In
 	return ac
 }
 
+// HasSynced reports whether the informers the autoscaler reads from have synced.
+// It is false until Run has started them.
+func (ac *AutoscaleController) HasSynced() bool {
+	return ac.autoscalingPoliciesInformer.HasSynced() &&
+		ac.modelServingInformer.HasSynced() &&
+		ac.podsInformer.HasSynced()
+}
+
 func (ac *AutoscaleController) Run(ctx context.Context) {
 	defer utilruntime.HandleCrash()
 

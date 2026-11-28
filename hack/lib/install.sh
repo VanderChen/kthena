@@ -151,6 +151,7 @@ function kind-up-cluster {
   # Load all required images into kind cluster
   kind load docker-image ${IMAGE_PREFIX}/kthena-router:${TAG} "${CLUSTER_CONTEXT[@]}"
   kind load docker-image ${IMAGE_PREFIX}/kthena-controller-manager:${TAG} "${CLUSTER_CONTEXT[@]}"
+  kind load docker-image ${IMAGE_PREFIX}/kthena-autoscaler:${TAG} "${CLUSTER_CONTEXT[@]}"
   kind load docker-image ${IMAGE_PREFIX}/downloader:${TAG} "${CLUSTER_CONTEXT[@]}"
   kind load docker-image ${IMAGE_PREFIX}/runtime:${TAG} "${CLUSTER_CONTEXT[@]}"
 }
@@ -166,6 +167,11 @@ function check-images {
   docker image inspect "${IMAGE_PREFIX}/kthena-controller-manager:${TAG}" > /dev/null
   if [[ $? -ne 0 ]]; then
     echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}/kthena-controller-manager:${TAG} does not exist"
+    exit 1
+  fi
+  docker image inspect "${IMAGE_PREFIX}/kthena-autoscaler:${TAG}" > /dev/null
+  if [[ $? -ne 0 ]]; then
+    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}/kthena-autoscaler:${TAG} does not exist"
     exit 1
   fi
   docker image inspect "${IMAGE_PREFIX}/downloader:${TAG}" > /dev/null
