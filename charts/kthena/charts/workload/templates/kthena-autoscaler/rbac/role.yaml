@@ -1,0 +1,26 @@
+{{- if and (include "kthena.workload.autoscaler.enabled" .) (include "kthena.workload.autoscaler.leaderElect" .) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kthena-autoscaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-autoscaler
+    {{- include "kthena.labels" . | nindent 4 }}
+rules:
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    verbs:
+      - create
+  - apiGroups:
+      - coordination.k8s.io
+    resources:
+      - leases
+    resourceNames:
+      - lease.kthena.autoscaler
+    verbs:
+      - get
+      - update
+{{- end }}

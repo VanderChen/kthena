@@ -13,8 +13,8 @@ workload:
       pullPolicy: IfNotPresent
     # -- Debug server port for Controller Manager (set 0 to disable).
     debugPort: 0
-    # -- Reconcile interval in seconds for the autoscaler. Smaller values react
-    # faster to traffic spikes but increase API server load. 0 uses the binary default (15).
+    # -- Deprecated: use `workload.autoscaler.syncPeriodSeconds`. Reconcile interval in seconds
+    # for the autoscaler, still honoured when `workload.autoscaler.syncPeriodSeconds` is 0.
     autoscalingSyncPeriodSeconds: 0
     downloaderImage:
       # -- Image repository for the Downloader.
@@ -45,6 +45,38 @@ workload:
       timeoutSeconds: 5
       # -- ConfigMap-backed disruption tracker TTL in seconds.
       trackerTTLSeconds: 60
+  # The autoscaler runs in its own `kthena-autoscaler` Deployment. Settings left empty are
+  # taken from `workload.controllerManager`.
+  autoscaler:
+    # -- Deploy the autoscaler. It is also not deployed when
+    # `workload.controllerManager.controllers` leaves it out.
+    enabled: true
+    # -- (bool) Elect a leader among the autoscaler instances on the Lease `lease.kthena.autoscaler`.<br/>
+    # Not set: follows `--leader-elect` in `workload.controllerManager.image.args`.
+    leaderElect:
+    # -- (int) Number of autoscaler instances to run. More than one requires leader election.<br/>
+    # Not set: one instance, or `workload.controllerManager.replicas` with leader election;
+    # none when `workload.controllerManager.replicas` is 0.
+    replicas:
+    image:
+      # -- Image repository for the autoscaler. Empty uses the Controller Manager repository
+      # with the image name `kthena-autoscaler`.
+      repository: ""
+      # -- Image tag for the autoscaler. Empty uses the Controller Manager tag.
+      tag: ""
+      # -- Image pull policy for the autoscaler. Empty uses the Controller Manager policy.
+      pullPolicy: ""
+    # -- Extra arguments for the autoscaler. `--leader-elect` and `--health-probe-bind-address`
+    # are set by the chart; `workload.controllerManager.image.args` are not applied to the autoscaler.
+    args: [ "--v=2" ]
+    # -- Container resources for the autoscaler. Empty uses the Controller Manager resources; a value replaces them as a whole.
+    resource: {}
+    # -- Reconcile interval in seconds for the autoscaler. Smaller values react faster to
+    # traffic spikes but increase API server load. 0 uses
+    # `workload.controllerManager.autoscalingSyncPeriodSeconds`, then the binary default (15).
+    syncPeriodSeconds: 0
+    # -- Tolerations for autoscaler pods. Empty uses the Controller Manager tolerations.
+    tolerations: []
 
 networking:
   # -- Enable the networking subchart.

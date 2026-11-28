@@ -1,0 +1,17 @@
+{{- if include "kthena.workload.autoscaler.enabled" . }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kthena-autoscaler
+  labels:
+    app.kubernetes.io/component: kthena-autoscaler
+    {{- include "kthena.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kthena-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: kthena-autoscaler
+    namespace: {{ .Release.Namespace }}
+{{- end }}

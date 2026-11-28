@@ -156,9 +156,9 @@ func waitForKthenaDeployments(cfg *KthenaConfig) error {
 }
 
 func kthenaDeployments(cfg *KthenaConfig) []string {
-	deployments := make([]string, 0, 2)
+	deployments := make([]string, 0, 3)
 	if cfg.WorkloadEnabled {
-		deployments = append(deployments, "kthena-controller-manager")
+		deployments = append(deployments, "kthena-controller-manager", "kthena-autoscaler")
 	}
 	if cfg.NetworkingEnabled {
 		deployments = append(deployments, "kthena-router")

@@ -30,8 +30,10 @@ controllerManager:
       cpu: 100m
       memory: 128Mi
   # controllers specifies which controllers to enable
-  # Available options: modelserving, modelbooster, autoscaler
+  # Available options: modelserving, modelbooster
   # If empty or not specified, all controllers are enabled
+  # autoscaler is still accepted: the autoscaler runs in its own Deployment (see autoscaler
+  # below), which is deployed only when this selection includes it.
   controllers: ""
   # kubeAPIQPS is the QPS (queries per second) to use while talking with kubernetes apiserver
   # If 0 or not specified, uses default value (5)
@@ -45,6 +47,7 @@ controllerManager:
   # autoscalingSyncPeriodSeconds is the reconcile interval in seconds for the autoscaler.
   # Smaller values react faster to traffic spikes but increase API server load.
   # If 0 or not specified, uses the binary default (15).
+  # Deprecated: use autoscaler.syncPeriodSeconds. Still honoured when that is 0.
   autoscalingSyncPeriodSeconds: 0
   # downloaderImage is the container image used for downloading models.
   downloaderImage:
@@ -62,4 +65,40 @@ controllerManager:
     # secretKey is the secret key for the downloader.
     secretKey: ""
   ## Tolerations for Controller Manager pods.
+  tolerations: []
+# autoscaler configures kthena-autoscaler, the Deployment that runs the Kthena autoscaler.
+# Settings left empty are taken from controllerManager, so the autoscaler pod is configured
+# like the kthena-controller-manager pod.
+autoscaler:
+  # enabled deploys the autoscaler. It is also not deployed when controllerManager.controllers
+  # leaves it out, as releases that ran it inside kthena-controller-manager selected it.
+  enabled: true
+  # leaderElect makes the instances elect a leader on the Lease lease.kthena.autoscaler.
+  # If not set, it follows --leader-elect in controllerManager.image.args.
+  # leaderElect: false
+  # replicas is the number of instances to run. More than one requires leader election.
+  # If not set, one instance runs, or controllerManager.replicas with leader election;
+  # none when controllerManager.replicas is 0.
+  # replicas: 1
+  image:
+    # empty uses controllerManager.image.repository with the image name kthena-autoscaler
+    repository: ""
+    # empty uses controllerManager.image.tag
+    tag: ""
+    # empty uses controllerManager.image.pullPolicy
+    pullPolicy: ""
+  # args are extra arguments. --leader-elect and --health-probe-bind-address are set by the chart.
+  # controllerManager.image.args are not applied to the autoscaler.
+  args: [ "--v=2" ]
+  # resource are the container resources. Empty uses controllerManager.resource. A value
+  # replaces controllerManager.resource as a whole; the two are not merged.
+  resource: {}
+  # syncPeriodSeconds is the reconcile interval in seconds.
+  # If 0, uses controllerManager.autoscalingSyncPeriodSeconds, then the binary default (15).
+  syncPeriodSeconds: 0
+  # kubeAPIQPS is the QPS to use while talking with kubernetes apiserver. If 0, uses controllerManager.kubeAPIQPS.
+  kubeAPIQPS: 0
+  # kubeAPIBurst is the burst to use while talking with kubernetes apiserver. If 0, uses controllerManager.kubeAPIBurst.
+  kubeAPIBurst: 0
+  # tolerations for the autoscaler pods. Empty uses controllerManager.tolerations.
   tolerations: []

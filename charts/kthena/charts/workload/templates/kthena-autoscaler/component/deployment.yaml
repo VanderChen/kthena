@@ -1,0 +1,86 @@
+{{- if include "kthena.workload.autoscaler.enabled" . }}
+{{- $as := .Values.autoscaler | default dict }}
+{{- $cm := .Values.controllerManager }}
+{{- $image := $as.image | default dict }}
+{{- $leaderElect := include "kthena.workload.autoscaler.leaderElect" . }}
+{{- $managerReplicas := 1 }}
+{{- if and (not (kindIs "invalid" $cm.replicas)) (ne (toString $cm.replicas) "") }}{{- $managerReplicas = int $cm.replicas }}{{- end }}
+{{- /* A release whose controller-manager is scaled to zero ran no autoscaler either. */}}
+{{- $replicas := min 1 $managerReplicas }}
+{{- if $leaderElect }}{{- $replicas = $managerReplicas }}{{- end }}
+{{- if and (hasKey $as "replicas") (not (kindIs "invalid" $as.replicas)) }}{{- $replicas = int $as.replicas }}{{- end }}
+{{- if and (gt $replicas 1) (not $leaderElect) }}
+{{- fail "workload.autoscaler.replicas greater than 1 requires leader election (workload.autoscaler.leaderElect=true): without it every replica scales the same targets" }}
+{{- end }}
+{{- range ($as.args | default list) }}
+{{- $arg := toString . }}
+{{- if or (hasPrefix "--leader-elect" $arg) (hasPrefix "--health-probe-bind-address" $arg) }}
+{{- fail (printf "workload.autoscaler.args must not contain %q: the chart sets it; use workload.autoscaler.leaderElect for leader election" $arg) }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kthena-autoscaler
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/component: kthena-autoscaler
+    {{- include "kthena.labels" . | nindent 4 }}
+spec:
+  replicas: {{ $replicas }}
+  {{- if not $leaderElect }}
+  {{- /* Without leader election the old pod has to stop before the new one starts, so that only one instance scales. */}}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: kthena-autoscaler
+      {{- include "kthena.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: kthena-autoscaler
+        {{- include "kthena.labels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: kthena-autoscaler
+          image: "{{ include "kthena.workload.autoscaler.image" . }}"
+          args:
+            {{- toYaml ($as.args | default (list "--v=2")) | nindent 12 }}
+            {{- if $leaderElect }}
+            - --leader-elect=true
+            {{- end }}
+            {{- with ($as.syncPeriodSeconds | default $cm.autoscalingSyncPeriodSeconds | default (include "kthena.workload.controllerManager.argValue" (dict "root" . "name" "autoscaling-sync-period-seconds"))) }}
+            - --autoscaling-sync-period-seconds={{ . }}
+            {{- end }}
+            {{- with ($as.kubeAPIQPS | default $cm.kubeAPIQPS) }}
+            - --kube-api-qps={{ . }}
+            {{- end }}
+            {{- with ($as.kubeAPIBurst | default $cm.kubeAPIBurst) }}
+            - --kube-api-burst={{ . }}
+            {{- end }}
+          imagePullPolicy: {{ $image.pullPolicy | default $cm.image.pullPolicy }}
+          resources:
+            {{- toYaml ($as.resource | default $cm.resource) | nindent 12 }}
+          ports:
+            - name: health
+              containerPort: 8081
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      serviceAccountName: kthena-autoscaler
+      {{- with ($as.tolerations | default $cm.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

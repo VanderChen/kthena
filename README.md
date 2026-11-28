@@ -64,6 +64,8 @@ Kthena implements a Kubernetes-native architecture with a clear split between th
 
 - **Kthena-controller-manager**: 
   The control plane component governing the LLM inference lifecycle. It continuously reconciles Kthena CRDs to deploy, scale, and upgrade inference replicas across the cluster while exposing advanced scheduling policies that integrate directly with the [Volcano scheduler](https://github.com/volcano-sh/volcano/).   
+- **Kthena-autoscaler**:
+  The control plane component that sizes inference workloads. It reads runtime metrics of the serving instances and adjusts their replica counts according to `AutoscalingPolicy`. It runs apart from the controller manager, so the two restart, upgrade and fail independently.
 - **Kthena-router**:
   The data plane entry point for inference traffic. It classifies each request by model name, custom headers, or URI patterns, then applies load-balancing policies and traffic controls to dispatch requests to the right inference instance. Native support for prefill–decode disaggregation routing while keeping high throughput and low latency.
 

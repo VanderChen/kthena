@@ -32,7 +32,6 @@ import (
 	"github.com/spf13/pflag"
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
 	informers "github.com/volcano-sh/kthena/client-go/informers/externalversions"
-	"github.com/volcano-sh/kthena/pkg/autoscaler/util"
 	autoscalerwebhook "github.com/volcano-sh/kthena/pkg/autoscaler/webhook"
 	"github.com/volcano-sh/kthena/pkg/controller"
 	modelboosterwebhook "github.com/volcano-sh/kthena/pkg/model-booster-controller/webhook"
@@ -87,12 +86,14 @@ func main() {
 		"Enabling this will ensure there is only one active controller. Default is false.")
 	pflag.IntVar(&cc.Workers, "workers", 5, "number of workers to run. Default is 5")
 	pflag.StringSliceVar(&controllers, "controllers", []string{"*"}, "A list of controllers to enable. '*' enables all controllers, 'foo' enables the controller "+
-		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster', 'autoscaler'")
+		"named 'foo', '-foo' disables the controller named 'foo'.\nIf both '+foo' and '-foo' are set simultaneously, then controller named 'foo' will be enabled.\nAll controllers: 'modelserving', 'modelbooster'. "+
+		"'autoscaler' is still accepted and starts nothing: the autoscaler runs as kthena-autoscaler.")
 	pflag.Float32Var(&cc.KubeAPIQPS, "kube-api-qps", 0, "QPS to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.KubeAPIBurst, "kube-api-burst", 0, "Burst to use while talking with kubernetes apiserver. If 0, use default value.")
 	pflag.IntVar(&cc.DebugPort, "debug-port", 0, "Port for debug server to dump internal cache. If 0, debug server is disabled.")
-	pflag.IntVar(&cc.AutoscalingSyncPeriodSeconds, "autoscaling-sync-period-seconds", util.AutoscalingSyncPeriodSeconds,
-		"Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 falls back to the default (15).")
+	if err := addDeprecatedFlags(pflag.CommandLine); err != nil {
+		klog.Fatalf("Failed to register deprecated flags: %v", err)
+	}
 	pflag.Parse()
 
 	cc.Controllers = parseControllers(controllers)
@@ -296,8 +297,18 @@ func waitForCertsReady(keyFile, CertFile string) bool {
 	}
 }
 
+// addDeprecatedFlags registers flags that no longer do anything. They are still accepted so that
+// an existing command line does not stop the webhook server from starting.
+func addDeprecatedFlags(fs *pflag.FlagSet) error {
+	fs.Int("autoscaling-sync-period-seconds", 0, "Deprecated and without effect.")
+	return fs.MarkDeprecated("autoscaling-sync-period-seconds", "the autoscaler runs as kthena-autoscaler; pass the flag to it")
+}
+
+// parseControllers returns the controllers to run. A list selects what it has always selected,
+// minus the autoscaler: that name is still understood, so that a list which names it does not
+// fall back to enabling everything, but the autoscaler runs as kthena-autoscaler.
 func parseControllers(controllers []string) map[string]bool {
-	// defaultControllers defines all available controllers as enabled
+	// defaultControllers are the names --controllers understands
 	defaultControllers := map[string]bool{
 		controller.ModelServingController: true,
 		controller.ModelBoosterController: true,
@@ -324,7 +335,15 @@ func parseControllers(controllers []string) map[string]bool {
 
 	if len(enableControllers) == 0 {
 		klog.Warning("No controllers are enabled")
-		return defaultControllers
+		enableControllers = defaultControllers
+	}
+
+	if enableControllers[controller.AutoscalerController] {
+		delete(enableControllers, controller.AutoscalerController)
+		klog.Infof("Controller <%s> runs as kthena-autoscaler, not in this process", controller.AutoscalerController)
+		if len(enableControllers) == 0 {
+			klog.Warning("--controllers selects only the autoscaler: no controller runs in this process")
+		}
 	}
 
 	return enableControllers

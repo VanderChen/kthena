@@ -74,7 +74,17 @@ A Helm chart for deploying Kthena
 | networking.kthenaRouter.webhook.tls.certFile | string | `"/etc/tls/tls.crt"` | Certificate file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.keyFile | string | `"/etc/tls/tls.key"` | Key file path for the webhook. |
 | networking.kthenaRouter.webhook.tls.secretName | string | `"kthena-router-webhook-certs"` | Secret name for storing webhook certificates. |
-| workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses the binary default (15). |
+| workload.autoscaler.args | list | `["--v=2"]` | Extra arguments for the autoscaler. `--leader-elect` and `--health-probe-bind-address` are set by the chart; `workload.controllerManager.image.args` are not applied to the autoscaler. |
+| workload.autoscaler.enabled | bool | `true` | Deploy the autoscaler. It is also not deployed when `workload.controllerManager.controllers` leaves it out. |
+| workload.autoscaler.image.pullPolicy | string | `""` | Image pull policy for the autoscaler. Empty uses the Controller Manager policy. |
+| workload.autoscaler.image.repository | string | `""` | Image repository for the autoscaler. Empty uses the Controller Manager repository with the image name `kthena-autoscaler`. |
+| workload.autoscaler.image.tag | string | `""` | Image tag for the autoscaler. Empty uses the Controller Manager tag. |
+| workload.autoscaler.leaderElect | bool | `nil` | Elect a leader among the autoscaler instances on the Lease `lease.kthena.autoscaler`.<br/> Not set: follows `--leader-elect` in `workload.controllerManager.image.args`. |
+| workload.autoscaler.replicas | int | `nil` | Number of autoscaler instances to run. More than one requires leader election.<br/> Not set: one instance, or `workload.controllerManager.replicas` with leader election; none when `workload.controllerManager.replicas` is 0. |
+| workload.autoscaler.resource | object | `{}` | Container resources for the autoscaler. Empty uses the Controller Manager resources; a value replaces them as a whole. |
+| workload.autoscaler.syncPeriodSeconds | int | `0` | Reconcile interval in seconds for the autoscaler. Smaller values react faster to traffic spikes but increase API server load. 0 uses `workload.controllerManager.autoscalingSyncPeriodSeconds`, then the binary default (15). |
+| workload.autoscaler.tolerations | list | `[]` | Tolerations for autoscaler pods. Empty uses the Controller Manager tolerations. |
+| workload.controllerManager.autoscalingSyncPeriodSeconds | int | `0` | Deprecated: use `workload.autoscaler.syncPeriodSeconds`. Reconcile interval in seconds for the autoscaler, still honoured when `workload.autoscaler.syncPeriodSeconds` is 0. |
 | workload.controllerManager.debugPort | int | `0` | Debug server port for Controller Manager (set 0 to disable). |
 | workload.controllerManager.downloaderImage.repository | string | `"ghcr.io/volcano-sh/downloader"` | Image repository for the Downloader. |
 | workload.controllerManager.downloaderImage.tag | string | `"latest"` | Image tag for the Downloader. |

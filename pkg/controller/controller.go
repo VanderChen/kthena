@@ -24,7 +24,6 @@ import (
 	"time"
 
 	clientset "github.com/volcano-sh/kthena/client-go/clientset/versioned"
-	autoscaler "github.com/volcano-sh/kthena/pkg/autoscaler/controller"
 	"github.com/volcano-sh/kthena/pkg/kube"
 	modelbooster "github.com/volcano-sh/kthena/pkg/model-booster-controller/controller"
 	"github.com/volcano-sh/kthena/pkg/model-booster-controller/utils"
@@ -48,7 +47,10 @@ const (
 
 	ModelServingController = "modelserving"
 	ModelBoosterController = "modelbooster"
-	AutoscalerController   = "autoscaler"
+	// AutoscalerController is the name the autoscaler had when it was a controller of
+	// this binary. It runs as kthena-autoscaler now; the name is still accepted in
+	// --controllers so that existing command lines keep working.
+	AutoscalerController = "autoscaler"
 )
 
 func SetupController(ctx context.Context, cc Config) {
@@ -77,7 +79,6 @@ func SetupController(ctx context.Context, cc Config) {
 	var mc *modelbooster.ModelBoosterController
 	var msc *modelserving.ModelServingController
 	var lwsc *modelserving.LWSController
-	var ac *autoscaler.AutoscaleController
 
 	for ctrl, enable := range cc.Controllers {
 		if enable {
@@ -95,8 +96,6 @@ func SetupController(ctx context.Context, cc Config) {
 				} else if lwsc == nil {
 					klog.Info("LeaderWorkerSet CRD not found, LWS support disabled")
 				}
-			case AutoscalerController:
-				ac = autoscaler.NewAutoscaleController(kubeClient, client, cc.AutoscalingSyncPeriodSeconds)
 			}
 		}
 	}
@@ -119,11 +118,6 @@ func SetupController(ctx context.Context, cc Config) {
 				klog.Info("ModelServing lws controller started")
 			}
 		}
-		if ac != nil {
-			go ac.Run(ctx)
-			klog.Info("Autoscaler controller started")
-		}
-
 		if cc.DebugPort > 0 {
 			go func() {
 				debugMux := http.ServeMux{}

@@ -31,6 +31,11 @@ jobs:
         shell: bash
         run: |
           helm lint charts/kthena
+          # helm lint does not fail on a template that calls fail or renders invalid YAML
+          helm template charts/kthena > /dev/null
+          helm template charts/kthena --set workload.autoscaler.enabled=false > /dev/null
+          helm template charts/kthena --set workload.autoscaler.leaderElect=true --set workload.autoscaler.replicas=2 > /dev/null
+          helm template charts/kthena --set-json 'workload.controllerManager.controllers="*,-autoscaler"' > /dev/null
       - name: Setup Go
         uses: actions/setup-go@v6
         with:

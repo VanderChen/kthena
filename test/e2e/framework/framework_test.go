@@ -38,7 +38,7 @@ func TestKthenaDeployments(t *testing.T) {
 			config: &KthenaConfig{
 				WorkloadEnabled: true,
 			},
-			expected: []string{"kthena-controller-manager"},
+			expected: []string{"kthena-controller-manager", "kthena-autoscaler"},
 		},
 		{
 			name: "networking enabled",
@@ -53,7 +53,7 @@ func TestKthenaDeployments(t *testing.T) {
 				WorkloadEnabled:   true,
 				NetworkingEnabled: true,
 			},
-			expected: []string{"kthena-controller-manager", "kthena-router"},
+			expected: []string{"kthena-controller-manager", "kthena-autoscaler", "kthena-router"},
 		},
 	}
 

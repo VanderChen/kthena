@@ -17,9 +17,16 @@ limitations under the License.
 package main
 
 import (
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/volcano-sh/kthena/pkg/controller"
 )
@@ -36,7 +43,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -45,7 +51,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -63,11 +68,9 @@ func TestParseControllers(t *testing.T) {
 			},
 		},
 		{
-			name:  "single_controller_autoscaler",
-			input: []string{"autoscaler"},
-			expected: map[string]bool{
-				controller.AutoscalerController: true,
-			},
+			name:     "single_controller_autoscaler",
+			input:    []string{"autoscaler"},
+			expected: map[string]bool{},
 		},
 		{
 			name:  "multiple_controllers",
@@ -83,7 +86,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -100,7 +102,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -116,7 +117,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -125,7 +125,6 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
 		},
 		{
@@ -141,8 +140,55 @@ func TestParseControllers(t *testing.T) {
 			expected: map[string]bool{
 				controller.ModelServingController: true,
 				controller.ModelBoosterController: true,
-				controller.AutoscalerController:   true,
 			},
+		},
+		// The autoscaler is not a controller of this binary any more. Its name still
+		// selects what it selected, so that a list which names it does not fall back to
+		// everything. The workload chart mirrors the cases below in
+		// charts/kthena/charts/workload/templates/_helpers.tpl to decide whether to
+		// deploy kthena-autoscaler. Change both together.
+		{
+			name:  "wildcard_with_exclusion",
+			input: []string{"*", "-autoscaler"},
+			expected: map[string]bool{
+				controller.ModelServingController: true,
+				controller.ModelBoosterController: true,
+			},
+		},
+		{
+			name:  "exclusion_before_wildcard",
+			input: []string{"-autoscaler", "*"},
+			expected: map[string]bool{
+				controller.ModelServingController: true,
+				controller.ModelBoosterController: true,
+			},
+		},
+		{
+			name:  "exclusion_before_explicit_controller",
+			input: []string{"-autoscaler", "modelserving"},
+			expected: map[string]bool{
+				controller.ModelServingController: true,
+			},
+		},
+		{
+			name:  "exclusion_alone_enables_all",
+			input: []string{"-autoscaler"},
+			expected: map[string]bool{
+				controller.ModelServingController: true,
+				controller.ModelBoosterController: true,
+			},
+		},
+		{
+			name:  "first_token_wins_exclusion",
+			input: []string{"-autoscaler", "+autoscaler", "modelserving"},
+			expected: map[string]bool{
+				controller.ModelServingController: true,
+			},
+		},
+		{
+			name:     "first_token_wins_inclusion",
+			input:    []string{"+autoscaler", "-autoscaler"},
+			expected: map[string]bool{},
 		},
 	}
 
@@ -151,5 +197,35 @@ func TestParseControllers(t *testing.T) {
 			result := parseControllers(tt.input)
 			assert.Equal(t, tt.expected, result, "parseControllers(%q) result mismatch", tt.input)
 		})
+	}
+}
+
+// The workload chart works out from --controllers whether a release ran the autoscaler,
+// and can only do that for the names it knows.
+func TestChartHelperKnowsEveryController(t *testing.T) {
+	helper, err := os.ReadFile(filepath.Join("..", "..", "charts", "kthena", "charts", "workload", "templates", "_helpers.tpl"))
+	require.NoError(t, err)
+
+	match := regexp.MustCompile(`(?s)define "kthena\.workload\.controllerNames" -}}\s*(\S+)\s*{{- end`).FindSubmatch(helper)
+	require.NotNil(t, match, "kthena.workload.controllerNames not found in the workload chart helpers")
+
+	expected := []string{controller.AutoscalerController}
+	for name := range parseControllers([]string{"*"}) {
+		expected = append(expected, name)
+	}
+	assert.ElementsMatch(t, expected, strings.Split(string(match[1]), ","))
+}
+
+// A command line written for a release whose controller-manager ran the autoscaler must still parse.
+func TestDeprecatedFlagsAreAccepted(t *testing.T) {
+	for _, args := range [][]string{
+		{"--autoscaling-sync-period-seconds=30"},
+		{"--autoscaling-sync-period-seconds", "30"},
+	} {
+		fs := pflag.NewFlagSet("kthena-controller-manager", pflag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		require.NoError(t, addDeprecatedFlags(fs))
+		assert.NoError(t, fs.Parse(args), "%v", args)
+		assert.Empty(t, fs.Args(), "%v", args)
 	}
 }

@@ -242,10 +242,10 @@ kubectl get modelboosters.workload.serving.volcano.sh <target-name> -o jsonpath=
 
 #### 3. Check Metrics Collection
 
-Verify that metrics are being collected correctly by examining controller logs:
+Verify that metrics are being collected correctly by examining the autoscaler logs:
 
 ```bash
-kubectl logs -n <namespace> -l app.kubernetes.io/component=kthena-controller-manager -c kthena-controller-manager
+kubectl logs -n <namespace> -l app.kubernetes.io/component=kthena-autoscaler -c kthena-autoscaler
 ```
 
 ### Key Performance Indicators
