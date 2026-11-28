@@ -1,0 +1,25 @@
+# One policy for every unit of a set: each unit goes, as a whole, to exactly one cluster.
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: units-SET
+  namespace: default
+spec:
+  resourceSelectors:
+    - apiVersion: workload.serving.volcano.sh/v1alpha1
+      kind: ModelServing
+      labelSelector:
+        matchLabels:
+          k014/unit-of: SET
+  placement:
+    clusterAffinity:
+      clusterNames: [CLUSTERS]
+    spreadConstraints:
+      - spreadByField: cluster
+        minGroups: 1
+        maxGroups: 1
+    # Divided is required even though a unit is never divided: with the default (Duplicated)
+    # the scheduler ignores the estimated capacity when it picks the cluster.
+    replicaScheduling:
+      replicaSchedulingType: Divided
+      replicaDivisionPreference: Aggregated

@@ -1,0 +1,24 @@
+# C7: member-side change of spec.replicas (what the kthena autoscaler / HPA does), without and with the retain label
+# state: c6 with static weights, k014-m2 holds 3 replicas
++ km k014-m2 patch modelserving c6 --type=merge -p '{"spec":{"replicas":5}}'   (no retain label on the template)
+modelserving.workload.serving.volcano.sh/c6 patched
+t+3s member spec.replicas=3 generation=4
+t+6s member spec.replicas=3 generation=4
+t+9s member spec.replicas=3 generation=4
+t+12s member spec.replicas=3 generation=4
+t+15s member spec.replicas=3 generation=4
+t+18s member spec.replicas=3 generation=4
+
++ kk label modelserving c6 resourcetemplate.karmada.io/retain-replicas=true
+modelserving.workload.serving.volcano.sh/c6 labeled
++ km k014-m2 patch modelserving c6 --type=merge -p '{"spec":{"replicas":5}}'
+modelserving.workload.serving.volcano.sh/c6 patched
+t+4s member spec.replicas=5 generation=5
+t+8s member spec.replicas=5 generation=5
+t+12s member spec.replicas=5 generation=5
+t+16s member spec.replicas=5 generation=5
+t+20s member spec.replicas=5 generation=5
+t+24s member spec.replicas=5 generation=5
+## binding and template after the member scaled itself to 5
+{"replicas":4,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":3}]}
+{"specReplicas":4,"statusReplicas":6,"available":6}

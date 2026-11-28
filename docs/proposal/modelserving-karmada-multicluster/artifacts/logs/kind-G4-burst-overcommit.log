@@ -1,0 +1,43 @@
+# G-4: five units (shape s1) created in one kubectl apply; real capacity k014-m1 = 1, k014-m2 = 2, k014-m3 = 2
+## (a) default gates plus MultiplePodTemplatesScheduling; SchedulingOvercommitProtection off
+k014-m1 allocated gpu=
+k014-m2 allocated gpu=
+k014-m3 allocated gpu=
+## scheduler estimates per unit, in order
+    1795846745488.4 [{k014-m1 1 []} {k014-m2 2 []} {k014-m3 2 []}]
+    1795846745499.4 [{k014-m1 1 []} {k014-m2 2 []} {k014-m3 2 []}]
+    1795846745520.3 [{k014-m1 1 []} {k014-m2 2 []} {k014-m3 2 []}]
+    1795846745538.9 [{k014-m1 1 []} {k014-m2 1 []} {k014-m3 2 []}]
+    1795846745553.1 [{k014-m1 1 []} {k014-m2 1 []} {k014-m3 2 []}]
+b1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+b2 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx2 Unschedulablex2}
+b3 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx2 Unschedulablex2}
+b4 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+b5 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+
+## result (a): b1, b2, b3 were all estimated on the same snapshot within 65 ms and sent to k014-m2 (capacity 2).
+## Without gang scheduling b2 and b3 each hold 2 GPU and block each other; k014-m1 (capacity 1) stays empty.
+
+## (b) same burst with SchedulingOvercommitProtection=true on karmada-scheduler and the scheduler-estimators
+karmada-scheduler: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+karmada-controller-manager: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+karmada-webhook: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+karmada-scheduler-estimator-k014-m1: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+karmada-scheduler-estimator-k014-m2: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+karmada-scheduler-estimator-k014-m3: --feature-gates=MultiplePodTemplatesScheduling=true,SchedulingOvercommitProtection=true
+k014-m1 allocated gpu=
+k014-m2 allocated gpu=
+k014-m3 allocated gpu=
+## scheduler estimates per unit, in order
+    1795846846663.0 [{k014-m3 2 []} {k014-m1 1 []} {k014-m2 2 []}]
+    1795846846674.3 [{k014-m1 1 []} {k014-m2 1 []} {k014-m3 2 []}]
+    1795846846685.6 [{k014-m2 1 []} {k014-m3 1 []} {k014-m1 1 []}]
+    1795846846696.8 [{k014-m2 1 []} {k014-m3 1 []} {k014-m1 0 []}]
+    1795846846710.8 [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 1 []}]
+c1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+c2 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+c3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+c4 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+c5 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+
+## result (b): the estimates drop after every assignment (assumed workloads are deducted) and the five units fill 1 + 2 + 2 exactly.

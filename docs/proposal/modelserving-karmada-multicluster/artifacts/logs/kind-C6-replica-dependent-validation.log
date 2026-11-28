@@ -1,0 +1,35 @@
+# C6: template replicas 4, integer maxUnavailable 2; static weights k014-m1:1, k014-m2:3 -> k014-m1 receives 1 replica
+modelserving.workload.serving.volcano.sh/c6 created
+propagationpolicy.policy.karmada.io/c6 created
+--- template (karmada-apiserver) 03:19:12
+{"specReplicas":4,"generation":1,"status":{"availableReplicas":3,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=c6,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":0,"replicas":3,"unschedulableReplicas":0,"updatedReplicas":3}}
+--- ResourceBinding c6-modelserving
+{"replicas":4,"replicaRequirements":null,"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":3}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"False","reason":"FullyAppliedFailed","message":"Failed to apply all works, see status.aggregatedStatus for details"}
+{"cluster":"k014-m1","applied":null,"health":"Unknown","appliedMessage":"Failed to apply all manifests (0/1): admission webhook \"validate-workload-ai-v1alpha1-modelserving.volcano.sh\" denied the request: validation failed:\n  - spec.rolloutStrategy.rollingUpdateConfiguration.maxUnavailable: In","status":{}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":3,"currentReplicas":3,"currentRevision":"864cff4bb6","desiredReplicas":3,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=c6,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"readyReplicas":3,"replicas":3,"resourceTemplateGeneration":1,"updateRevision":"864cff4bb6","updatedReplicas":3}}
+--- member k014-m1
+--- member k014-m2
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":3,"currentReplicas":3,"currentRevision":"864cff4bb6","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=c6,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"updateRevision":"864cff4bb6","updatedReplicas":3}}
+  group c6-0: Runningx1
+  group c6-1: Runningx1
+  group c6-2: Runningx1
+--- Work conditions
+{"cluster":"k014-m1","replicasInManifest":1,"conditions":[{"type":"Dispatching","status":"True","reason":"Dispatching","message":"Work is being dispatched to member clusters."},{"type":"Applied","status":"False","reason":"AppliedFailed","message":"Failed to apply all manifests (0/1): admission webhook \"validate-workload-ai-v1alpha1-modelserving.volcano.sh\" denied the request: validation failed:\n  - spec.rolloutStrategy.rollingUpdateConfiguration.maxUnavailable: Invalid value: 2: maxUnavailable cannot be greater than replicas (1)"}]}
+{"cluster":"k014-m2","replicasInManifest":3,"conditions":[{"type":"Dispatching","status":"True","reason":"Dispatching","message":"Work is being dispatched to member clusters."},{"type":"Applied","status":"True","reason":"AppliedSuccessful","message":"Manifest has been successfully applied"}]}
+--- events on the template
+      1 Normal GetReplicasSucceed: Get replicas of resource template successfully.
+      1 Normal ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m1:1, k014-m2:3}
+      1 Normal SyncSucceed: Successfully applied resource(default/c6) to cluster k014-m2
+      1 Normal SyncWorkSucceed: Sync work of ResourceBinding(default/c6-modelserving) successful.
+      1   - spec.rolloutStrategy.rollingUpdateConfiguration.maxUnavailable: Inv
+      1 Warning SyncFailed: Failed to create or update resource(default/c6) in member cluster(k014-m1): admission webhook "validate-workload-ai-v1alpha1-modelserving.volcano.sh" denied the request: validation failed:
+
+# fix: remove the integer maxUnavailable from the template (falls back to the default 1)
++ kk patch modelserving c6 --type=json -p '[{"op":"remove","path":"/spec/rolloutStrategy"}]'
+modelserving.workload.serving.volcano.sh/c6 patched
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess"}
+k014-m1 member spec.replicas=1 available=1
+k014-m2 member spec.replicas=3 available=3
+{"generation":2,"status":{"availableReplicas":4,"currentReplicas":4,"observedGeneration":2,"replicas":4,"unschedulableReplicas":0,"updatedReplicas":4}}

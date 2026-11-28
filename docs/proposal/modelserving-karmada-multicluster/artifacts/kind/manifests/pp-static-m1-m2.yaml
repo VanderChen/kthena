@@ -1,0 +1,24 @@
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: NAME
+  namespace: default
+spec:
+  resourceSelectors:
+    - apiVersion: workload.serving.volcano.sh/v1alpha1
+      kind: ModelServing
+      name: NAME
+  placement:
+    clusterAffinity:
+      clusterNames: [k014-m1, k014-m2]
+    replicaScheduling:
+      replicaSchedulingType: Divided
+      replicaDivisionPreference: Weighted
+      weightPreference:
+        staticWeightList:
+          - targetCluster:
+              clusterNames: [k014-m1]
+            weight: W1
+          - targetCluster:
+              clusterNames: [k014-m2]
+            weight: W2

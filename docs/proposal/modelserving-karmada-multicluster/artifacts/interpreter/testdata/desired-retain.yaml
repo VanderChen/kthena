@@ -1,0 +1,32 @@
+# What Karmada wants to apply; the label hands the replica counts to the member cluster.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek
+  namespace: llm
+  labels:
+    resourcetemplate.karmada.io/retain-replicas: "true"
+spec:
+  replicas: 5
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            securityContext: {}
+            containers:
+              - name: prefill
+                image: vllm:test
+            volumes:
+              - name: shm
+                emptyDir: {}
+        workerReplicas: 0
+      - name: decode
+        replicas: 2
+        entryTemplate:
+          spec:
+            containers:
+              - name: decode
+                image: vllm:test
+        workerReplicas: 0

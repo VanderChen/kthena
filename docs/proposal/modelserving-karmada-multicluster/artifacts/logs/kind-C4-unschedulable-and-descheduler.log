@@ -1,0 +1,47 @@
+# C4 / reproduction of karmada#8104: ModelServing s2 (3 groups; each = entry 3 GPU + worker 1 GPU, summed 4 GPU)
+# k014-m1 has 2 nodes x 2 GPU: the summary estimate says 1 group fits, in reality no node can host the 3-GPU entry Pod
+# PropagationPolicy Divided/Aggregated on k014-m1,k014-m2; interpreter installed; resource models cleared; no scheduler-estimator for k014-m1
+# applied at 2026-11-28T03:17:31Z
+modelserving.workload.serving.volcano.sh/s2 created
+propagationpolicy.policy.karmada.io/s2 created
+## scheduler log: estimator results
+{"ts":1795835851626.1257,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s2): [{k014-m1 1 []} {k014-m2 2 []}]","v":4}
+--- template (karmada-apiserver) 03:18:16
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":2,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:17:31Z","updatedReplicas":3}}
+--- ResourceBinding s2-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":2}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+{"cluster":"k014-m1","applied":true,"health":"Unhealthy","appliedMessage":"","status":{"currentReplicas":1,"currentRevision":"554c4f5cff","desiredReplicas":1,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"readyReplicas":0,"replicas":1,"resourceTemplateGeneration":1,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:17:31Z","updateRevision":"554c4f5cff","updatedReplicas":1}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"554c4f5cff","desiredReplicas":2,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"readyReplicas":2,"replicas":2,"resourceTemplateGeneration":1,"updateRevision":"554c4f5cff","updatedReplicas":2}}
+--- member k014-m1
+{"specReplicas":1,"generation":1,"status":{"currentReplicas":1,"currentRevision":"554c4f5cff","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":1,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:17:31Z","updateRevision":"554c4f5cff","updatedReplicas":1}}
+  group s2-0: Runningx1 Unschedulablex1
+--- member k014-m2
+{"specReplicas":2,"generation":1,"status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"554c4f5cff","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":2,"updateRevision":"554c4f5cff","updatedReplicas":2}}
+  group s2-0: Runningx2
+  group s2-1: Runningx2
+## descheduler flags
+/bin/karmada-descheduler --kubeconfig=/etc/karmada/config/karmada.config --metrics-bind-address=$(POD_IP):8080 --health-probe-bind-address=$(POD_IP):10358 --scheduler-estimator-ca-file=/etc/karmada/pki/scheduler-estimator-client/ca.crt --scheduler-estimator-cert-file=/etc/karmada/pki/scheduler-estimator-client/tls.crt --scheduler-estimator-key-file=/etc/karmada/pki/scheduler-estimator-client/tls.key --logging-format=json --v=4 
+
+# 2026-11-28T03:25:59Z: more than 8 minutes after the group became unschedulable (descheduler: threshold 5m, interval 2m, both defaults)
+--- template (karmada-apiserver) 03:25:59
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":2,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s2,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:17:31Z","updatedReplicas":3}}
+--- ResourceBinding s2-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":2}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+--- member k014-m1
+{"specReplicas":1,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:17:31Z"}
+--- descheduler leader log lines mentioning the binding (since 10m): 0
+--- descheduler log: any deschedule activity (since 10m)
+{"ts":1795836350273.1404,"caller":"leaderelection/leaderelection.go:267","msg":"Failed to acquire lease","v":4,"lock":"karmada-system/karmada-descheduler"}
+{"ts":1795836354064.8877,"caller":"leaderelection/leaderelection.go:493","msg":"Lease is held by and has not yet expired","v":4,"lock":"karmada-system/karmada-descheduler","holder":"karmada-descheduler-6dc4f8d469-shrms_32e17132-b0e6-44a6-bb93-b81d279ae75a"}
+{"ts":1795836354064.907,"caller":"leaderelection/leaderelection.go:267","msg":"Failed to acquire lease","v":4,"lock":"karmada-system/karmada-descheduler"}
+{"ts":1795836357498.065,"caller":"leaderelection/leaderelection.go:493","msg":"Lease is held by and has not yet expired","v":4,"lock":"karmada-system/karmada-descheduler","holder":"karmada-descheduler-6dc4f8d469-shrms_32e17132-b0e6-44a6-bb93-b81d279ae75a"}
+{"ts":1795836357498.082,"caller":"leaderelection/leaderelection.go:267","msg":"Failed to acquire lease","v":4,"lock":"karmada-system/karmada-descheduler"}
+--- events on the binding
+      1 Normal AggregateStatusSucceed: Update ResourceBinding(default/s2-modelserving) with AggregatedStatus successfully.
+      1 Normal ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m1:1, k014-m2:2}
+      1 Normal SyncWorkSucceed: Sync work of ResourceBinding(default/s2-modelserving) successful.
+--- the binding is a candidate by placement (dynamic divided) but not by GVK:
+{"kind":"ModelServing","apiVersion":"workload.serving.volcano.sh/v1alpha1","replicaScheduling":{"replicaDivisionPreference":"Aggregated","replicaSchedulingType":"Divided"}}

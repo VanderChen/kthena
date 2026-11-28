@@ -1,0 +1,164 @@
+# Evaluation of "ServingGroup as the propagation unit" (option G).
+# Stand-in for a ServingGroup CR: a ModelServing with spec.replicas 1 is exactly one ServingGroup.
+# The unit is never divided, so there is no replicaResource and no replicaRevision.
+# Karmada estimates it through the multi-component path (feature gate MultiplePodTemplatesScheduling).
+# This file replaces the option-M customization in the cluster; the two must not be installed together.
+apiVersion: config.karmada.io/v1alpha1
+kind: ResourceInterpreterCustomization
+metadata:
+  name: declarative-configuration-modelserving-unit
+spec:
+  target:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+  customizations:
+    componentResource:
+      luaScript: |
+        local kube = require("kube")
+
+        -- One component per Pod template: the entry Pods and the worker Pods of each role.
+        -- Each component keeps its own nodeClaim (nodeSelector, tolerations, hard node affinity).
+        function GetComponents(obj)
+          local components = {}
+          if obj.spec == nil or obj.spec.template == nil or obj.spec.template.roles == nil then
+            return components
+          end
+          local groups = 1
+          if obj.spec.replicas ~= nil then
+            groups = obj.spec.replicas
+          end
+          for _, role in ipairs(obj.spec.template.roles) do
+            local roleReplicas = role.replicas
+            if roleReplicas == nil then
+              roleReplicas = 1
+            end
+            if role.entryTemplate ~= nil and groups * roleReplicas > 0 then
+              table.insert(components, {
+                name = role.name .. "-entry",
+                replicas = groups * roleReplicas,
+                replicaRequirements = kube.accuratePodRequirements(role.entryTemplate)
+              })
+            end
+            local workers = role.workerReplicas or 0
+            if role.workerTemplate ~= nil and groups * roleReplicas * workers > 0 then
+              table.insert(components, {
+                name = role.name .. "-worker",
+                replicas = groups * roleReplicas * workers,
+                replicaRequirements = kube.accuratePodRequirements(role.workerTemplate)
+              })
+            end
+          end
+          return components
+        end
+    statusReflection:
+      luaScript: |
+        function ReflectStatus(observedObj)
+          local status = {}
+          if observedObj == nil then
+            return status
+          end
+          if observedObj.status ~= nil then
+            for key, value in pairs(observedObj.status) do
+              status[key] = value
+            end
+          end
+          status.readyReplicas = status.availableReplicas or 0
+          if observedObj.metadata ~= nil then
+            status.generation = observedObj.metadata.generation
+            if observedObj.metadata.annotations ~= nil then
+              local templateGeneration = tonumber(observedObj.metadata.annotations["resourcetemplate.karmada.io/generation"])
+              if templateGeneration ~= nil then
+                status.resourceTemplateGeneration = templateGeneration
+              end
+            end
+          end
+          return status
+        end
+    statusAggregation:
+      luaScript: |
+        -- The unit lives in at most one cluster (two while it is being moved): sum the counters.
+        function AggregateStatus(desiredObj, statusItems)
+          if desiredObj.status == nil then
+            desiredObj.status = {}
+          end
+          local status = desiredObj.status
+          local replicas, updated, available, unschedulable = 0, 0, 0, 0
+          local since = nil
+          if statusItems ~= nil then
+            for i = 1, #statusItems do
+              local s = statusItems[i].status
+              if s ~= nil then
+                replicas = replicas + (s.replicas or 0)
+                updated = updated + (s.updatedReplicas or 0)
+                available = available + (s.availableReplicas or 0)
+                unschedulable = unschedulable + (s.unschedulableReplicas or 0)
+                if s.unschedulableSince ~= nil and s.unschedulableSince ~= "" then
+                  if since == nil or s.unschedulableSince < since then
+                    since = s.unschedulableSince
+                  end
+                end
+              end
+            end
+          end
+          status.replicas = replicas
+          status.updatedReplicas = updated
+          status.availableReplicas = available
+          status.unschedulableReplicas = unschedulable
+          status.unschedulableSince = since
+          status.conditions = nil
+          status.currentRevision = nil
+          status.updateRevision = nil
+          status.collisionCount = nil
+          status.currentReplicas = nil
+          status.labelSelector = nil
+          status.observedGeneration = desiredObj.metadata.generation
+          return desiredObj
+        end
+    healthInterpretation:
+      luaScript: |
+        -- Narrow on purpose: Unhealthy means "the scheduler of the member cluster cannot place the unit".
+        -- A unit that is scheduled but still starting (pulling images, loading the model) is Healthy,
+        -- so that Karmada application failover moves only units that are stuck for lack of room.
+        function InterpretHealth(observedObj)
+          if observedObj.status == nil then
+            return false
+          end
+          if observedObj.status.observedGeneration ~= observedObj.metadata.generation then
+            return false
+          end
+          return (observedObj.status.unschedulableReplicas or 0) == 0
+        end
+    dependencyInterpretation:
+      luaScript: |
+        local kube = require("kube")
+
+        function GetDependencies(desiredObj)
+          local refs = {}
+          local seen = {}
+          local function collect(template)
+            if template == nil then
+              return
+            end
+            local deps = kube.getPodDependencies(template, desiredObj.metadata.namespace)
+            if deps == nil then
+              return
+            end
+            for _, dep in ipairs(deps) do
+              local key = dep.apiVersion .. "/" .. dep.kind .. "/" .. (dep.namespace or "") .. "/" .. dep.name
+              if not seen[key] then
+                seen[key] = true
+                table.insert(refs, dep)
+              end
+            end
+          end
+          if desiredObj.spec == nil or desiredObj.spec.template == nil or desiredObj.spec.template.roles == nil then
+            return refs
+          end
+          for _, role in ipairs(desiredObj.spec.template.roles) do
+            collect(role.entryTemplate)
+            if (role.workerReplicas or 0) > 0 then
+              collect(role.workerTemplate)
+            end
+          end
+          return refs
+        end

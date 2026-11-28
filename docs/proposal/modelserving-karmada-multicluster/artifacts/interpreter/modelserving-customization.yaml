@@ -1,0 +1,286 @@
+# Draft (v1): ResourceInterpreterCustomization for kthena ModelServing.
+# Verified offline with `karmadactl interpret` (all operations) and on Kind with Karmada 6d007132
+# (all operations except dependencyInterpretation). See ../../04-evidence.md.
+#
+# Replica unit: one ServingGroup (= one unit of ModelServing.spec.replicas).
+# Replica requirement: the summed request of all Pods of one ServingGroup.
+#
+# componentResource (GetComponents) is deliberately NOT implemented. With the
+# MultiplePodTemplatesScheduling feature gate on, Karmada then skips GetReplicas,
+# schedules 0 replicas and still calls ReviseReplica, which sets spec.replicas to 0
+# in every member cluster. See ../../01-design.md, section 4.4.
+apiVersion: config.karmada.io/v1alpha1
+kind: ResourceInterpreterCustomization
+metadata:
+  name: declarative-configuration-modelserving
+spec:
+  target:
+    apiVersion: workload.serving.volcano.sh/v1alpha1
+    kind: ModelServing
+  customizations:
+    replicaResource:
+      luaScript: |
+        local kube = require("kube")
+
+        -- multiply a resource quantity by a positive integer (repeated doubling)
+        local function mul(quantity, n)
+          local result = nil
+          local base = quantity
+          while n > 0 do
+            if n % 2 == 1 then
+              if result == nil then
+                result = base
+              else
+                result = kube.resourceAdd(result, base)
+              end
+            end
+            n = math.floor(n / 2)
+            if n > 0 then
+              base = kube.resourceAdd(base, base)
+            end
+          end
+          return result
+        end
+
+        function GetReplicas(obj)
+          local replicas = 1
+          if obj.spec ~= nil and obj.spec.replicas ~= nil then
+            replicas = obj.spec.replicas
+          end
+
+          local total = {}
+          local function add(template, count)
+            if template == nil or count <= 0 then
+              return
+            end
+            local requires = kube.accuratePodRequirements(template)
+            if requires == nil or requires.resourceRequest == nil then
+              return
+            end
+            for name, quantity in pairs(requires.resourceRequest) do
+              local q = mul(quantity, count)
+              if total[name] == nil then
+                total[name] = q
+              else
+                total[name] = kube.resourceAdd(total[name], q)
+              end
+            end
+          end
+
+          if obj.spec ~= nil and obj.spec.template ~= nil and obj.spec.template.roles ~= nil then
+            for _, role in ipairs(obj.spec.template.roles) do
+              local roleReplicas = role.replicas
+              if roleReplicas == nil then
+                roleReplicas = 1
+              end
+              add(role.entryTemplate, roleReplicas)
+              add(role.workerTemplate, roleReplicas * (role.workerReplicas or 0))
+            end
+          end
+
+          if next(total) == nil then
+            return replicas, nil
+          end
+          -- No nodeClaim: the roles of one ServingGroup may select different nodes,
+          -- and a single claim cannot describe them.
+          return replicas, { resourceRequest = total }
+        end
+    replicaRevision:
+      luaScript: |
+        function ReviseReplica(obj, desiredReplica)
+          obj.spec.replicas = desiredReplica
+          return obj
+        end
+    retention:
+      luaScript: |
+        -- Same contract as the built-in Deployment retention: when the template is
+        -- labelled resourcetemplate.karmada.io/retain-replicas=true, the member
+        -- cluster (kthena autoscaler, HPA) owns the replica counts, both
+        -- spec.replicas and the replicas of each role (matched by role name).
+        function Retain(desiredObj, observedObj)
+          local labels = desiredObj.metadata.labels
+          if labels == nil or labels["resourcetemplate.karmada.io/retain-replicas"] ~= "true" then
+            return desiredObj
+          end
+          if observedObj.spec == nil then
+            return desiredObj
+          end
+          if observedObj.spec.replicas ~= nil then
+            desiredObj.spec.replicas = observedObj.spec.replicas
+          end
+          if observedObj.spec.template == nil or observedObj.spec.template.roles == nil then
+            return desiredObj
+          end
+          if desiredObj.spec.template == nil or desiredObj.spec.template.roles == nil then
+            return desiredObj
+          end
+          local observedRoleReplicas = {}
+          for _, role in ipairs(observedObj.spec.template.roles) do
+            if role.name ~= nil and role.replicas ~= nil then
+              observedRoleReplicas[role.name] = role.replicas
+            end
+          end
+          for _, role in ipairs(desiredObj.spec.template.roles) do
+            if role.name ~= nil and observedRoleReplicas[role.name] ~= nil then
+              role.replicas = observedRoleReplicas[role.name]
+            end
+          end
+          return desiredObj
+        end
+    statusReflection:
+      luaScript: |
+        -- Copy the whole member status, so fields added by newer kthena versions are
+        -- not dropped, then add the keys Karmada components rely on.
+        function ReflectStatus(observedObj)
+          local status = {}
+          if observedObj == nil then
+            return status
+          end
+          if observedObj.status ~= nil then
+            for key, value in pairs(observedObj.status) do
+              status[key] = value
+            end
+          end
+          -- karmada-descheduler reads readyReplicas; a ServingGroup is ready when it is available.
+          status.readyReplicas = status.availableReplicas or 0
+          -- Echo of the member's spec.replicas: lets a rescheduler tell whether this
+          -- status already reflects the replica count it last assigned.
+          if observedObj.spec ~= nil and observedObj.spec.replicas ~= nil then
+            status.desiredReplicas = observedObj.spec.replicas
+          end
+          if observedObj.metadata ~= nil then
+            status.generation = observedObj.metadata.generation
+            if observedObj.metadata.annotations ~= nil then
+              local templateGeneration = tonumber(observedObj.metadata.annotations["resourcetemplate.karmada.io/generation"])
+              if templateGeneration ~= nil then
+                status.resourceTemplateGeneration = templateGeneration
+              end
+            end
+          end
+          return status
+        end
+    statusAggregation:
+      luaScript: |
+        -- Writes only fields that exist in the ModelServing CRD. Keys such as
+        -- readyReplicas or desiredReplicas stay in the ResourceBinding.
+        function AggregateStatus(desiredObj, statusItems)
+          if desiredObj.status == nil then
+            desiredObj.status = {}
+          end
+          if desiredObj.metadata.generation == nil then
+            desiredObj.metadata.generation = 0
+          end
+          if desiredObj.status.observedGeneration == nil then
+            desiredObj.status.observedGeneration = 0
+          end
+
+          local status = desiredObj.status
+          local generation = desiredObj.metadata.generation
+          local replicas = 0
+          local currentReplicas = 0
+          local updatedReplicas = 0
+          local availableReplicas = 0
+          local unschedulableReplicas = 0
+          local unschedulableSince = nil
+          local labelSelector = nil
+          local observedCount = 0
+          local itemCount = 0
+
+          if statusItems ~= nil then
+            itemCount = #statusItems
+            for i = 1, #statusItems do
+              local s = statusItems[i].status
+              if s ~= nil then
+                replicas = replicas + (s.replicas or 0)
+                currentReplicas = currentReplicas + (s.currentReplicas or 0)
+                updatedReplicas = updatedReplicas + (s.updatedReplicas or 0)
+                availableReplicas = availableReplicas + (s.availableReplicas or 0)
+                unschedulableReplicas = unschedulableReplicas + (s.unschedulableReplicas or 0)
+                -- RFC 3339 UTC timestamps of equal precision order as strings.
+                if s.unschedulableSince ~= nil and s.unschedulableSince ~= "" then
+                  if unschedulableSince == nil or s.unschedulableSince < unschedulableSince then
+                    unschedulableSince = s.unschedulableSince
+                  end
+                end
+                if s.labelSelector ~= nil and s.labelSelector ~= "" then
+                  labelSelector = s.labelSelector
+                end
+                if s.resourceTemplateGeneration == generation and s.generation ~= nil and s.generation == s.observedGeneration then
+                  observedCount = observedCount + 1
+                end
+              end
+            end
+          end
+
+          -- Advance only when every target cluster has observed the latest template.
+          if observedCount == itemCount then
+            status.observedGeneration = generation
+          end
+          status.replicas = replicas
+          status.currentReplicas = currentReplicas
+          status.updatedReplicas = updatedReplicas
+          status.availableReplicas = availableReplicas
+          status.unschedulableReplicas = unschedulableReplicas
+          -- nil removes the field; an empty string would fail the date-time format.
+          status.unschedulableSince = unschedulableSince
+          status.labelSelector = labelSelector
+          -- Per-cluster values that have no meaningful sum.
+          status.conditions = nil
+          status.currentRevision = nil
+          status.updateRevision = nil
+          status.collisionCount = nil
+          return desiredObj
+        end
+    healthInterpretation:
+      luaScript: |
+        -- Healthy: the member has seen its latest spec and every ServingGroup it was
+        -- asked to run is available. updatedReplicas is not used: with a partition
+        -- it never reaches spec.replicas.
+        function InterpretHealth(observedObj)
+          if observedObj.status == nil then
+            return false
+          end
+          if observedObj.status.observedGeneration ~= observedObj.metadata.generation then
+            return false
+          end
+          local desired = 1
+          if observedObj.spec ~= nil and observedObj.spec.replicas ~= nil then
+            desired = observedObj.spec.replicas
+          end
+          return (observedObj.status.availableReplicas or 0) >= desired
+        end
+    dependencyInterpretation:
+      luaScript: |
+        local kube = require("kube")
+
+        function GetDependencies(desiredObj)
+          local refs = {}
+          local seen = {}
+          local function collect(template)
+            if template == nil then
+              return
+            end
+            local deps = kube.getPodDependencies(template, desiredObj.metadata.namespace)
+            if deps == nil then
+              return
+            end
+            for _, dep in ipairs(deps) do
+              local key = dep.apiVersion .. "/" .. dep.kind .. "/" .. (dep.namespace or "") .. "/" .. dep.name
+              if not seen[key] then
+                seen[key] = true
+                table.insert(refs, dep)
+              end
+            end
+          end
+
+          if desiredObj.spec == nil or desiredObj.spec.template == nil or desiredObj.spec.template.roles == nil then
+            return refs
+          end
+          for _, role in ipairs(desiredObj.spec.template.roles) do
+            collect(role.entryTemplate)
+            if (role.workerReplicas or 0) > 0 then
+              collect(role.workerTemplate)
+            end
+          end
+          return refs
+        end

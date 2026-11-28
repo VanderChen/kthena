@@ -1,0 +1,96 @@
+# Member-cluster view of a ModelServing: 2 roles, 1 + 2*(1+3) = 9 Pods per ServingGroup.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek
+  namespace: llm
+  generation: 4
+  labels:
+    app: deepseek
+  annotations:
+    resourcetemplate.karmada.io/generation: "7"
+spec:
+  schedulerName: volcano
+  replicas: 5
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            serviceAccountName: model-reader
+            nodeSelector:
+              gpu-type: a100
+            tolerations:
+              - key: nvidia.com/gpu
+                operator: Exists
+            containers:
+              - name: prefill
+                image: vllm:test
+                envFrom:
+                  - configMapRef:
+                      name: engine-config
+                resources:
+                  requests:
+                    cpu: "4"
+                    memory: 32Gi
+                  limits:
+                    nvidia.com/gpu: 1
+            volumes:
+              - name: models
+                persistentVolumeClaim:
+                  claimName: model-cache
+        workerReplicas: 0
+      - name: decode
+        replicas: 2
+        entryTemplate:
+          spec:
+            containers:
+              - name: decode
+                image: vllm:test
+                env:
+                  - name: HF_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: hf-token
+                        key: token
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 8Gi
+                  limits:
+                    nvidia.com/gpu: 2
+            volumes:
+              - name: models
+                persistentVolumeClaim:
+                  claimName: model-cache
+        workerReplicas: 3
+        workerTemplate:
+          spec:
+            containers:
+              - name: decode-worker
+                image: vllm:test
+                envFrom:
+                  - configMapRef:
+                      name: engine-config
+                resources:
+                  requests:
+                    cpu: "2"
+                    memory: 16Gi
+                  limits:
+                    nvidia.com/gpu: 4
+status:
+  observedGeneration: 4
+  replicas: 5
+  currentReplicas: 5
+  updatedReplicas: 5
+  availableReplicas: 3
+  unschedulableReplicas: 2
+  unschedulableSince: "2026-11-20T06:40:00Z"
+  labelSelector: modelserving.volcano.sh/name=deepseek
+  conditions:
+    - type: Progressing
+      status: "True"
+      reason: Progressing
+      message: 2 ServingGroups are not ready
+      lastTransitionTime: "2026-11-20T06:40:00Z"

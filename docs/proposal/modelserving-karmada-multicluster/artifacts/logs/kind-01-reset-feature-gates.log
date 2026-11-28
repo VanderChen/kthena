@@ -1,0 +1,14 @@
+karmada-aggregated-apiserver: no --feature-gates flag
+karmada-apiserver: no --feature-gates flag
+karmada-controller-manager: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-descheduler: no --feature-gates flag
+karmada-kube-controller-manager: no --feature-gates flag
+karmada-metrics-adapter: no --feature-gates flag
+karmada-scheduler: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-scheduler-estimator-k014-m1: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-scheduler-estimator-k014-m2: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-scheduler-estimator-k014-m3: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-search: no --feature-gates flag
+karmada-webhook: removed --feature-gates=AllAlpha=true,AllBeta=true
+karmada-agent: removed --feature-gates=CustomizedClusterResourceModeling=true,MultiClusterService=true
+all components rolled out with default feature gates

@@ -1,0 +1,32 @@
+# The member object after the kthena autoscaler changed spec.replicas and the decode role.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek
+  namespace: llm
+  labels:
+    resourcetemplate.karmada.io/retain-replicas: "true"
+spec:
+  replicas: 9
+  template:
+    roles:
+      - name: prefill
+        replicas: 1
+        entryTemplate:
+          spec:
+            securityContext: {}
+            containers:
+              - name: prefill
+                image: vllm:test
+            volumes:
+              - name: shm
+                emptyDir: {}
+        workerReplicas: 0
+      - name: decode
+        replicas: 4
+        entryTemplate:
+          spec:
+            containers:
+              - name: decode
+                image: vllm:test
+        workerReplicas: 0

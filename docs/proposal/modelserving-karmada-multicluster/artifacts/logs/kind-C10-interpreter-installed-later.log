@@ -1,0 +1,47 @@
+# C10: the customization is applied after the template and policy already exist (state of C0)
+# command: kk apply -f interpreter/modelserving-customization.yaml ; observed after 45s
+--- template (karmada-apiserver) 03:11:32
+{"specReplicas":3,"generation":1,"status":{}}
+--- ResourceBinding s1-modelserving
+{"replicas":null,"replicaRequirements":null,"components":0,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+{"cluster":"k014-m1","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":1,"currentReplicas":3,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":2,"unschedulableSince":"2026-11-28T03:09:50Z","updateRevision":"556fb6bd55","updatedReplicas":3}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":2,"currentReplicas":3,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:09:50Z","updateRevision":"556fb6bd55","updatedReplicas":3}}
+--- member k014-m1
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":1,"currentReplicas":3,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":2,"unschedulableSince":"2026-11-28T03:09:50Z","updateRevision":"556fb6bd55","updatedReplicas":3}}
+  group s1-0: Runningx4
+  group s1-1: Unschedulablex4
+  group s1-2: Unschedulablex4
+--- member k014-m2
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":2,"currentReplicas":3,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:09:50Z","updateRevision":"556fb6bd55","updatedReplicas":3}}
+  group s1-0: Runningx4
+  group s1-1: Runningx4
+  group s1-2: Unschedulablex4
+--- scheduler log (last 60s) for s1
+
+# +2min after installing the customization, nothing else touched
+{"replicas":null,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+k014-m1 member spec.replicas=3
+k014-m2 member spec.replicas=3
+
+# then touch the template: kk annotate modelserving s1 k014/touch=1 ; observed after 40s
+--- template (karmada-apiserver) 03:13:37
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":0,"currentReplicas":0,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":0,"unschedulableReplicas":0,"updatedReplicas":0}}
+--- ResourceBinding s1-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+{"type":"Scheduled","status":"False","reason":"Unschedulable","message":"failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+{"cluster":"k014-m1","applied":true,"health":"Healthy","appliedMessage":"","status":{"currentRevision":"556fb6bd55","desiredReplicas":0,"generation":2,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":2,"readyReplicas":0,"resourceTemplateGeneration":1,"updateRevision":"556fb6bd55"}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"currentRevision":"556fb6bd55","desiredReplicas":0,"generation":2,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":2,"readyReplicas":0,"resourceTemplateGeneration":1,"updateRevision":"556fb6bd55"}}
+--- member k014-m1
+{"specReplicas":0,"generation":2,"status":{"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":2,"updateRevision":"556fb6bd55"}}
+--- member k014-m2
+{"specReplicas":0,"generation":2,"status":{"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":2,"updateRevision":"556fb6bd55"}}
+--- scheduler log for s1
+{"ts":1795835577598.1907,"caller":"queue/scheduling_queue.go:336","msg":"Binding moved to an internal scheduling queue","v":4,"binding":"default/s1-modelserving","queue":"Unschedulable"}
+{"ts":1795835577598.5361,"caller":"scheduler/event_handler.go:204","msg":"Ignore update event of resourceBinding default/s1-modelserving as specification no change","v":4}
+{"ts":1795835577620.1443,"caller":"scheduler/event_handler.go:204","msg":"Ignore update event of resourceBinding default/s1-modelserving as specification no change","v":4}
+{"ts":1795835577628.2922,"caller":"scheduler/event_handler.go:204","msg":"Ignore update event of resourceBinding default/s1-modelserving as specification no change","v":4}
+{"ts":1795835583031.45,"caller":"scheduler/event_handler.go:204","msg":"Ignore update event of resourceBinding default/s1-modelserving as specification no change","v":4}
+{"ts":1795835583041.5552,"caller":"scheduler/event_handler.go:204","msg":"Ignore update event of resourceBinding default/s1-modelserving as specification no change","v":4}

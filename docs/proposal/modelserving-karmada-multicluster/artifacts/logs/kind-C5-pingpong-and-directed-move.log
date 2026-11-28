@@ -1,0 +1,118 @@
+# C5 (hand-back) and C5b (directed move)
+# ModelServing s4: 6 groups x (2 Pods x 1 GPU), nodeSelector k014/pool=big (invisible to the estimators)
+# k014-m1: real capacity 1 group, estimate 2; k014-m2 and k014-m3: 4 groups each
+# step 1: Divided/Aggregated on k014-m1,k014-m2
+modelserving.workload.serving.volcano.sh/s4 created
+propagationpolicy.policy.karmada.io/s4 created
+{"ts":1795836568889.0237,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 2 []} {k014-m2 4 []}]","v":4}
+--- template (karmada-apiserver) 03:30:08
+{"specReplicas":6,"generation":1,"status":{"availableReplicas":5,"currentReplicas":6,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s4,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":6,"unschedulableReplicas":1,"unschedulableSince":"2
+--- ResourceBinding s4-modelserving
+{"replicas":6,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"2"}},"components":0,"clusters":[{"name":"k014-m1","replicas":2},{"name":"k014-m2","replicas":4}]}
+--- member k014-m1
+{"specReplicas":2,"generation":1,"status":{"availableReplicas":1,"currentReplicas":2,"currentRevision":"74744ddf6f","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s4,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":2,"unschedulableRepl
+  group s4-0: Runningx2
+  group s4-1: Unschedulablex2
+--- member k014-m2
+{"specReplicas":4,"generation":1,"status":{"availableReplicas":4,"currentReplicas":4,"currentRevision":"74744ddf6f","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s4,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":4,"updateRevision":"
+  group s4-0: Runningx2
+  group s4-1: Runningx2
+  group s4-2: Runningx2
+  group s4-3: Runningx2
+
+# step 2: add k014-m3 to the policy
+propagationpolicy.policy.karmada.io/s4 patched
+{"replicas":6,"clusters":[{"name":"k014-m1","replicas":2},{"name":"k014-m2","replicas":4}]}
+
+# step 3 (simulated karmada-descheduler): k014-m1 has spec 2, ready 1, unschedulable 1 -> lower it to 1
+Running group s4-0 in k014-m1, Pod UIDs before: c4f45f14-b907-4748-851b-bebd8df85a04 d5dc2288-e68b-4748-9afa-5fc96fb750da 
++ kk patch rb s4-modelserving ... /spec/clusters/0 (k014-m1) replicas 2 -> 1   at 03:30:46
+resourcebinding.work.karmada.io/s4-modelserving patched
+## +5s binding
+{"replicas":6,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":4},{"name":"k014-m3","replicas":1}]}
+## scheduler log
+{"ts":1795836646321.0344,"caller":"scheduler/scheduler.go:430","msg":"Reschedule ResourceBinding(default/s4-modelserving) as replicas scaled down or scaled up","v":0}
+{"ts":1795836646321.2012,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m2 0 []} {k014-m3 4 []} {k014-m1 0 []}]","v":4}
+{"ts":1795836646329.728,"caller":"record/event.go:395","msg":"Event occurred","v":0,"object":{"name":"s4-modelserving","namespace":"default"},"fieldPath":"","kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Normal","reason":"ScheduleBindingSucceed","message":"Binding has been scheduled successfully. Result: {k014-m1:1, k014-m2:4, k014-m3:1}"}
+## +35s members
+--- k014-m1: {"specReplicas":1,"available":1,"unschedulable":null,"since":null}
+  group s4-0: Runningx2
+--- k014-m2: {"specReplicas":4,"available":4,"unschedulable":null,"since":null}
+  group s4-0: Runningx2
+  group s4-1: Runningx2
+  group s4-2: Runningx2
+  group s4-3: Runningx2
+--- k014-m3: {"specReplicas":1,"available":1,"unschedulable":null,"since":null}
+  group s4-0: Runningx2
+Running group s4-0 in k014-m1, Pod UIDs after:  c4f45f14-b907-4748-851b-bebd8df85a04 d5dc2288-e68b-4748-9afa-5fc96fb750da 
+
+# result of step 3: no immediate hand-back. The scheduler ran within milliseconds; at that moment the 2 unschedulable Pods (2 GPU)
+# were still counted in Cluster.status.resourceSummary.allocating, so the estimate for k014-m1 was 0 and the replica went to k014-m3.
+# The Running group in k014-m1 kept its Pod UIDs; kthena deleted the unschedulable group.
+
+# step 4: 60s later the stuck Pods are gone and the over-estimate is back
+k014-m1 {"allocatable":"4","allocated":"2","allocating":null}
+k014-m2 {"allocatable":"8","allocated":"8","allocating":null}
+k014-m3 {"allocatable":"8","allocated":"2","allocating":null}
++ kk patch modelserving s4 --type=merge -p '{"spec":{"replicas":7}}'   (scale up by 1 from the control plane) at 03:32:26
+modelserving.workload.serving.volcano.sh/s4 patched
+## scheduler log
+{"ts":1795836746659.1802,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 1 []} {k014-m2 0 []} {k014-m3 3 []}]","v":4}
+{"ts":1795836746666.542,"caller":"record/event.go:395","msg":"Event occurred","v":0,"object":{"name":"s4-modelserving","namespace":"default"},"fieldPath":"","kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Normal","reason":"ScheduleBindingSucceed","message":"Binding has been scheduled successfully. Result: {k014-m3:2, k014-m1:1, k014-m2:4}"}
+## +33s
+{"replicas":7,"clusters":[{"name":"k014-m3","replicas":2},{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":4}]}
+--- k014-m1: {"specReplicas":1,"available":1,"unschedulable":null,"since":null}
+--- k014-m3: {"specReplicas":2,"available":2,"unschedulable":null,"since":null}
+k014-m1 {"allocated":"2","allocating":null}
+
+# result of step 4: with spare capacity elsewhere (k014-m3 estimate 3 > k014-m1 estimate 1) Aggregated chose k014-m3.
+
+# step 5: no spare capacity anywhere. Scale the template to 10: k014-m2 and k014-m3 fill up (4 + 4), k014-m1 is over-placed again
+modelserving.workload.serving.volcano.sh/s4 patched
+{"replicas":10,"clusters":[{"name":"k014-m1","replicas":2},{"name":"k014-m3","replicas":4},{"name":"k014-m2","replicas":4}]}
+k014-m1: {"specReplicas":2,"available":1,"unschedulable":1,"since":"2026-11-28T03:33:18Z"}
+
+# step 6 (simulated karmada-descheduler): lower k014-m1 from 2 to 1 at 03:33:58, then watch for 100s
+resourcebinding.work.karmada.io/s4-modelserving patched
+t+5s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+t+20s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+t+40s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+t+60s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+t+80s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+t+100s clusters=["k014-m1:1","k014-m3:4","k014-m2:4"] scheduled=False failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enoug m1(allocated/allocating)=2/null m1.unschedulable=
+## scheduler decisions during the window
+{"ts":1795836838337.521,"msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 0 []}]","v":4}
+{"ts":1795836838338.4124,"msg":"Failed scheduling ResourceBinding(default/s4-modelserving): failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+
+# step 6 continued: the scheduler keeps a failed binding in its unschedulable queue for up to 5 minutes (DefaultBindingMaxInUnschedulableBindingsDuration, flushed every 30s)
+03:39:50 clusters=["k014-m1:2","k014-m2:4","k014-m3:4"] scheduled=True Success m1={"specReplicas":2,"available":1,"unschedulable":1,"since":"2026-11-28T03:39:04Z"}
+## scheduler decisions since the reduction at 03:33:58
+{"ts":1795836798118.114,"msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 1 []} {k014-m2 0 []} {k014-m3 2 []}]","v":4}
+{"ts":1795836798126.8408,"msg":"Event occurred","v":0,"kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Normal","reason":"ScheduleBindingSucceed","message":"Binding has been scheduled successfully. Result: {k014-m1:2, k014-m3:4, k014-m2:4}"}
+{"ts":1795836838337.521,"msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 0 []}]","v":4}
+{"ts":1795836838338.4124,"msg":"Failed scheduling ResourceBinding(default/s4-modelserving): failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+{"ts":1795837144661.0928,"msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s4): [{k014-m1 1 []} {k014-m2 0 []} {k014-m3 0 []}]","v":4}
+{"ts":1795837144674.8499,"msg":"Event occurred","v":0,"kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Normal","reason":"ScheduleBindingSucceed","message":"Binding has been scheduled successfully. Result: {k014-m1:2, k014-m2:4, k014-m3:4}"}
+
+# result of step 6: with no spare capacity anywhere, the reduced replica was assigned to no cluster for 5m06s, then the scheduler
+# retried, estimated k014-m1 = 1 again and put it back; unschedulableSince restarted at 03:39:04.
+
+# C5b: directed move (lower one cluster and raise another in the same update, sum unchanged)
+# make room first: scale the template from 10 to 8
+modelserving.workload.serving.volcano.sh/s4 patched
+after scale-down: ["k014-m2:4","k014-m3:4"]
+  k014-m1: 
+  k014-m2: {"specReplicas":4,"available":4,"unschedulable":null}
+  k014-m3: {"specReplicas":4,"available":4,"unschedulable":null}
+# note: the scale-down from 10 to 8 emptied k014-m1 completely, including its Running group (cross-cluster scale-down does not look at readiness).
+# mechanics test of a directed move: k014-m2 4 -> 3 and add k014-m1 with 1, in one update (k014-m1 really has room for 1 group)
++ kk patch rb s4-modelserving --type=json -p '[{replace /spec/clusters/0/replicas 3},{add /spec/clusters/- {name:k014-m1,replicas:1}}]'  at 03:40:55
+resourcebinding.work.karmada.io/s4-modelserving patched
+## scheduler log
+{"ts":1795837255936.4617,"msg":"Don't need to schedule ResourceBinding(default/s4-modelserving)","v":3}
+## +36s
+binding: ["k014-m2:3","k014-m3:4","k014-m1:1"] ["Scheduled=True","FullyApplied=True"]
+  k014-m1: {"specReplicas":1,"available":1,"unschedulable":null}
+  k014-m2: {"specReplicas":3,"available":3,"unschedulable":null}
+  k014-m3: {"specReplicas":4,"available":4,"unschedulable":null}
+template: {"specReplicas":8,"replicas":8,"available":8,"unschedulable":0,"observedGeneration":4,"generation":4}

@@ -1,0 +1,22 @@
+# G-0: option G with the default Karmada resource models (9 grades, cpu+memory); gate MultiplePodTemplatesScheduling on; scheduler-estimator for all members
+# unit u1 = shape s1 (4 Pods x 1 GPU); policy: k014-m1,k014-m2,k014-m3, spread constraint cluster min=max=1
+resourceinterpretercustomization.config.karmada.io/declarative-configuration-modelserving-unit created
+propagationpolicy.policy.karmada.io/units-demo created
+modelserving.workload.serving.volcano.sh/u1 created
+{"replicas":null,"replicaRequirements":null,"components":["infer-entry x1 {\"nvidia.com/gpu\":\"1\"}","infer-worker x3 {\"nvidia.com/gpu\":\"1\"}"],"clusters":[{"components":[{"name":"infer-entry","replicas":1},{"name":"infer-worker","replicas":3}],"name":"k014-m1"}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+## scheduler log
+u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+
+## what happened: the policy had no replicaScheduling (default Duplicated). The scheduler computed the estimates
+{"ts":1795845924098.0042,"msg":"Target cluster calculated by estimators (available cluster && maxAvailableReplicas): [{k014-m3 0 []} {k014-m1 0 []} {k014-m2 0 []}]","v":4}
+## (all 0: the default resource models have no GPU dimension) and then ignored them: shouldIgnoreAvailableResource() is true for Duplicated,
+## so the first cluster in order was taken. u1 runs in k014-m1 only because it happened to fit.
+
+# G-0b: same, but the policy now says replicaSchedulingType Divided / Aggregated (capacity-aware selection)
+propagationpolicy.policy.karmada.io/units-demo configured
+modelserving.workload.serving.volcano.sh/u1 created
+u1 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+## scheduler log
+{"ts":1795846036559.6008,"msg":"Failed scheduling ResourceBinding(default/u1-modelserving): failed to select clusters: no enough resource when selecting 1 clusters"}

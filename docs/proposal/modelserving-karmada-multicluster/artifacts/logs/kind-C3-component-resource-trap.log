@@ -1,0 +1,27 @@
+# C3: componentResource + replicaRevision with MultiplePodTemplatesScheduling enabled
+## control first: gate off (default), customization v1 (no componentResource); template c3 replicas 2, static weights 1:1
+modelserving.workload.serving.volcano.sh/c3 created
+propagationpolicy.policy.karmada.io/c3 created
+{"replicas":2,"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":1}]}
+  k014-m1 member spec.replicas=1 pods=2
+  k014-m2 member spec.replicas=1 pods=2
+
+## enable the gate and add componentResource
+karmada-scheduler: --feature-gates=MultiplePodTemplatesScheduling=true
+karmada-controller-manager: --feature-gates=MultiplePodTemplatesScheduling=true
+karmada-webhook: --feature-gates=MultiplePodTemplatesScheduling=true
++ kk patch resourceinterpretercustomization declarative-configuration-modelserving --type=merge --patch-file kind/manifests/component-resource-patch.yaml
+resourceinterpretercustomization.config.karmada.io/declarative-configuration-modelserving patched
++ kk annotate modelserving c3 k014/touch=1   (any template update re-runs the detector)
+{"replicas":null,"replicaRequirements":null,"components":["infer-entry x1","infer-worker x1"],"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+  k014-m1 member spec.replicas=0 pods=0
+  k014-m2 member spec.replicas=0 pods=0
+template: {"specReplicas":2,"statusReplicas":0,"available":0}
+
+## restore: default feature gates, customization v1
+resourceinterpretercustomization.config.karmada.io "declarative-configuration-modelserving" deleted
+karmada-scheduler: default feature gates
+karmada-controller-manager: default feature gates
+karmada-webhook: default feature gates

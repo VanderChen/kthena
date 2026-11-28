@@ -1,0 +1,20 @@
+# C2a: default Karmada configuration (default resource models: 9 grades, cpu+memory only; scheduler-estimator deployed for every member)
+# control: Deployment gpu-control, 3 replicas x 1 GPU, Divided/Aggregated on k014-m1 (4 free GPU), k014-m2 (8 free GPU)
+## free GPUs as seen by Karmada
+k014-m1 allocatable=4 allocated= allocatableModelings=0:0 1:0 2:0 3:0 4:3 5:0 6:0 7:0 8:0 
+k014-m2 allocatable=8 allocated= allocatableModelings=0:0 1:0 2:0 3:0 4:1 5:0 6:0 7:0 8:0 
+## Deployment gpu-control binding
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"1"}},"clusters":null}
+{"type":"Scheduled","status":"False","reason":"Unschedulable","message":"failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+## ModelServing s1 binding (state left by C10)
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+{"type":"Scheduled","status":"False","reason":"Unschedulable","message":"failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+## scheduler log: estimator results
+{"ts":1795835644214.6006,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(apps/v1, kind=Deployment, default/gpu-control): [{k014-m1 0 []} {k014-m2 0 []}]","v":4}
+{"ts":1795835644215.4248,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator scheduler-estimator for workload(apps/v1, kind=Deployment, default/gpu-control): [{k014-m1 4 []} {k014-m2 8 []}]","v":4}
+{"ts":1795835644215.5737,"caller":"scheduler/scheduler.go:605","msg":"Failed scheduling ResourceBinding(default/gpu-control-deployment): failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+{"ts":1795835644215.675,"caller":"record/event.go:395","msg":"Event occurred","v":0,"object":{"name":"gpu-control-deployment","namespace":"default"},"fieldPath":"","kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Warning","reason":"ScheduleBindingFailed","message":"failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+{"ts":1795835644215.712,"caller":"record/event.go:395","msg":"Event occurred","v":0,"object":{"name":"gpu-control","namespace":"default"},"fieldPath":"","kind":"Deployment","apiVersion":"apps/v1","type":"Warning","reason":"ScheduleBindingFailed","message":"failed to assign replicas: failed to scale up: Clusters available replicas 0 are not enough to schedule."}
+## scheduler log: general estimator lines
+{"ts":1795835644214.5513,"caller":"client/general.go:92","msg":"cluster k014-m1 has max available replicas: 0 according to cluster resource models","v":0}
+{"ts":1795835644214.5854,"caller":"client/general.go:92","msg":"cluster k014-m2 has max available replicas: 0 according to cluster resource models","v":0}

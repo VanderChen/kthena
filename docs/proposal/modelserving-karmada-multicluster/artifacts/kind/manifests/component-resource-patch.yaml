@@ -1,0 +1,26 @@
+# C3 only: what happens if someone adds componentResource to the ModelServing customization.
+# Applied with: kk patch resourceinterpretercustomization declarative-configuration-modelserving --type=merge --patch-file <this file>
+spec:
+  customizations:
+    componentResource:
+      luaScript: |
+        local kube = require("kube")
+        function GetComponents(obj)
+          local components = {}
+          for _, role in ipairs(obj.spec.template.roles) do
+            local n = role.replicas or 1
+            table.insert(components, {
+              name = role.name .. "-entry",
+              replicas = n,
+              replicaRequirements = kube.accuratePodRequirements(role.entryTemplate)
+            })
+            if (role.workerReplicas or 0) > 0 and role.workerTemplate ~= nil then
+              table.insert(components, {
+                name = role.name .. "-worker",
+                replicas = n * role.workerReplicas,
+                replicaRequirements = kube.accuratePodRequirements(role.workerTemplate)
+              })
+            end
+          end
+          return components
+        end

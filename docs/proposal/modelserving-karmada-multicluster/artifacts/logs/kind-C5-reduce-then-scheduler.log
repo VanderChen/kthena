@@ -1,0 +1,62 @@
+# C5: what the scheduler does after a descheduler-style reduction
+# ModelServing s3: 3 groups x (4 Pods x 1 GPU) with a nodeSelector only k014-m2/k014-m3 satisfy (invisible to the estimators)
+# step 1: PropagationPolicy Divided/Aggregated on k014-m1,k014-m2
+modelserving.workload.serving.volcano.sh/s3 created
+propagationpolicy.policy.karmada.io/s3 created
+{"ts":1795836399722.3655,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s3): [{k014-m1 1 []} {k014-m2 2 []}]","v":4}
+--- template (karmada-apiserver) 03:27:19
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":2,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:26:39Z","updatedReplicas":3}}
+--- ResourceBinding s3-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":2}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+{"cluster":"k014-m1","applied":true,"health":"Unhealthy","appliedMessage":"","status":{"currentReplicas":1,"currentRevision":"7c9745f7b7","desiredReplicas":1,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"readyReplicas":0,"replicas":1,"resourceTemplateGeneration":1,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:26:39Z","updateRevision":"7c9745f7b7","updatedReplicas":1}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"7c9745f7b7","desiredReplicas":2,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"readyReplicas":2,"replicas":2,"resourceTemplateGeneration":1,"updateRevision":"7c9745f7b7","updatedReplicas":2}}
+--- member k014-m1
+{"specReplicas":1,"generation":1,"status":{"currentReplicas":1,"currentRevision":"7c9745f7b7","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":1,"unschedulableReplicas":1,"unschedulableSince":"2026-11-28T03:26:39Z","updateRevision":"7c9745f7b7","updatedReplicas":1}}
+  group s3-0: Unschedulablex4
+--- member k014-m2
+{"specReplicas":2,"generation":1,"status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"7c9745f7b7","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":2,"updateRevision":"7c9745f7b7","updatedReplicas":2}}
+  group s3-0: Runningx4
+  group s3-1: Runningx4
+
+# step 2: add k014-m3 (8 free GPU, satisfies the nodeSelector) to the policy
++ kk patch pp s3 --type=merge -p '{"spec":{"placement":{"clusterAffinity":{"clusterNames":["k014-m1","k014-m2","k014-m3"]}}}}'
+propagationpolicy.policy.karmada.io/s3 patched
+{"replicas":3,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":2}]}
+k014-m1 free-gpu-estimate: allocatable=4 allocated=
+k014-m2 free-gpu-estimate: allocatable=8 allocated=8
+k014-m3 free-gpu-estimate: allocatable=8 allocated=
+
+# step 3 (simulated karmada-descheduler): lower k014-m1 from 1 to 0 in the binding, nothing else
++ kk patch rb s3-modelserving --type=json -p '[{"op":"test","path":"/spec/clusters/0/name","value":"k014-m1"},{"op":"replace","path":"/spec/clusters/0/replicas","value":0}]'   at 03:27:54
+resourcebinding.work.karmada.io/s3-modelserving patched
+## +6s binding
+{"replicas":3,"clusters":[{"name":"k014-m2","replicas":2},{"name":"k014-m3","replicas":1}]}
+## scheduler log
+{"ts":1795836474502.364,"caller":"scheduler/scheduler.go:716","msg":"Patch schedule to ResourceBinding(default/s3-modelserving) succeed","v":4}
+{"ts":1795836474502.4023,"caller":"scheduler/scheduler.go:615","msg":"End scheduling ResourceBinding with ClusterAffinity","v":4,"ResourceBinding":{"name":"s3-modelserving","namespace":"default"}}
+{"ts":1795836474502.414,"caller":"scheduler/scheduler.go:1013","msg":"Begin to patch status condition to ResourceBinding(default/s3-modelserving)","v":4}
+{"ts":1795836474502.5125,"caller":"record/event.go:395","msg":"Event occurred","v":0,"object":{"name":"s3-modelserving","namespace":"default"},"fieldPath":"","kind":"ResourceBinding","apiVersion":"work.karmada.io/v1alpha2","type":"Normal","reason":"ScheduleBindingSucceed","message":"Binding has been scheduled successfully. Result: {k014-m2:2, k014-m3:1}"}
+{"ts":1795836474502.6707,"caller":"queue/scheduling_queue.go:373","msg":"Binding moved to an internal scheduling queue","v":4,"binding":"default/s3-modelserving","queue":"Active"}
+{"ts":1795836474506.7349,"caller":"scheduler/scheduler.go:1058","msg":"Patch schedule status to ResourceBinding(default/s3-modelserving) succeed","v":4}
+{"ts":1795836474506.7983,"caller":"scheduler/scheduler.go:458","msg":"Don't need to schedule ResourceBinding(default/s3-modelserving)","v":3}
+{"ts":1795836474510.7869,"caller":"scheduler/scheduler.go:1058","msg":"Patch schedule status to ResourceBinding(default/s3-modelserving) succeed","v":4}
+## +36s
+--- template (karmada-apiserver) 03:28:30
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":3,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGenera
+--- ResourceBinding s3-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m2","replicas":2},{"name":"k014-m3","replicas":1}]}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"7c9745f7b7","desiredReplicas":2,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.vo
+{"cluster":"k014-m3","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":1,"currentReplicas":1,"currentRevision":"7c9745f7b7","desiredReplicas":1,"generation":1,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.vo
+--- member k014-m1
+--- member k014-m2
+{"specReplicas":2,"generation":1,"status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"7c9745f7b7","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano
+  group s3-0: Runningx4
+  group s3-1: Runningx4
+--- member k014-m3
+{"specReplicas":1,"generation":1,"status":{"availableReplicas":1,"currentReplicas":1,"currentRevision":"7c9745f7b7","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s3,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano
+  group s3-0: Runningx4
+
+# result of step 3: k014-m1 dropped to 0, was removed from the binding (its ModelServing was deleted), and the replica went to k014-m3.
+# A cluster reduced to 0 is no longer treated as 'previously scheduled'. The hand-back happens when the reduced cluster keeps some replicas: see kind-C5-pingpong-and-directed-move.log

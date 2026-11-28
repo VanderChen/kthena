@@ -1,0 +1,33 @@
+# S2: one ServingGroup = entry 3 GPU + 1 worker 1 GPU. Summed request: 4 GPU.
+# Real capacity: k014-m1 (2 nodes x 2 GPU) = 0 groups (no node has 3 GPU), k014-m2 / k014-m3 = 2 groups.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: s2
+  namespace: default
+spec:
+  schedulerName: default-scheduler
+  replicas: 3
+  template:
+    roles:
+      - name: infer
+        replicas: 1
+        entryTemplate:
+          spec:
+            terminationGracePeriodSeconds: 0
+            containers:
+              - name: main
+                image: registry.k8s.io/pause:3.10
+                resources:
+                  limits:
+                    nvidia.com/gpu: 3
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            terminationGracePeriodSeconds: 0
+            containers:
+              - name: main
+                image: registry.k8s.io/pause:3.10
+                resources:
+                  limits:
+                    nvidia.com/gpu: 1

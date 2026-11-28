@@ -1,0 +1,32 @@
+# C3: CPU-only ModelServing with two Pod templates (entry + worker), 2 groups.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: c3
+  namespace: default
+spec:
+  schedulerName: default-scheduler
+  replicas: 2
+  template:
+    roles:
+      - name: infer
+        replicas: 1
+        entryTemplate:
+          spec:
+            terminationGracePeriodSeconds: 0
+            containers:
+              - name: main
+                image: registry.k8s.io/pause:3.10
+                resources:
+                  requests:
+                    cpu: 100m
+        workerReplicas: 1
+        workerTemplate:
+          spec:
+            terminationGracePeriodSeconds: 0
+            containers:
+              - name: main
+                image: registry.k8s.io/pause:3.10
+                resources:
+                  requests:
+                    cpu: 100m

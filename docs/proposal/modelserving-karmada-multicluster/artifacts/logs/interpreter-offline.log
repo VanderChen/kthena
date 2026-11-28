@@ -1,0 +1,194 @@
+
+### --check
+-----------------------------------
+SOURCE: declarative-configuration-modelserving
+TARGET: workload.serving.volcano.sh/v1alpha1 ModelServing   
+RULERS:
+    Retain:                                                 PASS
+    InterpretReplica:                                       PASS
+    InterpretComponent:                                     UNSET
+    ReviseReplica:                                          PASS
+    InterpretStatus:                                        PASS
+    AggregateStatus:                                        PASS
+    InterpretHealth:                                        PASS
+    InterpretDependency:                                    PASS
+(exit 0)
+
+### --operation InterpretReplica --observed-file testdata/observed.yaml
+---
+# [1/2] replica:
+5
+---
+# [2/2] requires:
+resourceRequest:
+  cpu: "17"
+  memory: 144Gi
+  nvidia.com/gpu: "29"
+(exit 0)
+
+### --operation InterpretReplica --observed-file testdata/observed-new.yaml
+---
+# [1/2] replica:
+2
+---
+# [2/2] requires:
+null
+(exit 0)
+
+### --operation ReviseReplica --observed-file testdata/desired-retain.yaml --desired-replica 3
+---
+# [1/1] revised:
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  labels:
+    resourcetemplate.karmada.io/retain-replicas: "true"
+  name: deepseek
+  namespace: llm
+spec:
+  replicas: 3
+  template:
+    roles:
+    - entryTemplate:
+        spec:
+          containers:
+          - image: vllm:test
+            name: prefill
+          securityContext: {}
+          volumes:
+          - emptyDir: {}
+            name: shm
+      name: prefill
+      replicas: 1
+      workerReplicas: 0
+    - entryTemplate:
+        spec:
+          containers:
+          - image: vllm:test
+            name: decode
+      name: decode
+      replicas: 2
+      workerReplicas: 0
+(exit 0)
+
+### --operation Retain --desired-file testdata/desired-retain.yaml --observed-file testdata/observed-autoscaled.yaml
+---
+# [1/1] retained:
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  labels:
+    resourcetemplate.karmada.io/retain-replicas: "true"
+  name: deepseek
+  namespace: llm
+spec:
+  replicas: 9
+  template:
+    roles:
+    - entryTemplate:
+        spec:
+          containers:
+          - image: vllm:test
+            name: prefill
+          securityContext: {}
+          volumes:
+          - emptyDir: {}
+            name: shm
+      name: prefill
+      replicas: 1
+      workerReplicas: 0
+    - entryTemplate:
+        spec:
+          containers:
+          - image: vllm:test
+            name: decode
+      name: decode
+      replicas: 4
+      workerReplicas: 0
+(exit 0)
+
+### --operation InterpretStatus --observed-file testdata/observed.yaml
+---
+# [1/1] status:
+availableReplicas: 3
+conditions:
+- lastTransitionTime: "2026-11-20T06:40:00Z"
+  message: 2 ServingGroups are not ready
+  reason: Progressing
+  status: "True"
+  type: Progressing
+currentReplicas: 5
+desiredReplicas: 5
+generation: 4
+labelSelector: modelserving.volcano.sh/name=deepseek
+observedGeneration: 4
+readyReplicas: 3
+replicas: 5
+resourceTemplateGeneration: 7
+unschedulableReplicas: 2
+unschedulableSince: "2026-11-20T06:40:00Z"
+updatedReplicas: 5
+(exit 0)
+
+### --operation InterpretStatus --observed-file testdata/observed-new.yaml
+---
+# [1/1] status:
+desiredReplicas: 2
+generation: 1
+readyReplicas: 0
+(exit 0)
+
+### --operation InterpretHealth --observed-file testdata/observed.yaml
+---
+# [1/1] healthy:
+false
+(exit 0)
+
+### --operation InterpretHealth --observed-file testdata/observed-new.yaml
+---
+# [1/1] healthy:
+false
+(exit 0)
+
+### --operation InterpretDependency --observed-file testdata/observed.yaml
+---
+# [1/1] dependencies:
+- apiVersion: v1
+  kind: ConfigMap
+  name: engine-config
+  namespace: llm
+- apiVersion: v1
+  kind: PersistentVolumeClaim
+  name: model-cache
+  namespace: llm
+- apiVersion: v1
+  kind: Secret
+  name: hf-token
+  namespace: llm
+- apiVersion: v1
+  kind: ServiceAccount
+  name: model-reader
+  namespace: llm
+(exit 0)
+
+### --operation AggregateStatus --observed-file testdata/template.yaml --status-file testdata/status-items.yaml
+---
+# [1/1] aggregatedStatus:
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  generation: 7
+  name: deepseek
+  namespace: llm
+spec:
+  replicas: 10
+status:
+  availableReplicas: 7
+  currentReplicas: 10
+  labelSelector: modelserving.volcano.sh/name=deepseek
+  observedGeneration: 6
+  replicas: 10
+  unschedulableReplicas: 3
+  unschedulableSince: "2026-11-20T06:12:30Z"
+  updatedReplicas: 10
+(exit 0)

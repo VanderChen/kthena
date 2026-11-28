@@ -1,0 +1,31 @@
+# Units with Karmada application failover: a unit that stays Unhealthy for tolerationSeconds is evicted
+# from its cluster and rescheduled as a whole. With the unit interpreter, Unhealthy means "unschedulable".
+apiVersion: policy.karmada.io/v1alpha1
+kind: PropagationPolicy
+metadata:
+  name: units-SET
+  namespace: default
+spec:
+  resourceSelectors:
+    - apiVersion: workload.serving.volcano.sh/v1alpha1
+      kind: ModelServing
+      labelSelector:
+        matchLabels:
+          k014/unit-of: SET
+  propagateDeps: true   # required by the Karmada webhook when application failover is set
+  failover:
+    application:
+      decisionConditions:
+        tolerationSeconds: 30
+      purgeMode: Gracefully
+      gracePeriodSeconds: 60
+  placement:
+    clusterAffinity:
+      clusterNames: [CLUSTERS]
+    spreadConstraints:
+      - spreadByField: cluster
+        minGroups: 1
+        maxGroups: 1
+    replicaScheduling:
+      replicaSchedulingType: Divided
+      replicaDivisionPreference: Aggregated

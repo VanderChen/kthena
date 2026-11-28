@@ -1,0 +1,48 @@
+# C2b: clear Cluster.spec.resourceModels on the member clusters
++ kk patch cluster k014-m1 --type=json -p '[{"op":"remove","path":"/spec/resourceModels"}]'
+cluster.cluster.karmada.io/k014-m1 patched
++ kk patch cluster k014-m2 --type=json -p '[{"op":"remove","path":"/spec/resourceModels"}]'
+cluster.cluster.karmada.io/k014-m2 patched
++ kk patch cluster k014-m3 --type=json -p '[{"op":"remove","path":"/spec/resourceModels"}]'
+cluster.cluster.karmada.io/k014-m3 patched
+## after 45s
+k014-m1 resourceModels=0 bytes; allocatableModelings=0 bytes
+k014-m2 resourceModels=0 bytes; allocatableModelings=0 bytes
+k014-m3 resourceModels=0 bytes; allocatableModelings=0 bytes
+## Deployment gpu-control (3 x 1 GPU)
+{"replicas":3,"clusters":[{"name":"k014-m1","replicas":3}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+## ModelServing s1 (3 groups x 4 GPU summed; scheduler-estimator still deployed for all members)
+{"replicas":3,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+{"type":"Scheduled","status":"False","reason":"Unschedulable","message":"failed to assign replicas: failed to scale up: Clusters available replicas 2 are not enough to schedule."}
+## scheduler log: estimator results
+{"ts":1795835688317.4744,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 1 []} {k014-m2 0 []}]","v":4}
+{"ts":1795835688318.2402,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator scheduler-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 0 []} {k014-m2 2 []}]","v":4}
+{"ts":1795835688377.6309,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 1 []} {k014-m2 2 []}]","v":4}
+{"ts":1795835688378.255,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator scheduler-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 0 []} {k014-m2 2 []}]","v":4}
+{"ts":1795835688382.9502,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 1 []} {k014-m2 2 []}]","v":4}
+{"ts":1795835688383.5881,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator scheduler-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 0 []} {k014-m2 2 []}]","v":4}
+
+# C2c result above: scheduler-estimator says k014-m1 can host 0 groups (4 GPU do not fit one node) although 1 group (4 Pods x 1 GPU on 2 nodes) fits.
+# next: control Deployment deleted; remove the scheduler-estimator of k014-m1 only
++ kh -n karmada-system scale deploy karmada-scheduler-estimator-k014-m1 --replicas=0
+deployment.apps/karmada-scheduler-estimator-k014-m1 scaled
++ kk annotate modelserving s1 k014/touch=2 --overwrite   (re-queue the binding)
+## scheduler log: estimator results
+{"ts":1795835767138.6743,"caller":"core/util.go:151","msg":"Invoked MaxAvailableReplicas of estimator general-estimator for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/s1): [{k014-m1 1 []} {k014-m2 2 []}]","v":4}
+{"ts":1795835767140.4463,"caller":"core/util.go:148","msg":"Max cluster available replicas error: gRPC request cluster(k014-m1) estimator error when calling MaxAvailableReplicas: rpc error: code = Unavailable desc = connection error: desc = \"transport: Error while dialing: dial tcp <cluster-ip>:10352: connect: connection refused\""}
+--- template (karmada-apiserver) 03:16:57
+{"specReplicas":3,"generation":1,"status":{"availableReplicas":3,"currentReplicas":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":1,"replicas":3,"unschedulableReplicas":0,"updatedReplicas":3}}
+--- ResourceBinding s1-modelserving
+{"replicas":3,"replicaRequirements":{"resourceRequest":{"nvidia.com/gpu":"4"}},"components":0,"clusters":[{"name":"k014-m1","replicas":1},{"name":"k014-m2","replicas":2}]}
+{"type":"Scheduled","status":"True","reason":"Success","message":"Binding has been scheduled successfully."}
+{"type":"FullyApplied","status":"True","reason":"FullyAppliedSuccess","message":"All works have been successfully applied"}
+{"cluster":"k014-m1","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":1,"currentReplicas":1,"currentRevision":"556fb6bd55","desiredReplicas":1,"generation":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":3,"readyReplicas":1,"replicas":1,"resourceTemplateGeneration":1,"updateRevision":"556fb6bd55","updatedReplicas":1}}
+{"cluster":"k014-m2","applied":true,"health":"Healthy","appliedMessage":"","status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"556fb6bd55","desiredReplicas":2,"generation":3,"labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":3,"readyReplicas":2,"replicas":2,"resourceTemplateGeneration":1,"updateRevision":"556fb6bd55","updatedReplicas":2}}
+--- member k014-m1
+{"specReplicas":1,"generation":3,"status":{"availableReplicas":1,"currentReplicas":1,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":3,"replicas":1,"updateRevision":"556fb6bd55","updatedReplicas":1}}
+  group s1-0: Runningx4
+--- member k014-m2
+{"specReplicas":2,"generation":3,"status":{"availableReplicas":2,"currentReplicas":2,"currentRevision":"556fb6bd55","labelSelector":"modelserving.volcano.sh/entry=true,modelserving.volcano.sh/name=s1,modelserving.volcano.sh/role-id=infer-0,modelserving.volcano.sh/role=infer","observedGeneration":3,"replicas":2,"updateRevision":"556fb6bd55","updatedReplicas":2}}
+  group s1-0: Runningx4
+  group s1-1: Runningx4

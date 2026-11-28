@@ -1,0 +1,11 @@
+# Control-plane view (resource template) used as desiredObj for AggregateStatus.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek
+  namespace: llm
+  generation: 7
+spec:
+  replicas: 10
+status:
+  observedGeneration: 6

@@ -1,0 +1,33 @@
+# C10b: same as C10, but with a configuration in which scheduling succeeds (CPU-only Pods, resource models cleared)
+## step 1: no interpreter; template c10 replicas 2; Divided/Aggregated on k014-m1,k014-m2
+customizations installed: 0
+modelserving.workload.serving.volcano.sh/c10 created
+propagationpolicy.policy.karmada.io/c10 created
+{"replicas":null,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
+  k014-m1 member spec.replicas=2 podUIDs=972f3ee7 d6bed6bf de9ce467 e2648a88 
+  k014-m2 member spec.replicas=2 podUIDs=1db3729e 50e38827 8b29b52c 8e7a4aea 
+
+## step 2: install the interpreter (v1), then update the template once
+resourceinterpretercustomization.config.karmada.io/declarative-configuration-modelserving created
+before the template update: binding {"replicas":null,"clusters":[{"name":"k014-m1"},{"name":"k014-m2"}]}
++ kk annotate modelserving c10 k014/touch=1  at 03:45:13.454
+03:45:13.547 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=2 m2.pods=0
+03:45:14.969 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=0 m2.pods=0
+03:45:16.330 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:17.723 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:19.079 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:20.444 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:21.811 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:23.178 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:24.449 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:25.693 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:26.937 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+03:45:28.185 binding=[2,["k014-m1:2"]] m1.spec.replicas=2 m2.spec.replicas= m1.pods=4 m2.pods=0
+## +35s
+  k014-m1 member spec.replicas=2 generation=3 podUIDs=784b0b52 a4ea2f7a d11c872e ed4835cd 
+  k014-m2 member spec.replicas= generation= podUIDs=
+scheduler: Binding has been scheduled successfully. Result: {k014-m1:2}"};
+
+# result: the binding turned into a workload (replicas 2) while spec.clusters still held the two entries without replica counts.
+# k014-m1: spec.replicas went 2 -> 0 -> 2 (generation 1 -> 3); all 4 Pods were deleted and recreated (new UIDs).
+# k014-m2: dropped from the result by Aggregated; its ModelServing and 4 Running Pods were deleted.

@@ -1,0 +1,40 @@
+# G-2 / G-3: shapes that option M misjudged on the fragmented cluster k014-m1 (2 nodes x 2 GPU)
+# start: k014-m2 and k014-m3 are full (u2,u4 / u3,u5); free k014-m1 by deleting u1 and the queued u6
+k014-m1 free GPU: allocatable=4 allocated=
+
+## u7 = shape s2 (entry 3 GPU + worker 1 GPU): no node of k014-m1 has 3 GPU
+    estimates: [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 0 []}]
+u7 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+
+## u8 = shape s3 (4 Pods x 1 GPU, nodeSelector k014/pool=big; k014-m1 nodes do not carry the label)
+    estimates: [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 0 []}]
+u8 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+
+## u9 = shape s1 (4 Pods x 1 GPU, no constraint): fits k014-m1 across its two nodes
+    estimates: [{k014-m1 1 []} {k014-m2 0 []} {k014-m3 0 []}]
+u9 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+
+## queueing: free 4 GPU in k014-m2 by deleting u2 at 06:13:09; u7 and u8 are waiting on the control plane
+t+10s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+30s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+60s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+90s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+120s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+180s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+240s | u7 -> [none] NOT-scheduled(failed to select clusters: no enough resour | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+t+300s | u7 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx2} | u8 -> [none] NOT-scheduled(failed to select clusters: no enough resour
+
+u3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+u4 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+u5 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+u7 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx2}
+u8 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+u9 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+## scheduler decisions for u7/u8 since the deletion
+1795846321884 Failed scheduling ResourceBinding(default/u7-modelserving): failed to select clusters: no enough resource when
+1795846342642 Failed scheduling ResourceBinding(default/u8-modelserving): failed to select clusters: no enough resource when
+1795846668217 Failed scheduling ResourceBinding(default/u8-modelserving): failed to select clusters: no enough resource when
+1795846638223 Binding has been scheduled successfully. Result: {k014-m2:0}
+
+## result: u7 was scheduled 4m09s after the capacity was freed (5m17s after its last failed attempt): the scheduler retries a queued binding
+## from its unschedulable queue on a 5-minute timer, not when capacity appears. u8 keeps waiting: k014-m2 had room for one unit only.

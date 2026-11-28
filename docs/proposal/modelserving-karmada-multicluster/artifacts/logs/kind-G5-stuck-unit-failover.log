@@ -1,0 +1,72 @@
+# G-5: moving a stuck unit with Karmada application failover (tolerationSeconds 30, purgeMode Gracefully, gracePeriodSeconds 60)
+# unit shape aa: 2 Pods x 1 GPU with required pod anti-affinity -> needs 2 nodes. No Karmada estimator can see pod anti-affinity.
+# k014-m2 and k014-m3 have one node (the unit gets stuck there), k014-m1 has two worker nodes (the unit fits).
+# note: the first attempt was rejected by the Karmada webhook: 'application failover is set, propagateDeps must be true'
+
+## (a) another cluster can host the unit
+### step 1: policy allows only k014-m2
+propagationpolicy.policy.karmada.io/units-fo created
+f1 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1}
+### step 2: allow k014-m1 as well, at 06:25:48
+t+10s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx2}
+t+25s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+40s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+55s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+70s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+90s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+120s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+t+150s f1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx2}
+### events on the binding
+2026-11-28T06:25:48Z ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m2:0}
+2026-11-28T06:25:58Z SyncWorkSucceed: Sync work of ResourceBinding(default/f1-modelserving) successful.
+2026-11-28T06:25:58Z SyncScheduleResultToDependenciesSucceed: Sync schedule results to dependencies succeed.
+2026-11-28T06:25:58Z ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m1:0}
+2026-11-28T06:25:58Z EvictWorkloadFromClusterSucceed: Evict from cluster k014-m2 succeed.
+2026-11-28T06:25:59Z AggregateStatusSucceed: Update ResourceBinding(default/f1-modelserving) with AggregatedStatus successfully.
+
+### result (a): 30s after the unit turned Unhealthy the application failover controller evicted it from k014-m2
+### (EvictWorkloadFromClusterSucceed) and the scheduler placed it on k014-m1, where both Pods became Ready.
+
+## (b) no cluster can host the unit: policy allows k014-m2 and k014-m3, both single-node
+created at 06:28:42
+06:28:57 f2 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=8c7a,0a62,
+06:29:12 f2 -> [k014-m3] Scheduled | k014-m3: Unhealthy pods{NotReadyx1 Unschedulablex1} uids=6ca7,3e74,
+06:29:27 f2 -> [k014-m3] Scheduled | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=6ca7,3e74,
+06:29:42 f2 -> [k014-m2] Scheduled evicting-from=[k014-m3] | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=0877,c496,6ca7,3e74,
+06:29:58 f2 -> [k014-m2] Scheduled evicting-from=[k014-m3] | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=0877,c496,6ca7,3e74,
+06:30:13 f2 -> [none] NOT-scheduled(0/3 clusters are available: 1 cluster(s) did not match the placement c) evicting-from=[k014-m3,k014-m2] uids=0877,c496,6ca7,3e74,
+06:30:28 f2 -> [none] NOT-scheduled(0/3 clusters are available: 1 cluster(s) did not match the placement c) evicting-from=[k014-m3,k014-m2] uids=0877,c496,6ca7,3e74,
+06:30:43 f2 -> [k014-m3] Scheduled evicting-from=[k014-m2] | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=0877,c496,a697,c576,
+06:30:59 f2 -> [k014-m3] Scheduled evicting-from=[k014-m2] | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=0877,c496,a697,c576,
+06:31:14 f2 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=5b0f,e538,
+06:31:29 f2 -> [k014-m2] Scheduled | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=5b0f,e538,
+06:31:44 f2 -> [k014-m3] Scheduled evicting-from=[k014-m2] | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=5b0f,e538,8e45,ee0a,
+06:32:00 f2 -> [k014-m3] Scheduled evicting-from=[k014-m2] | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=5b0f,e538,8e45,ee0a,
+06:32:15 f2 -> [none] NOT-scheduled(0/3 clusters are available: 1 cluster(s) did not match the placement c) evicting-from=[k014-m2,k014-m3] uids=5b0f,e538,8e45,ee0a,
+06:32:30 f2 -> [none] NOT-scheduled(0/3 clusters are available: 1 cluster(s) did not match the placement c) evicting-from=[k014-m2,k014-m3] uids=5b0f,e538,8e45,ee0a,
+06:32:45 f2 -> [k014-m2] Scheduled evicting-from=[k014-m3] | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=864a,6006,8e45,ee0a,
+06:33:01 f2 -> [k014-m2] Scheduled evicting-from=[k014-m3] | k014-m2: Unhealthy pods{Readyx1 Unschedulablex1} uids=864a,6006,8e45,ee0a,
+06:33:16 f2 -> [k014-m3] Scheduled evicting-from=[k014-m2] | k014-m3: Unhealthy pods{Readyx1 Unschedulablex1} uids=864a,6006,e609,d099,
+### events on the binding
+2026-11-28T06:32:13Z x4 ScheduleBindingFailed: 0/3 clusters are available: 1 cluster(s) did not match the placement cluster affinity constraint, 2 cluster(s)
+2026-11-28T06:32:43Z x4 ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m2:0}
+2026-11-28T06:32:43Z x3 EvictWorkloadFromClusterSucceed: Evict from cluster k014-m2 succeed.
+2026-11-28T06:33:13Z x3 EvictWorkloadFromClusterSucceed: Evict from cluster k014-m3 succeed.
+2026-11-28T06:33:14Z x4 ScheduleBindingSucceed: Binding has been scheduled successfully. Result: {k014-m3:0}
+### graceful eviction tasks now
+[{"fromCluster":"k014-m2","purgeMode":"Gracefully","reason":"ApplicationFailure","creationTimestamp":"2026-11-28T06:33:14Z"}]
+
+### result (b): the unit bounces between the two clusters about every 30s (6 evictions in 4.5 minutes); in between it is
+### evicted from both and assigned to none. Every move deletes its Pods, including the one that was Running. Application
+### failover does not check whether the target has room.
+
+## (c) a unit that is scheduled but never becomes Ready (stands for a group still loading its model); policy k014-m1,k014-m2,k014-m3 with the same failover settings
+created at 06:33:41
+06:34:01 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+06:34:21 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+06:34:41 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+06:35:02 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+06:35:22 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+06:35:43 l1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{NotReadyx4} available=0 uids=6bc3,d9ed,02fc,f195,
+evictions: 0
+### result (c): Healthy by the narrow definition, not evicted in 2 minutes although no group is available.

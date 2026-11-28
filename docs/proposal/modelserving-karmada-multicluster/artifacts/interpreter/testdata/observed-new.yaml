@@ -1,0 +1,18 @@
+# A member object the kthena controller has not reported on yet: no status at all.
+apiVersion: workload.serving.volcano.sh/v1alpha1
+kind: ModelServing
+metadata:
+  name: deepseek
+  namespace: llm
+  generation: 1
+spec:
+  replicas: 2
+  template:
+    roles:
+      - name: prefill
+        entryTemplate:
+          spec:
+            containers:
+              - name: prefill
+                image: vllm:test
+        workerReplicas: 0

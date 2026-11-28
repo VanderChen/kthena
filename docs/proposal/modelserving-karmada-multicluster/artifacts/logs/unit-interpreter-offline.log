@@ -1,0 +1,71 @@
+# unit customization, offline (karmadactl, built from the task baseline)
+-----------------------------------
+SOURCE: declarative-configuration-modelserving-unit
+TARGET: workload.serving.volcano.sh/v1alpha1 ModelServing   
+RULERS:
+    Retain:                                                 UNSET
+    InterpretReplica:                                       UNSET
+    InterpretComponent:                                     PASS
+    ReviseReplica:                                          UNSET
+    InterpretStatus:                                        PASS
+    AggregateStatus:                                        PASS
+    InterpretHealth:                                        PASS
+    InterpretDependency:                                    PASS
+### InterpretComponent shape s1
+---
+# [1/1] components:
+- name: infer-entry
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 1
+- name: infer-worker
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 3
+### InterpretComponent shape s2
+---
+# [1/1] components:
+- name: infer-entry
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "3"
+  replicas: 1
+- name: infer-worker
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 1
+### InterpretComponent shape s3
+---
+# [1/1] components:
+- name: infer-entry
+  replicaRequirements:
+    nodeClaim:
+      nodeSelector:
+        k014/pool: big
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 1
+- name: infer-worker
+  replicaRequirements:
+    nodeClaim:
+      nodeSelector:
+        k014/pool: big
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 3
+### InterpretComponent shape aa
+---
+# [1/1] components:
+- name: infer-entry
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 1
+- name: infer-worker
+  replicaRequirements:
+    resourceRequest:
+      nvidia.com/gpu: "1"
+  replicas: 1

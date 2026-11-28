@@ -1,0 +1,35 @@
+# G-6: is a running unit sticky when one of its roles is resized?
+# policy: Divided/Aggregated, spread constraint cluster min=max=1, no failover. Gates: MultiplePodTemplatesScheduling, SchedulingOvercommitProtection
+## step 1: unit g1 (shape s1: entry + 3 workers, 4 GPU) placed on k014-m1, which it fills completely; then the policy is widened to all three clusters
+g1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4} uids=8d72,9678,a2cb,e070,
+
+## step 2: shrink the unit in place: workerReplicas 3 -> 2 (the unit needs LESS than before); k014-m2 and k014-m3 are empty. at 06:37:19
+    estimates: [{k014-m2 1 []} {k014-m3 2 []} {k014-m1 1 []}]
+    scheduler: Binding has been scheduled successfully. Result: {k014-m2:0}
+g1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx3} uids=4f67,e819,f3e0,
+{"components":["infer-entry x1","infer-worker x2"],"clusters":[{"components":[{"name":"infer-entry","replicas":1},{"name":"infer-worker","replicas":2}],"name":"k014-m2"}]}
+
+## step 3: fill the other clusters, then shrink again (workerReplicas 2 -> 1) so that no other cluster has room
+g1 is now on k014-m2
+g1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx3}
+h1 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+h2 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+h3 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+h4 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+h5 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
+g1 uids before: 4f67,e819,f3e0,
++ patch g1 workerReplicas 2 -> 1 at 06:38:45
+    estimates: [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 2 []}]
+    scheduler: Binding has been scheduled successfully. Result: {k014-m3:0}
+g1 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx2} uids=17d7,5cac,
+{"components":["infer-entry x1","infer-worker x1"],"clusters":[{"components":[{"name":"infer-entry","replicas":1},{"name":"infer-worker","replicas":1}],"name":"k014-m3"}],"scheduled":"True Binding has been scheduled successfully."}
+member k014-m3: g1 workerReplicas=1 (template on the control plane: 1)
+
+## results
+## step 1: g1 was created while the policy allowed only k014-m1 (the only place it could be scheduled; its location was not printed before the change).
+##         After widening the policy to three clusters
+##         (a placement change) the unit was on k014-m2. kind-G7 records the same operation with before and after: a Running unit was moved.
+## step 2: on k014-m2 there was room for one more whole set, so the resized unit stayed (kthena recreated its Pods: new revision).
+## step 3: k014-m2 had 1 free GPU, not enough for another whole set of the resized unit (2 GPU); the scheduler MOVED the unit to k014-m3
+##         although it was shrinking in place. The estimate for a unit's own cluster does not add back what the unit already uses.
+## side observation in step 3: h4 and h5 were left unscheduled although k014-m3 had room for one more unit at that time.

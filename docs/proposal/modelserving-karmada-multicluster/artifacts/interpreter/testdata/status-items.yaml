@@ -1,0 +1,52 @@
+# What ReflectStatus stores per cluster in ResourceBinding.status.aggregatedStatus.
+applied: true
+clusterName: region-a
+health: Unhealthy
+status:
+  replicas: 5
+  currentReplicas: 5
+  updatedReplicas: 5
+  availableReplicas: 3
+  readyReplicas: 3
+  unschedulableReplicas: 2
+  unschedulableSince: "2026-11-20T06:40:00Z"
+  labelSelector: modelserving.volcano.sh/name=deepseek
+  observedGeneration: 4
+  generation: 4
+  resourceTemplateGeneration: 7
+---
+applied: true
+clusterName: region-b
+health: Unhealthy
+status:
+  replicas: 3
+  currentReplicas: 3
+  updatedReplicas: 3
+  availableReplicas: 2
+  readyReplicas: 2
+  unschedulableReplicas: 1
+  unschedulableSince: "2026-11-20T06:12:30Z"
+  labelSelector: modelserving.volcano.sh/name=deepseek
+  observedGeneration: 2
+  generation: 2
+  resourceTemplateGeneration: 7
+---
+# A member running kthena without PR #2079: the unschedulable fields do not exist.
+applied: true
+clusterName: region-c
+health: Healthy
+status:
+  replicas: 2
+  currentReplicas: 2
+  updatedReplicas: 2
+  availableReplicas: 2
+  readyReplicas: 2
+  labelSelector: modelserving.volcano.sh/name=deepseek
+  observedGeneration: 1
+  generation: 1
+  resourceTemplateGeneration: 7
+---
+# A member that rejected the object (for example its validating webhook): no status.
+applied: false
+appliedMessage: 'admission webhook "modelserving.kthena.volcano.sh" denied the request'
+clusterName: region-d

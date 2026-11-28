@@ -1,0 +1,23 @@
+# G-7: one member has no reachable scheduler-estimator (typical for pull mode or a partial rollout)
+# the scheduler-estimator of k014-m1 is scaled to 0; k014-m2 and k014-m3 are filled first
+k1 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+k2 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+k3 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+k4 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+
+## now allow k014-m1 too and create k5 = shape s2 (entry 3 GPU + worker 1 GPU): no node of k014-m1 can host the 3-GPU Pod
+after widening the policy:
+    k1 -> [k014-m2] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster) | k014-m2: Healthy pods{Readyx4}
+    k2 -> [k014-m3] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster) | k014-m3: Healthy pods{Readyx4}
+    k3 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    k4 -> [k014-m3] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster) | k014-m3: Healthy pods{Readyx4}
+    scheduler: Failed to calculate available component set with estimator(scheduler-estimator) for workload(workload.serving.volcano.sh/v1alpha1, kind=ModelServing, default/k5): gRPC request cluster(k014-m1) estimat
+    estimates: [{k014-m1 0 []} {k014-m2 1 []} {k014-m3 0 []}]
+k5 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx2}
+## with the estimator of k014-m1 present (G-2) the same shape was estimated 0 for k014-m1 and left queued.
+
+## results
+## widening the policy on a full fleet rescheduled all four bindings: k3 (Running) was MOVED from k014-m2 to k014-m1; k1, k2, k4 got Scheduled=False
+## ('no enough resource') while their Pods kept running where they were.
+## k5: the scheduler logged an error for the unreachable estimator of k014-m1 and placed the unit on k014-m2, which had 4 free GPU on one node after k3 left.
+## This run does not isolate what the estimate for k014-m1 falls back to: k014-m1 was already full with k3.

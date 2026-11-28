@@ -1,0 +1,55 @@
+# 2026-11-28T03:06:54Z task 014 Kind environment
+## karmada tree
+6d007132ec5112d2eed41b602d4aeeebaf96f4fc
+0
+## clusters
+NAME      MODE   VERSION   READY
+k014-m1   Push   v1.37.0   True
+k014-m2   Push   v1.37.0   True
+k014-m3   Pull   v1.37.0   True
+## node arch / k8s
+amd64 v1.37.0
+## karmada components (host cluster)
+POD                                                    IMAGE                                                   IMAGEID
+etcd-0                                                 registry.k8s.io/etcd:3.7.0-0                            sha256:270fbeb69717150d82de2f31e6d6a93a6a60f8843d63df68cebe33c4b59c5f78
+karmada-aggregated-apiserver-5bd458d5cb-ntjqp          docker.io/karmada/karmada-aggregated-apiserver:latest   docker.io/library/import-2026-11-28@sha256:e9803b93c7d1986a4444d706579bfa3e9d1b09fee8611fa70ddd24f25b3bd6a1
+karmada-aggregated-apiserver-5bd458d5cb-pdc5h          docker.io/karmada/karmada-aggregated-apiserver:latest   docker.io/library/import-2026-11-28@sha256:e9803b93c7d1986a4444d706579bfa3e9d1b09fee8611fa70ddd24f25b3bd6a1
+karmada-apiserver-6d89c58998-rvm5t                     registry.k8s.io/kube-apiserver:v1.37.1                  registry.k8s.io/kube-apiserver@sha256:e190f914a6cc21cab9268485d1ae7282fdeab1315ac64b668aa42d732fd1061d
+karmada-controller-manager-69dbb694b8-2zqg2            docker.io/karmada/karmada-controller-manager:latest     docker.io/library/import-2026-11-28@sha256:feeaac07dec56d9dac9d92ce53a306a36f09a1596bbe64a80ea3283421499a76
+karmada-controller-manager-69dbb694b8-tll5j            docker.io/karmada/karmada-controller-manager:latest     docker.io/library/import-2026-11-28@sha256:feeaac07dec56d9dac9d92ce53a306a36f09a1596bbe64a80ea3283421499a76
+karmada-descheduler-6dc4f8d469-2kbkj                   docker.io/karmada/karmada-descheduler:latest            docker.io/library/import-2026-11-28@sha256:48cea914f3ceb08258d0126855b970687db87db04b98d899b3e08cca678ab879
+karmada-descheduler-6dc4f8d469-shrms                   docker.io/karmada/karmada-descheduler:latest            docker.io/library/import-2026-11-28@sha256:48cea914f3ceb08258d0126855b970687db87db04b98d899b3e08cca678ab879
+karmada-kube-controller-manager-6bfc9878c4-z6rcb       registry.k8s.io/kube-controller-manager:v1.37.1         registry.k8s.io/kube-controller-manager@sha256:d470c1b85aebb466e971c06239cc6a31a4ac337a78600cef80375a79a1be1641
+karmada-metrics-adapter-54ffdb58c-8n5j5                docker.io/karmada/karmada-metrics-adapter:latest        docker.io/library/import-2026-11-28@sha256:bb47e05561da794b7f91c57fc0cde172506ce7ac7fcc10b9b91f033d49d7a675
+karmada-scheduler-64bd56f6db-76594                     docker.io/karmada/karmada-scheduler:latest              docker.io/library/import-2026-11-28@sha256:c2eb96b03a831249d162d14fd9f704dc4eea2ed6852f6a7b51d72988d0b02b6f
+karmada-scheduler-64bd56f6db-wfmhv                     docker.io/karmada/karmada-scheduler:latest              docker.io/library/import-2026-11-28@sha256:c2eb96b03a831249d162d14fd9f704dc4eea2ed6852f6a7b51d72988d0b02b6f
+karmada-scheduler-estimator-k014-m1-7856f9c955-tw5gx   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-scheduler-estimator-k014-m1-7856f9c955-wvsw5   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-scheduler-estimator-k014-m2-766d68f787-v4ckn   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-scheduler-estimator-k014-m2-766d68f787-z6z28   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-scheduler-estimator-k014-m3-779f49799f-8mn69   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-scheduler-estimator-k014-m3-779f49799f-bw6cr   docker.io/karmada/karmada-scheduler-estimator:latest    docker.io/library/import-2026-11-28@sha256:0e5e968caaec76ede930f429f65f13e7adb31afe14a0ec902789ae68057d67c2
+karmada-search-6b4b96884f-865zn                        docker.io/karmada/karmada-search:latest                 docker.io/library/import-2026-11-28@sha256:af15645067ada9bd0308d3ecef2bb71143c39dccf456f4091c3e910221e8f3f7
+karmada-search-6b4b96884f-wxtxd                        docker.io/karmada/karmada-search:latest                 docker.io/library/import-2026-11-28@sha256:af15645067ada9bd0308d3ecef2bb71143c39dccf456f4091c3e910221e8f3f7
+karmada-webhook-f5676dcb5-9xd5h                        docker.io/karmada/karmada-webhook:latest                docker.io/library/import-2026-11-28@sha256:eaa36ed0680252ff60cd107984f9f764d763bf12e211ae5f92aa613b96be56ad
+karmada-webhook-f5676dcb5-msm7q                        docker.io/karmada/karmada-webhook:latest                docker.io/library/import-2026-11-28@sha256:eaa36ed0680252ff60cd107984f9f764d763bf12e211ae5f92aa613b96be56ad
+## karmada version reported
+{"ts":1795835187170.8567,"caller":"app/scheduler.go:155","msg":"karmada-scheduler version: version.Info{GitVersion:\"v1.20.0-beta.0-44-g6d007132e-dirty\", GitCommit:\"6d007132ec5112d2eed41b602d4aeeebaf96f4fc\", GitShortCommit:\"6d007132e\", GitTreeState:\"dirty\", BuildDate:\"2026-11-28T03:03:07Z\",
+## feature gates / flags
+-- karmada-scheduler
+--enable-scheduler-estimator=true
+--scheduler-estimator-ca-file=/etc/karmada/pki/scheduler-estimator-client/ca.crt
+--scheduler-estimator-cert-file=/etc/karmada/pki/scheduler-estimator-client/tls.crt
+--scheduler-estimator-key-file=/etc/karmada/pki/scheduler-estimator-client/tls.key
+--feature-gates=AllAlpha=true,AllBeta=true
+-- karmada-controller-manager
+--feature-gates=AllAlpha=true,AllBeta=true
+--enable-no-execute-taint-eviction=true
+-- karmada-descheduler
+--scheduler-estimator-ca-file=/etc/karmada/pki/scheduler-estimator-client/ca.crt
+--scheduler-estimator-cert-file=/etc/karmada/pki/scheduler-estimator-client/tls.crt
+--scheduler-estimator-key-file=/etc/karmada/pki/scheduler-estimator-client/tls.key
+## default resource models on member clusters (grades / dimensions)
+k014-m1: grades=9 dims=cpu memory
+k014-m2: grades=9 dims=cpu memory
+k014-m3: grades=9 dims=cpu memory

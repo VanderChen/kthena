@@ -1,0 +1,25 @@
+== k014-m1
+Waiting for deployment "kthena-controller-manager" rollout to finish: 0 of 1 updated replicas are available...
+deployment "kthena-controller-manager" successfully rolled out
+NODE                    GPU      TAINTS
+k014-m1-control-plane   <none>   node-role.kubernetes.io/control-plane
+k014-m1-worker          2        <none>
+k014-m1-worker2         2        <none>
+POD                                          IMAGE                                                  IMAGEID
+kthena-controller-manager-6f66d878d6-2pt57   ghcr.io/volcano-sh/kthena-controller-manager:dev-014   docker.io/library/import-2026-11-28@sha256:0b3913b5a9ffda27999f53883e4d3b5276012e41c416dd749f226a2c76fd5feb
+== k014-m2
+Waiting for deployment "kthena-controller-manager" rollout to finish: 0 of 1 updated replicas are available...
+deployment "kthena-controller-manager" successfully rolled out
+NODE                    GPU   TAINTS
+k014-m2-control-plane   8     <none>
+POD                                          IMAGE                                                  IMAGEID
+kthena-controller-manager-6f66d878d6-j4xcb   ghcr.io/volcano-sh/kthena-controller-manager:dev-014   docker.io/library/import-2026-11-28@sha256:0b3913b5a9ffda27999f53883e4d3b5276012e41c416dd749f226a2c76fd5feb
+== k014-m3
+Waiting for deployment "kthena-controller-manager" rollout to finish: 0 of 1 updated replicas are available...
+deployment "kthena-controller-manager" successfully rolled out
+NODE                    GPU   TAINTS
+k014-m3-control-plane   8     <none>
+POD                                          IMAGE                                                  IMAGEID
+kthena-controller-manager-6f66d878d6-5cdrj   ghcr.io/volcano-sh/kthena-controller-manager:dev-014   docker.io/library/import-2026-11-28@sha256:0b3913b5a9ffda27999f53883e4d3b5276012e41c416dd749f226a2c76fd5feb
+== ModelServing CRD on the Karmada API server
+customresourcedefinition.apiextensions.k8s.io/modelservings.workload.serving.volcano.sh serverside-applied

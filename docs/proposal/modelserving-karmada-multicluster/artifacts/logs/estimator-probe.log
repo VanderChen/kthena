@@ -1,0 +1,18 @@
+# karmada 6d007132ec5112d2eed41b602d4aeeebaf96f4fc, go version go1.27.3 linux/amd64
+# go test ./pkg/estimator/server/ -run TestK014ProbeAccurateEstimator -v -count=1
+K014 accurate | frag(2 nodes x 2 GPU) | 4x1GPU(entry1+3 workers) | replicas(sum=4GPU)=0 err=<nil>; replicas(maxPod=1GPU)=4 err=<nil>; componentSets=1 err=<nil>
+K014 accurate | frag(2 nodes x 2 GPU) | 3GPU+1GPU(entry+1 worker) | replicas(sum=4GPU)=0 err=<nil>; replicas(maxPod=3GPU)=0 err=<nil>; componentSets=0 err=<nil>
+K014 accurate | big(1 node x 8 GPU) | 4x1GPU(entry1+3 workers) | replicas(sum=4GPU)=2 err=<nil>; replicas(maxPod=1GPU)=8 err=<nil>; componentSets=2 err=<nil>
+K014 accurate | big(1 node x 8 GPU) | 3GPU+1GPU(entry+1 worker) | replicas(sum=4GPU)=2 err=<nil>; replicas(maxPod=3GPU)=2 err=<nil>; componentSets=2 err=<nil>
+ok  	github.com/karmada-io/karmada/pkg/estimator/server	0.097s
+# go test ./pkg/estimator/client/ -run TestK014ProbeGeneralEstimator -v -count=1
+K014 general | 4x1GPU(entry1+3 workers) | replicas(sum)=[{frag(2 nodes x 2 GPU) 1 []} {big(1 node x 8 GPU) 2 []}] err=<nil> | replicas(maxPod)=[{frag(2 nodes x 2 GPU) 4 []} {big(1 node x 8 GPU) 8 []}] err=<nil> | componentSets=[{frag(2 nodes x 2 GPU) 1} {big(1 node x 8 GPU) 2}] err=<nil>
+K014 general | 3GPU+1GPU(entry+1 worker) | replicas(sum)=[{frag(2 nodes x 2 GPU) 1 []} {big(1 node x 8 GPU) 2 []}] err=<nil> | replicas(maxPod)=[{frag(2 nodes x 2 GPU) 1 []} {big(1 node x 8 GPU) 2 []}] err=<nil> | componentSets=[{frag(2 nodes x 2 GPU) 1} {big(1 node x 8 GPU) 2}] err=<nil>
+ok  	github.com/karmada-io/karmada/pkg/estimator/client	0.026s
+
+# go test ./pkg/controllers/status/ -run TestK014ProbeG1DefaultResourceModels -v -count=1
+K014 G1 | gate CustomizedClusterResourceModeling=true | default models=9 grades, dimensions of grade 0=[cpu memory] | allocatableModelings=[{0 0} {1 0} {2 0} {3 0} {4 0} {5 4} {6 0} {7 0} {8 0}]
+K014 G1 | default models, request 4cpu/16Gi (control) | maxAvailableReplicas=16 err=<nil>
+K014 G1 | default models, request 4cpu/16Gi/1gpu (a plain 1-GPU pod) | maxAvailableReplicas=0 err=<nil>
+K014 G1 | resourceModels cleared, request 4cpu/16Gi/1gpu | maxAvailableReplicas=16 err=<nil>
+ok  	github.com/karmada-io/karmada/pkg/controllers/status	0.026s

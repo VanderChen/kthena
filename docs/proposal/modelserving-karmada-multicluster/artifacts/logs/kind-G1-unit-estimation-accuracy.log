@@ -1,0 +1,38 @@
+# G-1: option G, capacity-aware policy, resource models cleared, scheduler-estimator deployed for all three members
+# real capacity for shape s1 (4 Pods x 1 GPU): k014-m1 = 1 unit (2 nodes x 2 GPU), k014-m2 = 2, k014-m3 = 2
+resource models cleared: 0 0 0 bytes of allocatableModelings
+
+## u1 was left unscheduled by G-0b; it is retried by the scheduler when the clusters change
+u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+
+## create u2..u6 one at a time (25s apart)
+--- after u2:
+    estimates: [{k014-m1 0 []} {k014-m2 2 []} {k014-m3 2 []}]
+    u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    u2 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+--- after u3:
+    estimates: [{k014-m2 1 []} {k014-m3 2 []} {k014-m1 0 []}]
+    u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    u2 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+--- after u4:
+    estimates: [{k014-m1 0 []} {k014-m2 1 []} {k014-m3 1 []}]
+    u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    u2 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+    u4 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+--- after u5:
+    estimates: [{k014-m2 0 []} {k014-m3 1 []} {k014-m1 0 []}]
+    u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    u2 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+    u4 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u5 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+--- after u6:
+    estimates: [{k014-m1 0 []} {k014-m2 0 []} {k014-m3 0 []}]
+    u1 -> [k014-m1] Scheduled | k014-m1: Healthy pods{Readyx4}
+    u2 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u3 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+    u4 -> [k014-m2] Scheduled | k014-m2: Healthy pods{Readyx4}
+    u5 -> [k014-m3] Scheduled | k014-m3: Healthy pods{Readyx4}
+    u6 -> [none] NOT-scheduled(failed to select clusters: no enough resource when selecting 1 cluster)
